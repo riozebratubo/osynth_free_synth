@@ -184,6 +184,7 @@ qt_add_qml_module(
     SOURCES src/translator.cpp
     SOURCES src/translator.h
     SOURCES src/apputils.h src/apputils.cpp
+    SOURCES src/nativefiledialog.h src/nativefiledialog.cpp
     SOURCES src/graphicscaps.h src/graphicscaps.cpp
     QML_FILES qml/WindowStateSaver.qml
     QML_FILES qml/SpinBoxDouble.qml
@@ -351,6 +352,39 @@ if (WIN32)
   set(CONDITIONAL_SIMPLEBLE "simpleble::simpleble")
 endif()
 
+# Native File Dialog (nfd/) — the platform's own open/save dialogs, wrapped by
+# src/nativefiledialog.cpp. Built on Windows and Linux only: Android picks files
+# through the Storage Access Framework and the rest stay on the QML FileDialog,
+# and NFD_AVAILABLE is what tells the wrapper which of the two it is.
+# LINUX is false for Android builds (CMAKE_SYSTEM_NAME is "Android" there).
+if (WIN32 OR LINUX)
+  if (WIN32)
+    set(NFD_PLATFORM_SOURCES nfd/nfd_win.cpp)
+  else()
+    # zenity: shells out to the binary, so nothing to find at configure time.
+    # The wrapper checks for it at runtime and falls back if it is missing.
+    # nfd_zenity.c is C, and the project only enables CXX by default.
+    enable_language(C)
+    set(NFD_PLATFORM_SOURCES nfd/nfd_zenity.c)
+  endif()
+
+  add_library(nfd STATIC nfd/nfd_common.cpp ${NFD_PLATFORM_SOURCES})
+  set_target_properties(nfd PROPERTIES C_STANDARD 11 POSITION_INDEPENDENT_CODE ON)
+  # nfd/       — the backends include "nfd_common.h"
+  # nfd/include — and both they and our wrapper include "nfd.h"
+  target_include_directories(nfd PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/nfd
+    ${CMAKE_CURRENT_SOURCE_DIR}/nfd/include
+  )
+  if (WIN32)
+    # IFileDialog/COM (ole32, uuid) and SHCreateItemFromParsingName (shell32).
+    target_link_libraries(nfd PRIVATE ole32 uuid shell32)
+  endif()
+
+  set(CONDITIONAL_NFD "nfd")
+  target_compile_definitions(${PROJECT_NAME} PRIVATE NFD_AVAILABLE)
+endif()
+
 target_link_libraries(
     ${PROJECT_NAME}
     PRIVATE Qt${QT_VERSION_MAJOR}::Multimedia
@@ -366,6 +400,7 @@ target_link_libraries(
     # simpleble::simpleble
     # simpleble::simpleble-c
     PRIVATE ${CONDITIONAL_SIMPLEBLE}
+    PRIVATE ${CONDITIONAL_NFD}
 )
 
 if (APPLE AND NOT IOS)

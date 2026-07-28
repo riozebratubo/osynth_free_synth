@@ -96,10 +96,19 @@ class App : public QObject {
   Q_INVOKABLE QString getFirmwareFileLocation();
   Q_INVOKABLE void emitFirmwareFileLoaded();
 
-  // Platform file flows (Windows nfd / Android SAF); desktop-Qt callers use the
-  // QML FileDialog fallback instead.
+  // Android SAF flows: no-ops on every other platform.
   Q_INVOKABLE void shareFile(const QString& fileFullPath);
   Q_INVOKABLE void selectFile(const QString& destination, const QString& extensions = "*");
+
+  // Native open/save pickers, via nfd. Available on Windows and Linux (there,
+  // only when zenity is installed); QML keeps its own FileDialog for the rest
+  // and must check hasNativeFileDialogs() before calling either. Both block
+  // until the dialog closes and answer "" when nothing was chosen. See
+  // src/nativefiledialog.h for the filter format.
+  Q_INVOKABLE bool hasNativeFileDialogs();
+  Q_INVOKABLE QString openFileDialog(const QString& filters, const QString& defaultPath);
+  Q_INVOKABLE QString saveFileDialog(const QString& filters, const QString& defaultPath,
+                                     const QString& defaultSuffix = QString());
 
   void setQmlEngine(QQmlEngine* engine);
 

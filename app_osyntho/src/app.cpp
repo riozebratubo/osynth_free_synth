@@ -12,6 +12,7 @@
 #include <QVariant>
 
 #include "src/apputils.h"
+#include "src/nativefiledialog.h"
 
 #if QT_CONFIG(permissions)
 #include <QPermissions>
@@ -336,10 +337,10 @@ void App::setFirmwareFileExtension(const QString& extension) { m_firmwareFileExt
 
 QString App::getFirmwareFileExtension() { return m_firmwareFileExtension; }
 
-// Desktop uses the QML FileDialog directly (see Main.qml). These platform
-// helpers implement Android's Storage Access Framework flows: shareFile exports
-// via ACTION_SEND + FileProvider, selectFile imports via ACTION_GET_CONTENT and
-// copies the picked stream to `destination`.
+// Android's Storage Access Framework flows: shareFile exports via ACTION_SEND +
+// FileProvider, selectFile imports via ACTION_GET_CONTENT and copies the picked
+// stream to `destination`. Desktop picks files through the native dialogs below,
+// or the QML FileDialog where those are unavailable (see Main.qml).
 void App::shareFile(const QString& fileFullPath) {
 #if defined(Q_OS_ANDROID)
   const QString ext = QFileInfo(fileFullPath).suffix().toLower();
@@ -495,6 +496,17 @@ void App::selectFile(const QString& destination, const QString& extensions) {
   Q_UNUSED(extensions);
   emit selectFileCanceled();
 #endif
+}
+
+bool App::hasNativeFileDialogs() { return NativeFileDialog::isAvailable(); }
+
+QString App::openFileDialog(const QString& filters, const QString& defaultPath) {
+  return NativeFileDialog::openFile(filters, defaultPath);
+}
+
+QString App::saveFileDialog(const QString& filters, const QString& defaultPath,
+                            const QString& defaultSuffix) {
+  return NativeFileDialog::saveFile(filters, defaultPath, defaultSuffix);
 }
 
 void App::updateConnectedBluetoothDevice(const QString& name, const QString& address) {

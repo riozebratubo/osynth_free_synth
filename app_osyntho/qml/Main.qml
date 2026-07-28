@@ -89,12 +89,35 @@ ApplicationWindow {
         UI.fontSize = App.setting("app_font_size")
     }
 
-    // ---- Backup / restore (Android SAF via App, Qt dialog elsewhere) ----
+    // ---- File pickers ----
+    // Three routes, in the order the functions below test them: Android has no
+    // picker of its own and goes through the SAF flows in App; Windows and Linux
+    // raise the platform's real dialog through nfd (App.openFileDialog /
+    // App.saveFileDialog, which block and answer "" when nothing was chosen);
+    // everything else — macOS, and a Linux box without zenity — keeps the Qt
+    // FileDialogs declared further down. Sampled once: nothing about it can
+    // change while the app runs.
+    readonly property bool nativePickers: App.hasNativeFileDialogs()
+    readonly property url documentsFolder: StandardPaths.standardLocations(StandardPaths.DocumentsLocation)[0]
+    readonly property url downloadsFolder: StandardPaths.standardLocations(StandardPaths.DownloadLocation)[0]
+
+    // ---- Backup / restore ----
     function shareBackup() {
-        if (App.isAndroid())
+        if (App.isAndroid()) {
             App.shareFile(App.getDatabaseFileLocation())
-        else
+        } else if (nativePickers) {
+            const path = App.saveFileDialog("db", downloadsFolder, "db")
+            if (path.length > 0) writeBackupTo(path)
+        } else {
             backupSaveDialog.open()
+        }
+    }
+
+    function writeBackupTo(path) {
+        if (App.saveBackupTo(path))
+            toast.show(t.t("Backup saved."), 3000)
+        else
+            toast.show(t.t("Could not write the backup file."), 4000)
     }
 
     function restoreBackup() {
@@ -102,6 +125,9 @@ ApplicationWindow {
             App.forceCloseDatabase()
             pendingRestore = true
             App.selectFile(App.getDatabaseFileLocation(), "db")
+        } else if (nativePickers) {
+            const path = App.openFileDialog("db", downloadsFolder)
+            if (path.length > 0) App.restoreBackupFrom(path)
         } else {
             backupRestoreDialog.open()
         }
@@ -134,6 +160,11 @@ ApplicationWindow {
             const path = App.exportFileLocation(fileName)
             if (App.writeTextFile(path, text)) App.shareFile(path)
             else toast.show(t.t("Could not write the file."), 4000)
+        } else if (nativePickers) {
+            // The dialog blocks, so the text needs no holding onto — the answer
+            // is already in hand by the time it returns.
+            const path = App.saveFileDialog("json", documentsFolder + "/" + fileName, "json")
+            if (path.length > 0) writeExportTo(path, text)
         } else {
             pendingExportText = text
             jsonSaveDialog.selectedFile = jsonSaveDialog.currentFolder + "/" + fileName
@@ -141,27 +172,45 @@ ApplicationWindow {
         }
     }
 
+    function writeExportTo(path, text) {
+        if (App.writeTextFile(path, text))
+            toast.show(t.t("Exported."), 3000)
+        else
+            toast.show(t.t("Could not write the file."), 4000)
+    }
+
     function importJson() {
         if (App.isAndroid()) {
             pendingJsonImport = true
             App.selectFile(jsonImportPath, "json")
+        } else if (nativePickers) {
+            const path = App.openFileDialog("json", documentsFolder)
+            if (path.length > 0) loadImportFrom(path)
         } else {
             jsonOpenDialog.open()
         }
     }
 
+    // readTextFile() answers "" for both an unreadable file and an empty one, so
+    // the message names both rather than asserting the wrong one.
+    function loadImportFrom(path) {
+        const text = App.readTextFile(path)
+        if (text.length > 0) UI.jsonImported(text)
+        else toast.show(t.t("That file is empty, or could not be read."), 4000)
+    }
+
+    // Fallback pickers, used where nativePickers is false. Left non-native
+    // (DontUseNativeDialog) on purpose: the platforms that have a native dialog
+    // worth showing now reach it through nfd instead of through Qt.
     FileDialog {
         id: jsonSaveDialog
         fileMode: FileDialog.SaveFile
         options: FileDialog.DontUseNativeDialog
         defaultSuffix: "json"
-        currentFolder: StandardPaths.standardLocations(StandardPaths.DocumentsLocation)[0]
+        currentFolder: mainWindow.documentsFolder
         nameFilters: [t.t("Patch files (*.json)"), t.t("All files (*)")]
         onAccepted: {
-            if (App.writeTextFile(selectedFile, mainWindow.pendingExportText))
-                toast.show(t.t("Exported."), 3000)
-            else
-                toast.show(t.t("Could not write the file."), 4000)
+            writeExportTo(selectedFile, mainWindow.pendingExportText)
             mainWindow.pendingExportText = ""
         }
         onRejected: mainWindow.pendingExportText = ""
@@ -171,37 +220,25 @@ ApplicationWindow {
         id: jsonOpenDialog
         fileMode: FileDialog.OpenFile
         options: FileDialog.DontUseNativeDialog
-        currentFolder: StandardPaths.standardLocations(StandardPaths.DocumentsLocation)[0]
+        currentFolder: mainWindow.documentsFolder
         nameFilters: [t.t("Patch files (*.json)"), t.t("All files (*)")]
-        onAccepted: {
-            const text = App.readTextFile(selectedFile)
-            // readTextFile() answers "" for both an unreadable file and an
-            // empty one, so the message names both rather than asserting the
-            // wrong one.
-            if (text.length > 0) UI.jsonImported(text)
-            else toast.show(t.t("That file is empty, or could not be read."), 4000)
-        }
+        onAccepted: loadImportFrom(selectedFile)
     }
 
     FileDialog {
         id: backupSaveDialog
         fileMode: FileDialog.SaveFile
         options: FileDialog.DontUseNativeDialog
-        currentFolder: StandardPaths.standardLocations(StandardPaths.DownloadLocation)[0]
+        currentFolder: mainWindow.downloadsFolder
         nameFilters: [t.t("Database (*.db)"), t.t("All files (*)")]
-        onAccepted: {
-            if (App.saveBackupTo(selectedFile))
-                toast.show(t.t("Backup saved."), 3000)
-            else
-                toast.show(t.t("Could not write the backup file."), 4000)
-        }
+        onAccepted: writeBackupTo(selectedFile)
     }
 
     FileDialog {
         id: backupRestoreDialog
         fileMode: FileDialog.OpenFile
         options: FileDialog.DontUseNativeDialog
-        currentFolder: StandardPaths.standardLocations(StandardPaths.DownloadLocation)[0]
+        currentFolder: mainWindow.downloadsFolder
         nameFilters: [t.t("Database (*.db)"), t.t("All files (*)")]
         onAccepted: App.restoreBackupFrom(selectedFile)
     }
@@ -226,10 +263,7 @@ ApplicationWindow {
             // the file to the destination we asked for, so read that.
             if (pendingJsonImport) {
                 pendingJsonImport = false
-                const text = App.readTextFile(mainWindow.jsonImportPath)
-                // See the note in jsonOpenDialog: "" means empty or unreadable.
-                if (text.length > 0) UI.jsonImported(text)
-                else toast.show(t.t("That file is empty, or could not be read."), 4000)
+                loadImportFrom(mainWindow.jsonImportPath)
                 return
             }
             if (pendingRestore) {
