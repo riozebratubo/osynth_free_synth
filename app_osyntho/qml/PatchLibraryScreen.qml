@@ -15,6 +15,16 @@ Item {
     function refresh() { patchList = Synth.patches(-1) }
     Component.onCompleted: refresh()
 
+    Connections {
+        target: UI
+        // Answers this page's Import button only; the Presets page has one of
+        // its own, and both pages are alive in the SwipeView at the same time.
+        function onJsonImported(page, text) {
+            if (page !== "library") return
+            if (Synth.importPatchesToLibrary(text).ok) screen.refresh()
+        }
+    }
+
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: 12
@@ -29,6 +39,15 @@ Item {
                 color: Material.foreground
                 elide: Label.ElideRight
                 Layout.fillWidth: true
+            }
+            Button {
+                text: t.t("Import…")
+                // Stores the file's patches here and leaves the live sound
+                // alone — applying one is the Presets page's Import. Needs no
+                // connection either: the library is the app's own database.
+                onClicked: UI.importJsonRequested("library")
+                ToolTip.visible: hovered
+                ToolTip.text: t.t("Import patches from a JSON file into this library, without playing them")
             }
             Button {
                 text: t.t("Export all…")

@@ -38,9 +38,11 @@ Item {
 
     Connections {
         target: UI
-        // This page owns the Import button, so it is the one that consumes the
-        // picked file. The name seeds the save row below, ready to store it.
-        function onJsonImported(text) {
+        // Only this page's own Import button — the Lib page has one that stores
+        // to the app's library instead, and both pages are alive at once. The
+        // name seeds the save row below, ready to store it.
+        function onJsonImported(page, text) {
+            if (page !== "preset") return
             const result = Synth.importPatchJson(text)
             if (result.ok && result.name.length > 0) nameField.text = result.name
         }
@@ -66,7 +68,7 @@ Item {
                 // Applies the file to the live sound; the save row below then
                 // writes it to a slot, which is the synth's own step.
                 enabled: Synth.connected && Synth.ready
-                onClicked: UI.importJsonRequested()
+                onClicked: UI.importJsonRequested("preset")
             }
             ToolButton {
                 text: t.t("Refresh")

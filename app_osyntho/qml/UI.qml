@@ -67,10 +67,16 @@ QtObject {
     // does for the database backup. `suggestedName` is a bare base name — the
     // shell makes it safe for a file system and adds the extension.
     signal exportJsonRequested(string text, string suggestedName)
-    signal importJsonRequested()
-    // A picked file's contents, answering importJsonRequested(). Only the page
-    // that asked should act on it — today that is PresetsScreen alone.
-    signal jsonImported(string text)
+    // `page` names who is asking, and comes back on jsonImported below. Both
+    // importing pages sit in the same SwipeView and are alive at once, so a
+    // bare "a file was picked" would be acted on by both — the file would be
+    // pushed to the synth *and* stored, whichever button was pressed. (Not
+    // called `target`: inside a Connections handler that would shadow the
+    // element's own `target` property.)
+    signal importJsonRequested(string page)
+    // A picked file's contents, answering importJsonRequested(): "preset" for
+    // PresetsScreen (applies it), "library" for PatchLibraryScreen (stores it).
+    signal jsonImported(string page, string text)
 
     signal restoreBackupRequested()
     signal shareBackupRequested()

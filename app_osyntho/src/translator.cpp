@@ -266,6 +266,16 @@ Translator::Translator() {
   pt["Applied %1 parameters."] = "%1 parâmetros aplicados.";
   pt["Applied %1 parameters; %2 in the file do not apply to this synth."] =
       "%1 parâmetros aplicados; %2 do arquivo não se aplicam a este sintetizador.";
+  // Importing into the library (PatchLibraryScreen.qml): stored, never played.
+  pt["Import patches from a JSON file into this library, without playing them"] =
+      "Importar patches de um arquivo JSON para esta biblioteca, sem tocá-los";
+  pt["Imported patch"] = "Patch importado";
+  pt["Nothing in that file could be added to the library."] =
+      "Nada nesse arquivo pôde ser adicionado à biblioteca.";
+  pt["Added \"%1\" to the library."] = "\"%1\" adicionado à biblioteca.";
+  pt["Added %1 patches to the library."] = "%1 patches adicionados à biblioteca.";
+  pt["Added %1 patches to the library; %2 skipped."] =
+      "%1 patches adicionados à biblioteca; %2 ignorados.";
 
   // ── Patch library (PatchLibraryScreen.qml) ─────────────────────────────
   pt["Patch library"] = "Biblioteca de patches";

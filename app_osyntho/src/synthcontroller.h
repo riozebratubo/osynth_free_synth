@@ -3,6 +3,7 @@
 
 #include <QByteArray>
 #include <QHash>
+#include <QJsonDocument>
 #include <QJsonObject>
 #include <QList>
 #include <QObject>
@@ -259,6 +260,10 @@ class SynthController : public QObject, public DatabaseClient, public SettingsCl
   // Parses a patch file and pushes it to the synth. Returns
   // { ok, error, name }; the applied/skipped counts arrive as a showInfo().
   Q_INVOKABLE QVariantMap importPatchJson(const QString& text);
+  // Parses a patch file and stores every patch it holds in the local library,
+  // leaving the live sound alone — the Lib page's Import, as against the
+  // Presets page's, which applies. Returns { ok, error, imported, skipped }.
+  Q_INVOKABLE QVariantMap importPatchesToLibrary(const QString& text);
 
   static QString engineNameFor(int engine);
 
@@ -506,6 +511,12 @@ class SynthController : public QObject, public DatabaseClient, public SettingsCl
                               int engine,
                               const QString& created,
                               const QList<QPair<int, double>>& params) const;
+  // Shape detection, shared by the two import routes: a file holds one patch,
+  // a library envelope, or a bare array. Answers the patch objects in file
+  // order, skipping anything without a "params" array.
+  static QList<QJsonObject> patchObjectsFrom(const QJsonDocument& doc);
+  // One patch object's parameters, minus what a patch must never carry.
+  static QList<NamedParam> namedParamsFrom(const QJsonObject& patch);
   void resolveAndPushImport(const QList<NamedParam>& items);
 
   // Cached preset lists per engine, and accumulation across chunked frames.

@@ -1411,6 +1411,47 @@ void SynthController::resolveAndPushImport(const QList<NamedParam>& items) {
   }
 }
 
+// Accept a single patch, the library envelope, or a bare array of patches. The
+// two importers differ only in what they do with these: push the first, or
+// store them all.
+QList<QJsonObject> SynthController::patchObjectsFrom(const QJsonDocument& doc) {
+  QList<QJsonObject> out;
+  const auto take = [&out](const QJsonArray& arr) {
+    for (const QJsonValue& v : arr) {
+      const QJsonObject o = v.toObject();
+      if (o.value("params").isArray()) out.append(o);
+    }
+  };
+  if (doc.isArray()) {
+    take(doc.array());
+  } else if (doc.isObject()) {
+    const QJsonObject root = doc.object();
+    if (root.value("patches").isArray())
+      take(root.value("patches").toArray());
+    else if (root.value("params").isArray())
+      out.append(root);
+  }
+  return out;
+}
+
+// Actions are dropped here, on the way in, so neither route can be made to
+// fire a drum or overwrite a preset slot by a hand-written file.
+QList<SynthController::NamedParam> SynthController::namedParamsFrom(const QJsonObject& patch) {
+  QList<NamedParam> items;
+  const QJsonArray arr = patch.value("params").toArray();
+  for (const QJsonValue& v : arr) {
+    const QJsonObject o = v.toObject();
+    if (!o.value("value").isDouble()) continue;
+    NamedParam item;
+    item.name = o.value("name").toString();
+    item.id = o.value("id").isDouble() ? o.value("id").toInt() : -1;
+    item.value = o.value("value").toDouble();
+    if (isNotPatchMaterial(item.name)) continue;  // never replay an action
+    items.append(item);
+  }
+  return items;
+}
+
 QVariantMap SynthController::importPatchJson(const QString& text) {
   // Reported as a toast as well as returned: every caller wants it shown, and
   // showError is already wired to one.
@@ -1424,27 +1465,12 @@ QVariantMap SynthController::importPatchJson(const QString& text) {
   if (err.error != QJsonParseError::NoError)
     return fail(Translator::instance().t("That file is not valid JSON."));
 
-  // Accept a single patch, the library envelope, or a bare array of patches —
-  // the last two hold more than one, and importing means "push one to the
-  // synth", so the first is taken and the count is reported.
-  QJsonObject patch;
-  int total = 1;
-  if (doc.isArray()) {
-    const QJsonArray arr = doc.array();
-    total = arr.size();
-    if (!arr.isEmpty()) patch = arr.first().toObject();
-  } else if (doc.isObject()) {
-    const QJsonObject root = doc.object();
-    if (root.value("patches").isArray()) {
-      const QJsonArray arr = root.value("patches").toArray();
-      total = arr.size();
-      if (!arr.isEmpty()) patch = arr.first().toObject();
-    } else {
-      patch = root;
-    }
-  }
-  if (patch.isEmpty() || !patch.value("params").isArray())
-    return fail(Translator::instance().t("That file holds no patch."));
+  // A file may hold more than one patch, and importing here means "push one to
+  // the synth", so the first is taken and the count is reported.
+  const QList<QJsonObject> objects = patchObjectsFrom(doc);
+  if (objects.isEmpty()) return fail(Translator::instance().t("That file holds no patch."));
+  const QJsonObject patch = objects.first();
+  const int total = objects.size();
 
   const int version = patch.value("version").toInt(0);
   if (version > kPatchJsonVersion)
@@ -1452,18 +1478,7 @@ QVariantMap SynthController::importPatchJson(const QString& text) {
                                           QString::number(version),
                                           QString::number(kPatchJsonVersion)));
 
-  QList<NamedParam> items;
-  const QJsonArray arr = patch.value("params").toArray();
-  for (const QJsonValue& v : arr) {
-    const QJsonObject o = v.toObject();
-    if (!o.value("value").isDouble()) continue;
-    NamedParam item;
-    item.name = o.value("name").toString();
-    item.id = o.value("id").isDouble() ? o.value("id").toInt() : -1;
-    item.value = o.value("value").toDouble();
-    if (isNotPatchMaterial(item.name)) continue;  // never replay an action
-    items.append(item);
-  }
+  const QList<NamedParam> items = namedParamsFrom(patch);
   if (items.isEmpty()) return fail(Translator::instance().t("That file holds no patch."));
 
   const QString name = patch.value("name").toString();
@@ -1487,6 +1502,99 @@ QVariantMap SynthController::importPatchJson(const QString& text) {
                                             QString::number(total)));
   }
   return QVariantMap{{"ok", true}, {"error", QString()}, {"name", name}};
+}
+
+// The Lib page's import: every patch in the file is stored, and nothing is
+// sent to the synth. A library export is a collection, so importing one gives
+// the collection back rather than only its first entry.
+//
+// A stored row is (param id, value) — that is what loadPatch() pushes later —
+// so the names in the file have to be resolved to ids now. That is only
+// possible against the live parameter table, which describes the connected
+// synth's current engine and nothing else; for any other engine, or with no
+// synth at all, the file's own id is kept. It is what the exporter wrote and
+// is right for a round trip on the same firmware build, and loadPatch()
+// resolves nothing either way.
+QVariantMap SynthController::importPatchesToLibrary(const QString& text) {
+  const auto fail = [this](const QString& why) {
+    emit showError(why);
+    return QVariantMap{{"ok", false}, {"error", why}, {"imported", 0}, {"skipped", 0}};
+  };
+
+  QJsonParseError err{};
+  const QJsonDocument doc = QJsonDocument::fromJson(text.toUtf8(), &err);
+  if (err.error != QJsonParseError::NoError)
+    return fail(Translator::instance().t("That file is not valid JSON."));
+
+  const QList<QJsonObject> objects = patchObjectsFrom(doc);
+  if (objects.isEmpty()) return fail(Translator::instance().t("That file holds no patch."));
+
+  int imported = 0;
+  int skipped = 0;
+  QString lastName;
+  for (const QJsonObject& patch : objects) {
+    if (patch.value("version").toInt(0) > kPatchJsonVersion) {
+      ++skipped;
+      continue;
+    }
+
+    // An engine-less file is taken as the live engine: the row needs one, and
+    // the ids in it were written by whatever was playing when it was exported.
+    const int engine = patch.value("engine").isDouble() ? patch.value("engine").toInt() : m_engine;
+    // Unlike a push, which is gone once it lands, a row stays — and Load sends
+    // its engine number straight to the synth. A number this build has no
+    // engine for is refused rather than stored.
+    if (engine < ENG_SUBTRACTIVE || engine > ENG_WAVETABLE) {
+      ++skipped;
+      continue;
+    }
+    const bool byName = m_ready && engine == m_engine;
+
+    const QList<NamedParam> items = namedParamsFrom(patch);
+    QList<QPair<int, double>> params;
+    for (const NamedParam& item : items) {
+      // With a table to resolve against, the name decides — and a name this
+      // build does not know is dropped rather than followed to the file's id,
+      // which on another firmware is some unrelated parameter. Without one,
+      // the file's id is all there is.
+      const int id =
+          (byName && !item.name.isEmpty()) ? paramIdForName(item.name) : item.id;
+      if (id < 0) continue;
+      // A nameless entry can still land on an action. pushParams() drops those
+      // at load time, but they have no business in a stored row either.
+      if (byName && isNotPatchMaterial(paramName(id))) continue;
+      params.append({id, item.value});
+    }
+    if (params.isEmpty()) {
+      ++skipped;
+      continue;
+    }
+
+    QString name = patch.value("name").toString().trimmed();
+    if (name.isEmpty()) name = Translator::instance().t("Imported patch");
+    if (db().insertPatch(name, engine, params) > 0) {
+      ++imported;
+      lastName = name;
+    } else {
+      ++skipped;
+    }
+  }
+
+  if (imported == 0)
+    return fail(Translator::instance().t("Nothing in that file could be added to the library."));
+
+  if (imported == 1 && skipped == 0) {
+    emit showInfo(Translator::instance().ts("Added \"%1\" to the library.", lastName));
+  } else if (skipped > 0) {
+    emit showInfo(Translator::instance().ts("Added %1 patches to the library; %2 skipped.",
+                                            QString::number(imported),
+                                            QString::number(skipped)));
+  } else {
+    emit showInfo(Translator::instance().ts("Added %1 patches to the library.",
+                                            QString::number(imported)));
+  }
+  return QVariantMap{
+      {"ok", true}, {"error", QString()}, {"imported", imported}, {"skipped", skipped}};
 }
 
 /* ======================================================================== */

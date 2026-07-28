@@ -138,6 +138,10 @@ ApplicationWindow {
     property string pendingExportText: ""
     // True while a native "import patch" file pick is in flight (Android).
     property bool pendingJsonImport: false
+    // Which page asked for the import now in flight ("preset" / "library"), so
+    // the file goes back to that one alone. Set by importJson() on every route
+    // and read by loadImportFrom(); only one pick can be open at a time.
+    property string jsonImportTarget: ""
     // Where an Android import is staged; the picker copies the chosen file here.
     readonly property string jsonImportPath: App.exportFileLocation("import.json")
 
@@ -179,7 +183,8 @@ ApplicationWindow {
             toast.show(t.t("Could not write the file."), 4000)
     }
 
-    function importJson() {
+    function importJson(page) {
+        jsonImportTarget = page
         if (App.isAndroid()) {
             pendingJsonImport = true
             App.selectFile(jsonImportPath, "json")
@@ -195,7 +200,7 @@ ApplicationWindow {
     // the message names both rather than asserting the wrong one.
     function loadImportFrom(path) {
         const text = App.readTextFile(path)
-        if (text.length > 0) UI.jsonImported(text)
+        if (text.length > 0) UI.jsonImported(jsonImportTarget, text)
         else toast.show(t.t("That file is empty, or could not be read."), 4000)
     }
 
@@ -248,7 +253,7 @@ ApplicationWindow {
         function onShareBackupRequested() { shareBackup() }
         function onRestoreBackupRequested() { restoreBackup() }
         function onExportJsonRequested(text, suggestedName) { exportJson(text, suggestedName) }
-        function onImportJsonRequested() { importJson() }
+        function onImportJsonRequested(page) { importJson(page) }
         function onSettingsRequested() { mainStackView.push("SettingsScreen.qml", {}) }
         function onSelectDeviceRequested() { mainStackView.push("BluetoothDeviceSelectorScreen.qml", {}) }
         function onUpdateFirmwareRequested(extension) {
