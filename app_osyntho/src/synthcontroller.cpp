@@ -9,6 +9,7 @@
 #include <QJsonObject>
 #include <QJsonValue>
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <utility>
@@ -995,11 +996,18 @@ void SynthController::setParam(int id, double value) {
 
 void SynthController::flushPendingSets() {
   if (m_pendingSets.isEmpty()) return;
+  // Ascending id, not QHash order. QHash iterates arbitrarily (and with a
+  // per-process random seed), so the same batch packed differently on every
+  // run — while onSetBusy() re-queues a dropped frame at the *head* precisely
+  // because the order writes land in can matter. Ascending id is the order the
+  // firmware registers them in, so it is the one worth being deterministic on.
+  QList<quint16> ids = m_pendingSets.keys();
+  std::sort(ids.begin(), ids.end());
   const int perFrame = maxSetPairsPerFrame();
   QByteArray payload;
   int pairs = 0;
-  for (auto it = m_pendingSets.constBegin(); it != m_pendingSets.constEnd(); ++it) {
-    appendSetParam(payload, it.key(), it.value());
+  for (quint16 id : std::as_const(ids)) {
+    appendSetParam(payload, id, m_pendingSets.value(id));
     if (++pairs >= perFrame) {
       queueSetFrame(payload);
       payload.clear();
@@ -1055,20 +1063,38 @@ void SynthController::noteOff(int note) {
   send(OP_NOTE_OFF, payloadNoteOff(quint8(note)), false);
 }
 
-// Panic. Two things make the obvious loop over all 128 notes wrong: the
-// firmware's command queue is four frames deep and answers BUSY *by dropping
-// the frame*, so a 128-frame blast would mostly evaporate — and the notes that
-// survived would be the arbitrary few that happened to land between drains,
-// which is the opposite of what a panic button is for. Send only what we
-// believe is sounding, and pace it like the SET_PARAM queue does.
+// Panic: every note, not only the ones the app believes it started.
+//
+// The obvious 128-frame blast is still wrong — the firmware's command queue is
+// four deep and answers BUSY *by dropping the frame*, so most of it would
+// evaporate and the survivors would be the arbitrary few that landed between
+// drains. So it is paced like the SET_PARAM queue.
+//
+// But it cannot be narrowed to m_heldNotes either, which is what a panic is
+// for: noteOff() removes a note from that set and then writes
+// *without response*, so a note-off the queue drops leaves a note sounding
+// that nothing is tracking any more. Notes started over MIDI or left by the
+// arpeggiator are outside the set for the same reason. The believed-held ones
+// go first so the audible ones stop within a few frames; the rest follow as a
+// sweep.
 void SynthController::allNotesOff() {
-  const QList<int> held = m_heldNotes.values();
+  const QSet<int> held = m_heldNotes;
   m_heldNotes.clear();
-  for (int n : held) m_noteOffQueue.append(n);
+  QList<int> ordered = held.values();
+  std::sort(ordered.begin(), ordered.end());
+  for (int n = 0; n < 128; ++n) {
+    if (!held.contains(n)) ordered.append(n);
+  }
+  m_noteOffQueue = ordered;  // replaces any sweep already in flight
+  emit allNotesOffSent();
   drainNoteOffQueue();
 }
 
 void SynthController::drainNoteOffQueue() {
+  // A sweep left over from a link that went down has nothing to send: the
+  // firmware runs voice_manager_all_notes_off() on disconnect anyway, and
+  // otherwise this would tick 128 times writing into a closed socket.
+  if (!m_connected) m_noteOffQueue.clear();
   if (m_noteOffQueue.isEmpty()) {
     m_noteOffTimer.stop();
     return;
@@ -1104,7 +1130,9 @@ void SynthController::setArp(int enable, int mode, int octaves, int division) {
   // into 1..5 before it is stored. Octaves and division are clamped by the
   // store, which conformValue() reproduces from the discovered range.
   mirrorLocal(QStringLiteral("arp.mode"), enable == 0 ? 0 : qBound(1, mode, 5));
-  mirrorLocal(QStringLiteral("arp.oct"), octaves);
+  // "arp.octaves", spelled exactly as seqarp.cpp registers it — an "arp.oct"
+  // here resolved to no id at all, so this mirror silently did nothing.
+  mirrorLocal(QStringLiteral("arp.octaves"), octaves);
   mirrorLocal(QStringLiteral("seq.div"), division);
 }
 

@@ -76,7 +76,8 @@ class App : public QObject {
   Q_INVOKABLE bool copyFileTo(const QString& from, const QString& to);
 
   Q_INVOKABLE QString getDatabaseFileLocation();
-  Q_INVOKABLE void saveBackupTo(const QString& fileFullPath);
+  // False if the backup could not be written, so QML can say so.
+  Q_INVOKABLE bool saveBackupTo(const QString& fileFullPath);
   Q_INVOKABLE void restoreBackupFrom(const QString& fileFullPath);
   Q_INVOKABLE void emitDatabaseRestored();
   Q_INVOKABLE void forceCloseDatabase();
@@ -134,6 +135,12 @@ class App : public QObject {
  signals:
   void databaseRestored();
   void firmwareFileLoaded();
+
+  // A setting was written through saveSetting(). setting() is a plain
+  // invokable with no change notification, so components that mirror a setting
+  // into a property (Keyboard, DrumPads) re-read on this instead of only
+  // sampling it once at creation.
+  void settingChanged(QString name);
 
   void fontAwesomeFontNameChanged();
   void fontAwesomeRegularFontNameChanged();

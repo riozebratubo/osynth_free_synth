@@ -27,8 +27,23 @@ Rectangle {
 
     // The same setting the keyboard uses, so both surfaces feel alike; it is
     // the velocity a centre hit produces.
-    readonly property int baseVelocity:
+    //
+    // App.setting() is a plain invokable, so this captures nothing and would
+    // otherwise be sampled once at creation — a velocity change in Settings
+    // never reached the pads until the app was restarted. Re-read on the write
+    // signal rather than on visibility: the pads are played from the computer
+    // keys while hidden, which is the whole point of having them there.
+    property int baseVelocity:
         Math.max(1, Math.min(127, parseInt(App.setting("keyboard_velocity")) || 100))
+
+    Connections {
+        target: App
+        function onSettingChanged(name) {
+            if (name === "keyboard_velocity")
+                root.baseVelocity = Math.max(1, Math.min(127,
+                    parseInt(App.setting("keyboard_velocity")) || 100))
+        }
+    }
 
     color: Material.theme === Material.Dark ? "#101010" : "#DDDDDD"
 

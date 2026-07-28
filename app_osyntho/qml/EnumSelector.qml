@@ -41,19 +41,26 @@ Item {
             model: root.meta.exists ? (root.meta.enumNames || []) : []
             property bool syncing: false
             onActivated: if (!syncing) Synth.setParam(root.paramId, currentIndex)
-            Component.onCompleted: {
-                syncing = true
-                currentIndex = Math.round(Synth.paramValue(root.paramId))
-                syncing = false
+
+            // Clamped into the model. The synth's own store clamps an enum to
+            // its registered range, so an out-of-range value should not reach
+            // us — but a firmware whose enum has grown or shrunk since the
+            // metadata was read, or a parameter lock carrying an older value,
+            // would otherwise park the box on an index that does not exist,
+            // where it shows no text at all and reports one on the next write.
+            function syncFrom(value) {
+                const n = combo.count
+                if (n <= 0) return
+                combo.syncing = true
+                combo.currentIndex = Math.max(0, Math.min(n - 1, Math.round(value)))
+                combo.syncing = false
             }
+
+            Component.onCompleted: syncFrom(Synth.paramValue(root.paramId))
             Connections {
                 target: Synth
                 function onParamChanged(id, value) {
-                    if (id === root.paramId) {
-                        combo.syncing = true
-                        combo.currentIndex = Math.round(value)
-                        combo.syncing = false
-                    }
+                    if (id === root.paramId) combo.syncFrom(value)
                 }
             }
         }

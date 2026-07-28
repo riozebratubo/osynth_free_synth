@@ -29,6 +29,21 @@ Item {
     property int pidMidiCh: -1
     ParamValue { id: chokeVal; paramId: root.pidChoke }
 
+    // KIT_INFO reports every slot the build compiles in, empty ones included —
+    // they come back with no name and note 0 (see SynthController::noteForSlot).
+    // A card for one of those is a blank title over "C-1" and four knobs that
+    // drive nothing, so they are dropped here, exactly as DrumPads greys them
+    // out. Reading Synth.kitSlots (a notifying property) is what makes this
+    // re-evaluate when the kit is swapped.
+    readonly property var populatedSlots: {
+        var out = []
+        var slots = Synth.kitSlots
+        for (var i = 0; i < slots.length; ++i) {
+            if (slots[i].name !== "") out.push(slots[i])
+        }
+        return out
+    }
+
     function refreshIds() {
         pidLevel = Synth.paramIdForName("drums.level")
         pidSend = Synth.paramIdForName("drums.send")
@@ -75,7 +90,7 @@ Item {
                             color: Material.foreground
                             Layout.alignment: Qt.AlignVCenter
                         }
-                        ComboBox {
+                        SyncedComboBox {
                             Layout.fillWidth: true
                             model: {
                                 var out = []
@@ -83,7 +98,7 @@ Item {
                                     out.push(Synth.kits[i].name)
                                 return out
                             }
-                            currentIndex: Synth.currentKit
+                            modelIndex: Synth.currentKit
                             enabled: Synth.kits.length > 1
                             onActivated: Synth.selectKit(currentIndex)
                         }
@@ -122,7 +137,7 @@ Item {
             }
 
             Label {
-                visible: Synth.kitSlots.length === 0
+                visible: root.populatedSlots.length === 0
                 width: panels.contentWidth
                 wrapMode: Text.WordWrap
                 opacity: 0.6
@@ -132,9 +147,9 @@ Item {
                           + "SD card.")
             }
 
-            // ---- one card per slot, tiled ---------------------------------
+            // ---- one card per populated slot, tiled -----------------------
             Repeater {
-                model: Synth.kitSlots
+                model: root.populatedSlots
 
                 delegate: Frame {
                     id: strip

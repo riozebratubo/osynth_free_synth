@@ -11,10 +11,15 @@ void Translator::setActiveLanguage(const QString& language) {
   const QString lang = language.toLower();
   if (languagesMap.contains(lang)) {
     currentTranslations = translations[languagesMap[lang]];
-    // qDebug() << ">>> set current language success!";
-    // qDebug() << ">>> current translations: " << currentTranslations;
     qDebug() << "App | Current language: " << lang;
+    return;
   }
+  // Any code with no table IS the source language (en): drop back to an empty
+  // map so t() returns the source strings. Leaving the previous table in place
+  // made pt_BR -> English a no-op — the app stayed in Portuguese, and only in
+  // that direction, which is why it read as "restart to apply".
+  currentTranslations.clear();
+  qDebug() << "App | Current language: source strings (" << lang << ")";
 }
 
 QString Translator::t(const QString& str) {
@@ -36,8 +41,10 @@ QString Translator::ts(const QString& str,
   return s;
 }
 
-Translator::Translator()
-  : currentTranslations{dummyTranslations} {
+// Starts empty, i.e. on the source strings, until setActiveLanguage() picks a
+// table. main() calls it with the stored force_app_language before the engine
+// loads any QML.
+Translator::Translator() {
   languagesMap = {{"pt_br", 0}};
 
   translations.append(QHash<QString, QString>{});
@@ -53,6 +60,7 @@ Translator::Translator()
   pt["Save data..."] = "Salvar dados...";
   pt["Restore data..."] = "Restaurar dados...";
   pt["Show keyboard"] = "Mostrar teclado";
+  pt["All notes off"] = "Silenciar todas as notas";
   pt["Select device..."] = "Selecionar dispositivo...";
   pt["Update firmware..."] = "Atualizar firmware...";
   pt["Settings"] = "Configurações";
@@ -70,6 +78,8 @@ Translator::Translator()
   pt["Firmware update is not available yet for osynth."] =
       "A atualização de firmware ainda não está disponível para o osynth.";
   pt["Backup restored."] = "Backup restaurado.";
+  pt["Backup saved."] = "Backup salvo.";
+  pt["Could not write the backup file."] = "Não foi possível gravar o arquivo de backup.";
   pt["Nothing to save yet — no parameters have been read."] =
       "Nada para salvar ainda — nenhum parâmetro foi lido.";
   pt["Could not save the patch."] = "Não foi possível salvar o patch.";
@@ -241,7 +251,8 @@ Translator::Translator()
   pt["Exported."] = "Exportado.";
   pt["Nothing to export."] = "Nada para exportar.";
   pt["Could not write the file."] = "Não foi possível gravar o arquivo.";
-  pt["Could not read the file."] = "Não foi possível ler o arquivo.";
+  pt["That file is empty, or could not be read."] =
+      "Esse arquivo está vazio ou não pôde ser lido.";
   pt["Connect to the synth first."] = "Conecte-se ao sintetizador primeiro.";
   pt["Loading preset %1 to read it…"] = "Carregando o preset %1 para lê-lo…";
   pt["That file is not valid JSON."] = "Esse arquivo não é um JSON válido.";

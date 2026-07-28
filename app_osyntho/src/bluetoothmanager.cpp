@@ -45,6 +45,21 @@ BluetoothManager::BluetoothManager(QObject* parent)
 }
 
 void BluetoothManager::initializeBt() {
+  // The user's switch is authoritative at every entry point that brings the
+  // stack up, not just in the constructor. startDeviceScan() calls in here
+  // whenever the manager is not running, so without this, opening the device
+  // selector with Bluetooth turned off silently restarted the scan and the
+  // auto-connect loop — and left m_enabled true for the rest of the session,
+  // behind a toggle still reading "off".
+  //
+  // Safe on the enable path: App::setBluetoothEnabled() writes the setting
+  // before it calls into the manager, and requestPermissions() only emits
+  // bluetoothAvailable() when the app-side flag is on.
+  if (Settings::instance().setting("bluetooth_enabled") == "false") {
+    qDebug() << "bt | Bt is disabled in settings; not initializing.";
+    return;
+  }
+
   bool btAllowed = hasAllBluetoothPermissions();
   if (btAllowed) {
     if (localDevice != nullptr) localDevice->deleteLater();

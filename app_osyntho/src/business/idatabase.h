@@ -54,7 +54,9 @@ class IDatabase {
   /* file paths / backup / lifecycle */
   virtual QString getDatabaseFileFolder() = 0;
   virtual QString getDatabaseFileFullPath() = 0;
-  virtual void saveDatabaseBackupTo(const QString& whereToFile) = 0;
+  // Replaces `whereToFile` if it exists. False on any failure, so the caller
+  // can tell the user rather than reporting a backup that never landed.
+  virtual bool saveDatabaseBackupTo(const QString& whereToFile) = 0;
   virtual void restoreDatabaseFrom(const QString& whereFromFile) = 0;
   virtual void forceCloseDatabase() = 0;
   virtual void forceOpenOrCreateDatabase() = 0;

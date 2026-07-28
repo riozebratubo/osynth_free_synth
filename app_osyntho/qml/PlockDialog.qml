@@ -24,9 +24,22 @@ Dialog {
         step = stepIndex
         choices = Synth.paramPickerList()
         picker.currentIndex = -1
+        picker.editText = ""
         pid = -1
         meta = ({})
         open()
+    }
+
+    // Adopt the parameter at `index` in the picker list. Shared by the two ways
+    // of choosing one — clicking the popup and typing the name — so they cannot
+    // drift apart.
+    function choose(index) {
+        if (index < 0 || index >= choices.length) return
+        pid = choices[index].id
+        meta = Synth.paramMeta(pid)
+        // Seed with the parameter's live value: a lock almost always starts as
+        // "what it sounds like now, but only on this step".
+        valueSlider.value = Synth.paramValue(pid)
     }
 
     title: t.t("Lock a parameter on step") + " " + (step + 1)
@@ -50,18 +63,28 @@ Dialog {
             editable: true
             // The list runs to a few hundred entries on a loaded patch, so let
             // the user type to narrow it rather than scroll.
-            onActivated: {
-                root.pid = currentValue
-                root.meta = Synth.paramMeta(root.pid)
-                // Seed with the parameter's live value: a lock almost always
-                // starts as "what it sounds like now, but only on this step".
-                valueSlider.value = Synth.paramValue(root.pid)
+            onActivated: (index) => root.choose(index)
+            // Enter in the editable field emits accepted(), NOT activated() —
+            // so handling only the latter meant the advertised "type the name"
+            // route selected nothing: `pid` stayed -1, which left the value
+            // slider hidden and the Add button dead with the name sitting
+            // right there in the box. find() resolves the typed text against
+            // the list; anything that matches nothing is left alone.
+            onAccepted: {
+                const i = find(editText, Qt.MatchFixedString)
+                if (i >= 0) {
+                    currentIndex = i
+                    root.choose(i)
+                }
             }
         }
 
         ColumnLayout {
             Layout.fillWidth: true
-            visible: root.pid > 0 && root.meta.exists === true
+            // >= 0, not > 0: master.volume is PID 0x0000, so a `> 0` gate left
+            // it selectable in the picker but unlockable — no slider, and the
+            // Add button dead. -1 is the "nothing picked yet" sentinel.
+            visible: root.pid >= 0 && root.meta.exists === true
             spacing: 2
 
             RowLayout {
@@ -103,7 +126,7 @@ Dialog {
         Button {
             Layout.fillWidth: true
             text: t.t("Add lock")
-            enabled: root.pid > 0
+            enabled: root.pid >= 0  // see the note above: PID 0 is master.volume
             highlighted: true
             onClicked: {
                 Synth.setPlock(root.step, root.pid, valueSlider.value)

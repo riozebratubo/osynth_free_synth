@@ -95,6 +95,16 @@ App::App(IDatabase& db, IBluetoothManager& btm, ISettings& st)
             bluetoothManager.write(data, withResponse);
           }, Qt::QueuedConnection);
 
+  // Read before requestPermissions(): on the already-Granted path (every run
+  // after the first) it emits bluetoothAvailable() synchronously, and the
+  // manager's onBluetoothAvailable() initialises the stack unconditionally.
+  // Reading these afterwards meant that emit tested the *header default*
+  // (true), so a user who had turned Bluetooth off still got a scanning radio
+  // behind an off toggle.
+  m_bluetoothEnabled = settingIsTrue("bluetooth_enabled");
+  m_bluetoothSelectedDeviceName = setting("bluetooth_selected_device_name");
+  m_bluetoothSelectedDeviceAddress = setting("bluetooth_selected_device_address");
+
   requestPermissions();
 
   // Global key filter for the computer-keyboard piano (desktop). Guarded so
@@ -121,10 +131,6 @@ App::App(IDatabase& db, IBluetoothManager& btm, ISettings& st)
     m_theme.setPrimaryBgColor(type == "dark" ? p.darkBgColor : p.lightBgColor);
     m_theme.setMaterialAccent(p.materialAccent);
   }
-
-  m_bluetoothEnabled = settingIsTrue("bluetooth_enabled");
-  m_bluetoothSelectedDeviceName = setting("bluetooth_selected_device_name");
-  m_bluetoothSelectedDeviceAddress = setting("bluetooth_selected_device_address");
 
   deleteTemporaryAppFiles();
 }
@@ -277,7 +283,9 @@ QString App::getFirmwareFileLocation() {
 
 void App::emitFirmwareFileLoaded() { emit firmwareFileLoaded(); }
 
-void App::saveBackupTo(const QString& fileFullPath) { database.saveDatabaseBackupTo(fileFullPath); }
+bool App::saveBackupTo(const QString& fileFullPath) {
+  return database.saveDatabaseBackupTo(fileFullPath);
+}
 
 void App::restoreBackupFrom(const QString& fileFullPath) {
   database.restoreDatabaseFrom(fileFullPath);
@@ -544,7 +552,13 @@ QString App::setting(const QString& name) const { return settings.setting(name);
 bool App::settingIsTrue(const QString& name) const { return settings.settingIsTrue(name); }
 
 int App::saveSetting(const QString& name, const QString& value) {
-  return settings.saveSetting(name, value);
+  const int saved = settings.saveSetting(name, value);
+  // setting() is a plain invokable, so a QML binding onto it captures nothing
+  // and never re-evaluates. This is the one funnel every write passes through,
+  // so it is where components are told to re-read — without it, changing e.g.
+  // the keyboard's base octave in Settings did nothing until an app restart.
+  if (saved) emit settingChanged(name);
+  return saved;
 }
 
 bool App::getBluetoothEnabled() const { return m_bluetoothEnabled; }
@@ -651,6 +665,13 @@ bool App::eventFilter(QObject* watched, QEvent* event) {
     // Don't steal keys from a focused text input (preset/patch name fields).
     if (not focusedObjectTakesText(QGuiApplication::focusObject())) {
       auto* ke = static_cast<QKeyEvent*>(event);
+      // A modified key is a shortcut, not a note. Ctrl+C / Ctrl+V / Ctrl+Z /
+      // Ctrl+S all land on mapped piano keys (C, V, Z, S), so without this the
+      // filter both sounded a note and swallowed the shortcut app-wide.
+      // Shift is deliberately let through: it is not a shortcut on its own,
+      // and holding it while playing must not go silent.
+      if (ke->modifiers() & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier))
+        return QObject::eventFilter(watched, event);
       // Checked first, and it fully shadows the upper octave's keys: with the
       // setting on, Q..I and the number row must not also emit semitones.
       if (settingIsTrue(QStringLiteral("keyboard_top_row_drums"))) {

@@ -239,7 +239,10 @@ Pane {
                         Text { text: t.t("Base octave"); color: Material.foreground }
                         SpinBox {
                             from: 0
-                            to: 8
+                            // The keyboard draws two octaves from this, so 7 is
+                            // the highest that stays inside MIDI 0..127; above
+                            // it the upper keys are silently dropped.
+                            to: 7
                             value: App.setting("keyboard_octave")
                             onValueModified: App.saveSetting("keyboard_octave", value)
                         }
@@ -384,6 +387,19 @@ Pane {
                                 App.saveSetting("bluetooth_use_selected", checked ? "true" : "false")
                                 if (!checked) App.setBluetoothSelectedDevice("", "")
                             }
+                            // The device selector turns this setting on when a
+                            // device is picked, and App.setting() is a plain
+                            // invokable that no binding tracks — so without
+                            // this, coming back from that screen left the
+                            // switch reading "off" over a setting that was on.
+                            Connections {
+                                target: App
+                                function onSettingChanged(name) {
+                                    if (name === "bluetooth_use_selected")
+                                        useSelectedSwitch.checked =
+                                            App.settingIsTrue("bluetooth_use_selected")
+                                }
+                            }
                         }
                         Text {
                             width: parent.width - 20
@@ -398,6 +414,11 @@ Pane {
                             Button {
                                 visible: useSelectedSwitch.checked
                                 text: t.t("Select device...")
+                                // The selector scans; with Bluetooth off there
+                                // is nothing for it to find, and letting it
+                                // start one would restart the radio behind the
+                                // switch above.
+                                enabled: App.bluetoothEnabled
                                 onClicked: mainStackView.push("BluetoothDeviceSelectorScreen.qml", {})
                             }
                             Button {

@@ -175,8 +175,11 @@ ApplicationWindow {
         nameFilters: [t.t("Patch files (*.json)"), t.t("All files (*)")]
         onAccepted: {
             const text = App.readTextFile(selectedFile)
+            // readTextFile() answers "" for both an unreadable file and an
+            // empty one, so the message names both rather than asserting the
+            // wrong one.
             if (text.length > 0) UI.jsonImported(text)
-            else toast.show(t.t("Could not read the file."), 4000)
+            else toast.show(t.t("That file is empty, or could not be read."), 4000)
         }
     }
 
@@ -186,7 +189,12 @@ ApplicationWindow {
         options: FileDialog.DontUseNativeDialog
         currentFolder: StandardPaths.standardLocations(StandardPaths.DownloadLocation)[0]
         nameFilters: [t.t("Database (*.db)"), t.t("All files (*)")]
-        onAccepted: App.saveBackupTo(selectedFile)
+        onAccepted: {
+            if (App.saveBackupTo(selectedFile))
+                toast.show(t.t("Backup saved."), 3000)
+            else
+                toast.show(t.t("Could not write the backup file."), 4000)
+        }
     }
 
     FileDialog {
@@ -219,8 +227,9 @@ ApplicationWindow {
             if (pendingJsonImport) {
                 pendingJsonImport = false
                 const text = App.readTextFile(mainWindow.jsonImportPath)
+                // See the note in jsonOpenDialog: "" means empty or unreadable.
                 if (text.length > 0) UI.jsonImported(text)
-                else toast.show(t.t("Could not read the file."), 4000)
+                else toast.show(t.t("That file is empty, or could not be read."), 4000)
                 return
             }
             if (pendingRestore) {

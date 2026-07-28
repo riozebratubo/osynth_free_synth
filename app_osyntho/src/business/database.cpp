@@ -505,8 +505,18 @@ QString Database::getDatabaseFileFolder() { return dbFileFolder; }
 
 QString Database::getDatabaseFileFullPath() { return dbFileFullPath; }
 
-void Database::saveDatabaseBackupTo(const QString& whereToFile) {
-  QFile::copy(dbFileFullPath, AppUtils::getFilePathFromCanonical(whereToFile));
+bool Database::saveDatabaseBackupTo(const QString& whereToFile) {
+  const QString whereTo = AppUtils::getFilePathFromCanonical(whereToFile);
+  // QFile::copy never overwrites, so exporting onto an existing file used to
+  // fail silently — and the caller had no return value to notice with. The
+  // picker is a SaveFile dialog, so the user has already agreed to replace it.
+  if (QFile::exists(whereTo) and not QFile::remove(whereTo)) {
+    qWarning() << "Db | Backup: cannot replace existing file:" << whereTo;
+    return false;
+  }
+  if (QFile::copy(dbFileFullPath, whereTo)) return true;
+  qWarning() << "Db | Backup: copy failed to:" << whereTo;
+  return false;
 }
 
 void Database::restoreDatabaseFrom(const QString& whereFromFile) {

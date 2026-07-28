@@ -27,8 +27,13 @@ class Translator : public QObject {
 
   QHash<QString, int> languagesMap;
   QVector<QHash<QString, QString>> translations;
-  QHash<QString, QString> dummyTranslations;
-  QHash<QString, QString>& currentTranslations;
+  // A value, deliberately, not a reference into `translations`. As a reference
+  // seeded from an empty "dummy" table, `currentTranslations = translations[n]`
+  // did not rebind it — it copy-assigned the language table *into* that empty
+  // table, so the fallback was destroyed by the first language switch and there
+  // was no empty map left to go back to. Copying a few hundred entries once per
+  // switch costs nothing.
+  QHash<QString, QString> currentTranslations;
 };
 
 #endif  // TRANSLATOR_H

@@ -61,9 +61,9 @@ Dialog {
                         opacity: 0.7
                         color: Material.foreground
                     }
-                    ComboBox {
+                    SyncedComboBox {
                         model: Synth.targetNames()
-                        currentIndex: root.cfg.target !== undefined ? root.cfg.target : 0
+                        modelIndex: root.cfg.target !== undefined ? root.cfg.target : 0
                         onActivated: Synth.setTrackField("target", currentIndex)
                     }
                 }
@@ -79,7 +79,7 @@ Dialog {
                         opacity: 0.7
                         color: Material.foreground
                     }
-                    ComboBox {
+                    SyncedComboBox {
                         id: slotBox
                         // Index 0 is the "note picks it" entry; the rest are
                         // the current kit's slots, labelled with their names.
@@ -90,8 +90,8 @@ Dialog {
                                 out.push((i + 1) + "  " + slots[i].name)
                             return out
                         }
-                        currentIndex: root.cfg.noteToSlot ? 0
-                                      : ((root.cfg.slot !== undefined ? root.cfg.slot : 0) + 1)
+                        modelIndex: root.cfg.noteToSlot ? 0
+                                    : ((root.cfg.slot !== undefined ? root.cfg.slot : 0) + 1)
                         onActivated: Synth.setTrackField("slot", currentIndex === 0 ? 255 : currentIndex - 1)
                     }
                 }
@@ -124,9 +124,9 @@ Dialog {
                         opacity: 0.7
                         color: Material.foreground
                     }
-                    ComboBox {
+                    SyncedComboBox {
                         model: Synth.divNames()
-                        currentIndex: root.cfg.div !== undefined ? root.cfg.div : 6
+                        modelIndex: root.cfg.div !== undefined ? root.cfg.div : 6
                         onActivated: Synth.setTrackField("div", currentIndex)
                     }
                 }
@@ -139,9 +139,9 @@ Dialog {
                         opacity: 0.7
                         color: Material.foreground
                     }
-                    ComboBox {
+                    SyncedComboBox {
                         model: Synth.dirNames()
-                        currentIndex: root.cfg.dir !== undefined ? root.cfg.dir : 0
+                        modelIndex: root.cfg.dir !== undefined ? root.cfg.dir : 0
                         onActivated: Synth.setTrackField("dir", currentIndex)
                     }
                 }
@@ -229,9 +229,9 @@ Dialog {
                         opacity: 0.7
                         color: Material.foreground
                     }
-                    ComboBox {
+                    SyncedComboBox {
                         model: Synth.scaleNames()
-                        currentIndex: root.pat.scale !== undefined ? root.pat.scale : 0
+                        modelIndex: root.pat.scale !== undefined ? root.pat.scale : 0
                         onActivated: Synth.setPatternField("scale", currentIndex)
                     }
                 }
@@ -243,9 +243,9 @@ Dialog {
                         opacity: 0.7
                         color: Material.foreground
                     }
-                    ComboBox {
+                    SyncedComboBox {
                         model: ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
-                        currentIndex: root.pat.root !== undefined ? root.pat.root : 0
+                        modelIndex: root.pat.root !== undefined ? root.pat.root : 0
                         onActivated: Synth.setPatternField("root", currentIndex)
                     }
                 }

@@ -27,9 +27,16 @@ Rectangle {
     implicitHeight: dragHandle.height + controlBar.height + keyHeight
     color: Material.theme === Material.Dark ? "#101010" : "#DDDDDD"
 
-    property int baseOctave: parseInt(App.setting("keyboard_octave"))
-    readonly property int velocity: Math.max(1, Math.min(127, parseInt(App.setting("keyboard_velocity"))))
-    readonly property bool hold: App.settingIsTrue("keyboard_hold")
+    // Two octaves are drawn from here, so the top key is 12*baseOctave + 35;
+    // above octave 7 that runs past MIDI 127 and SynthController drops the
+    // notes, leaving keys that look playable and are silent. Clamped on read
+    // as well as on the +/- buttons, so a value stored by an older build
+    // cannot reintroduce them.
+    readonly property int maxOctave: 7
+    property int baseOctave: Math.max(0, Math.min(maxOctave,
+                                                  parseInt(App.setting("keyboard_octave")) || 4))
+    property int velocity: Math.max(1, Math.min(127, parseInt(App.setting("keyboard_velocity")) || 100))
+    property bool hold: App.settingIsTrue("keyboard_hold")
     // Height of the playable key area (not counting the control strip). Persisted.
     property int keyHeight: Math.max(60, parseInt(App.setting("keyboard_height")) || 118)
     // How the user resizes the key area: a top drag "divider" (default) or a
@@ -43,14 +50,49 @@ Rectangle {
     // second octave. Desktop-only concerns — the buttons are hidden elsewhere.
     property bool computerKeys: App.settingIsTrue("keyboard_computer_keys")
     property bool topRowDrums: App.settingIsTrue("keyboard_top_row_drums")
-    // App.setting() isn't reactive; re-read when the keyboard is reshown so a
-    // Settings change applies without an app restart.
-    onVisibleChanged: if (visible) {
+    // App.setting() is a plain invokable, so the bindings above capture nothing
+    // and evaluate exactly once. Re-read them whenever a setting is written —
+    // octave, velocity and hold used to be left out here, which made those
+    // three rows of Settings ▸ Keyboard do nothing until the app was restarted,
+    // with nothing on screen saying so.
+    function reloadSettings() {
+        baseOctave = Math.max(0, Math.min(maxOctave,
+                                          parseInt(App.setting("keyboard_octave")) || 4))
+        velocity = Math.max(1, Math.min(127, parseInt(App.setting("keyboard_velocity")) || 100))
+        hold = App.settingIsTrue("keyboard_hold")
         resizeMode = App.setting("keyboard_resize_mode") === "slider" ? "slider" : "divider"
         dividerThickness = Math.max(2, parseInt(App.setting("keyboard_divider_thickness")) || 5)
         showNoteNames = App.settingIsTrue("keyboard_show_note_names")
         computerKeys = App.settingIsTrue("keyboard_computer_keys")
         topRowDrums = App.settingIsTrue("keyboard_top_row_drums")
+    }
+
+    Connections {
+        target: App
+        // keyboard_height is written on every frame of a divider drag and is
+        // owned by this component anyway, so it is skipped rather than
+        // re-reading all eight settings per mouse move.
+        function onSettingChanged(name) {
+            if (name.startsWith("keyboard_") && name !== "keyboard_height")
+                root.reloadSettings()
+        }
+    }
+
+    onVisibleChanged: {
+        if (visible) {
+            reloadSettings()
+        } else {
+            // Hiding the strip takes the key-up with it: capture stops the
+            // moment `visible` goes false, and the Connections below are gated
+            // on it too, so anything sounding would be stranded on.
+            //
+            // Latched notes go too, even though outliving their key is the
+            // whole point of latch: this keyboard is the only surface that can
+            // end one, so leaving them behind a hidden strip means a note
+            // nothing on screen can stop.
+            releaseSounding()
+            releaseLatched()
+        }
     }
     readonly property int minKeyHeight: 70
     readonly property int maxKeyHeight: 340
@@ -119,6 +161,30 @@ Rectangle {
         activeNotes = ({})
     }
 
+    // Ends every latched note. A latched note is only ever released by pressing
+    // its own key again, so anything that puts that key out of reach strands
+    // it sounding with no way back: turning latch off (nothing calls
+    // toggleLatch() any more), shifting the octave out from under it, or hiding
+    // the keyboard. Each of those calls this.
+    function releaseLatched() {
+        for (var n in held) noteOff(parseInt(n))
+        held = ({})
+    }
+
+    // The one writer of `hold` is reloadSettings(), fed by the settingChanged
+    // signal, so this catches the Settings switch and the keyboard's own state
+    // alike.
+    onHoldChanged: if (!hold) releaseLatched()
+
+    // An octave shift renumbers every key, so notes started before it can no
+    // longer be ended by the key that started them: a latched note may leave
+    // the two drawn octaves entirely, and onComputerKeyReleased() resolves its
+    // semitone against the *new* base — sending a note-off for a note that was
+    // never started while the real one keeps sounding. Drop both sets.
+    // (The touch path reconciles itself on the next touchUpdated, so this only
+    // ever has work to do for the computer keys and the latch.)
+    onBaseOctaveChanged: { releaseSounding(); releaseLatched() }
+
     function setComputerKeys(on) {
         if (computerKeys === on) return
         releaseSounding()
@@ -163,6 +229,20 @@ Rectangle {
         }
         // Focus went to a text field, so the releases are no longer coming.
         function onComputerKeysAllReleased() { root.releaseSounding() }
+    }
+
+    // A panic (toolbar ▸ All notes off) sweeps every note on the synth, so what
+    // this keyboard believes is sounding has to go with it — otherwise the keys
+    // stay lit over silence and a latched note needs pressing twice to look
+    // released. Cleared rather than released: the sweep has already sent every
+    // note-off there is. Not gated on `visible`, because the panic is reachable
+    // from pages where the strip is hidden.
+    Connections {
+        target: Synth
+        function onAllNotesOffSent() {
+            root.activeNotes = ({})
+            root.held = ({})
+        }
     }
 
     // Which note is under a point in the key area's local coords.
@@ -298,7 +378,7 @@ Rectangle {
                 text: "+"
                 font.bold: true
                 width: 34
-                onClicked: if (root.baseOctave < 8) { root.baseOctave++; App.saveSetting("keyboard_octave", root.baseOctave) }
+                onClicked: if (root.baseOctave < root.maxOctave) { root.baseOctave++; App.saveSetting("keyboard_octave", root.baseOctave) }
             }
 
             // Computer-keyboard wiring, next to the octave controls because it

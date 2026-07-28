@@ -165,11 +165,20 @@ ToolBar {
             readonly property real spare: t1.width - titleFloor - fixedChromeWidth
             readonly property bool showLooper: loopTransport.present
                                                && spare >= loopTransport.estimatedWidth
-            readonly property bool showSeq: seqTransport.present && showLooper
-                                            && spare >= loopTransport.estimatedWidth
-                                                        + seqTransport.estimatedWidth + 8
+            // Room the looper strip is actually taking, so the sequencer's fit
+            // test asks for what is left rather than assuming a looper exists.
+            readonly property real looperWidth: showLooper ? loopTransport.estimatedWidth + 8 : 0
+            // The looper keeps priority where both are present — it is the one
+            // you reach for mid-take. But gating this on showLooper meant a
+            // firmware without a looper (no PSRAM) hid the sequencer transport
+            // too, however much room the toolbar had.
+            readonly property bool showSeq: seqTransport.present
+                                            && spare >= looperWidth + seqTransport.estimatedWidth
 
-            implicitWidth: (showSeq ? seqTransport.estimatedWidth + 8 : 0)
+            // The 8 is the RowLayout's spacing between the two strips, so it is
+            // only spent when both are actually shown — matching looperWidth
+            // above, which is what the fit test above charges for.
+            implicitWidth: (showSeq ? seqTransport.estimatedWidth + (showLooper ? 8 : 0) : 0)
                            + (showLooper ? loopTransport.estimatedWidth : 0)
             implicitHeight: Math.max(seqTransport.implicitHeight,
                                      loopTransport.implicitHeight)
@@ -238,8 +247,25 @@ ToolBar {
                     onTriggered: mainWindow.drumPadsVisible = !mainWindow.drumPadsVisible
                 }
 
+                MenuSeparator {}
+
+                // Panic. Reachable from every page because a stuck note is not
+                // something you want to go looking for: note-offs go out
+                // write-without-response, so one the synth's command queue
+                // drops leaves a note sounding that nothing is tracking.
+                MenuItem {
+                    text: t.t("All notes off")
+                    enabled: Synth.connected
+                    onTriggered: Synth.allNotesOff()
+                }
+
+                MenuSeparator {}
+
                 MenuItem {
                     text: t.t("Select device...")
+                    // Off means off: the selector's scan would otherwise put
+                    // the radio back to work behind the Settings toggle.
+                    enabled: App.bluetoothEnabled
                     onTriggered: mainStackView.push("BluetoothDeviceSelectorScreen.qml", {})
                 }
 

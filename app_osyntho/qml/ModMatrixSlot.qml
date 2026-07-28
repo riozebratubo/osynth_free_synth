@@ -30,8 +30,15 @@ RowLayout {
     function refreshPicker() {
         var list = [{ id: 0, name: t.t("— none —") }]
         var pl = Synth.paramPickerList()
-        for (var i = 0; i < pl.length; i++)
+        for (var i = 0; i < pl.length; i++) {
+            // Skip PID 0 (master.volume). The firmware reads dest 0 as "no
+            // destination" (synth_mod.cpp), so it cannot be modulated — and
+            // leaving it in gave the list two entries sharing id 0: syncDest()
+            // resolved 0 to "— none —" every time, so picking master.volume
+            // silently did nothing and snapped straight back.
+            if (pl[i].id === 0) continue
             list.push(pl[i])
+        }
         picker = list
         syncDest()
     }

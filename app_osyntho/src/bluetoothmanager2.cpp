@@ -45,10 +45,9 @@ BluetoothManager::BluetoothManager(QObject* parent)
     m_foundPeripheral{} {
   /// @note this timer scans and tries to connect from time to time if not
   /// connected; it will scan and connect again if the peripheral disconnects.
-  connect(&m_rescanTimer, &QTimer::timeout, this, [this]() {
-    if (Settings::instance().setting("bluetooth_enabled") == "false") return;
-    scanAndConnect();
-  });
+  // scanAndConnect() checks the bluetooth_enabled setting itself, so the timer
+  // does not need its own copy of that gate.
+  connect(&m_rescanTimer, &QTimer::timeout, this, [this]() { scanAndConnect(); });
   m_rescanTimer.setInterval(rescanRetryInterval);
 
   for (auto& address : Database::instance().getLastConnectedDevices()) {
@@ -69,6 +68,14 @@ BluetoothManager::BluetoothManager(QObject* parent)
 }
 
 void BluetoothManager::scanAndConnect() {
+  // The user's switch, checked here because this is the single entry point for
+  // every scan — the rescan timer, connectToSelectedDevice() and, crucially,
+  // startDeviceScan(): opening the device selector with Bluetooth turned off
+  // must not put the radio back to work behind an "off" toggle.
+  if (Settings::instance().setting("bluetooth_enabled") == "false") {
+    qDebug() << "Bt | Scan | Bluetooth is disabled in settings.";
+    return;
+  }
   if (not SimpleBLE::Adapter::bluetooth_enabled()) {
     qDebug() << "Bt | Scan | Will not scan and connect, bluetooth is not enabled!";
     return;

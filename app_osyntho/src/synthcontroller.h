@@ -309,6 +309,12 @@ class SynthController : public QObject, public DatabaseClient, public SettingsCl
   // no kit slot answers to and which would therefore place silent steps.
   void paintNoteSuggested(int note);
 
+  // A panic sweep went out (allNotesOff). Surfaces that track what they
+  // believe is sounding — the on-screen keyboard's lit and latched sets — must
+  // drop it, or they keep painting notes over silence. They must NOT re-send
+  // note-offs for it: the sweep already covers every note.
+  void allNotesOffSent();
+
   void showError(const QString& msg);
   void showInfo(const QString& msg);
 

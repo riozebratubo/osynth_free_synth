@@ -206,6 +206,7 @@ qt_add_qml_module(
     QML_FILES qml/ArpSeqScreen.qml
     QML_FILES qml/SequencerScreen.qml
     QML_FILES qml/StepField.qml
+    QML_FILES qml/SyncedComboBox.qml
     QML_FILES qml/TrackSheet.qml
     QML_FILES qml/PlockDialog.qml
     QML_FILES qml/SeqSetDialog.qml

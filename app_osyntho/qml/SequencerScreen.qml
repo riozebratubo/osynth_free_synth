@@ -53,10 +53,22 @@ Item {
     readonly property var sel: (selectedStep >= 0 && selectedStep < stepData.length)
                                ? stepData[selectedStep] : ({})
 
+    // Locks on the selected step. Held as a property rather than read straight
+    // into the Repeater's model, because plocksForStep() is a plain invokable
+    // with no change signal: bound directly it re-evaluated only when
+    // selectedStep moved, so adding a lock in PlockDialog or deleting one from
+    // the list below left the list showing its previous contents.
+    property var stepPlocks: []
+    function reloadPlocks() {
+        stepPlocks = selectedStep >= 0 ? Synth.plocksForStep(selectedStep) : []
+    }
+    onSelectedStepChanged: reloadPlocks()
+
     function reload() {
         cfg = Synth.trackConfig()
         stepData = Synth.steps()
         if (selectedStep >= stepData.length) selectedStep = -1
+        reloadPlocks()
     }
 
     Connections {
@@ -143,10 +155,20 @@ Item {
                     anchors.verticalCenter: parent.verticalCenter
                 }
                 SpinBox {
+                    id: tempoBox
                     from: 30
                     to: 300
                     value: tempoVal.asInt
                     onValueModified: if (root.pidTempo > 0) Synth.setParam(root.pidTempo, value)
+                    // A user edit assigns `value`, which replaces the binding
+                    // above for good; push later synth-side changes in by hand
+                    // or the field stops following a preset load, the Arp
+                    // page's tempo field or MIDI clock. Same fix as
+                    // StepField.qml and ArpSeqScreen.qml.
+                    Connections {
+                        target: tempoVal
+                        function onValueChanged() { tempoBox.value = tempoVal.asInt }
+                    }
                 }
             }
 
@@ -158,6 +180,7 @@ Item {
                     anchors.verticalCenter: parent.verticalCenter
                 }
                 SpinBox {
+                    id: patternBox
                     from: 1
                     to: Math.max(1, Synth.seqPatterns)
                     value: Synth.editPattern + 1
@@ -166,6 +189,15 @@ Item {
                         // Also move playback there; while the transport runs
                         // the firmware queues the switch to the next bar.
                         if (root.pidPattern > 0) Synth.setParam(root.pidPattern, value - 1)
+                    }
+                    // Re-assert after a user edit breaks the binding, so the
+                    // box keeps following editPattern when the firmware moves
+                    // it (a song chain advancing, a loaded set).
+                    Connections {
+                        target: Synth
+                        function onEditTargetChanged() {
+                            patternBox.value = Synth.editPattern + 1
+                        }
                     }
                 }
             }
@@ -599,9 +631,9 @@ Item {
                             opacity: 0.7
                             color: Material.foreground
                         }
-                        ComboBox {
+                        SyncedComboBox {
                             model: Synth.condNames()
-                            currentIndex: root.sel.cond !== undefined ? root.sel.cond : 0
+                            modelIndex: root.sel.cond !== undefined ? root.sel.cond : 0
                             onActivated: Synth.setStepField(root.selectedStep, "cond", currentIndex)
                         }
                     }
@@ -635,7 +667,7 @@ Item {
 
                 // Locks already on this step.
                 Repeater {
-                    model: root.selectedStep >= 0 ? Synth.plocksForStep(root.selectedStep) : []
+                    model: root.stepPlocks
                     delegate: RowLayout {
                         required property var modelData
                         Layout.fillWidth: true

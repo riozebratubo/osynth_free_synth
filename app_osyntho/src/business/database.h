@@ -49,7 +49,7 @@ class Database : public IDatabase {
   /* file paths / backup / lifecycle */
   QString getDatabaseFileFolder() override;
   QString getDatabaseFileFullPath() override;
-  void saveDatabaseBackupTo(const QString& whereToFile) override;
+  bool saveDatabaseBackupTo(const QString& whereToFile) override;
   void restoreDatabaseFrom(const QString& whereFromFile) override;
   void forceCloseDatabase() override;
   void forceOpenOrCreateDatabase() override;
