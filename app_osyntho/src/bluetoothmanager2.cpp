@@ -260,7 +260,8 @@ bool BluetoothManager::connectAndSubscribe(SimpleBLE::Peripheral& peripheral) {
 
   m_adapterIsConnecting = true;
   peripheral.connect();
-  qDebug() << "Bt | Successfully connected. MTU:" << peripheral.mtu();
+  // SimpleBLE's mtu() is the usable ATT payload, not the ATT MTU (see below).
+  qDebug() << "Bt | Successfully connected. ATT payload:" << peripheral.mtu();
 
   // Verify the osynth service exposes CTRL + EVT (INFO is optional but expected).
   bool haveCtrl = false, haveEvt = false;
@@ -316,9 +317,16 @@ bool BluetoothManager::connectAndSubscribe(SimpleBLE::Peripheral& peripheral) {
   // here, on the worker; the GUI thread only ever sees the cached copies.
   const QString name = QString::fromStdString(peripheral.identifier());
   const QString address = QString::fromStdString(peripheral.address());
+  // IBluetoothManager::mtu() is contracted to report the *ATT MTU*, which is
+  // what SynthProto::attPayloadFor() takes the 3-byte ATT header off. SimpleBLE
+  // reports the usable payload instead — every backend subtracts the header
+  // itself (PeripheralWindows::mtu() returns `mtu_ - 3`, and the Linux/BlueZ
+  // one does the same) — so without adding it back the header came off twice
+  // and every frame was packed 3 bytes short of what the link could carry.
   int negotiatedMtu = 0;
   try {
-    negotiatedMtu = int(peripheral.mtu());
+    const int attPayload = int(peripheral.mtu());
+    if (attPayload > 0) negotiatedMtu = attPayload + 3;
   } catch (...) {
   }
   publishConnectionState(true, name, address, negotiatedMtu);

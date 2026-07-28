@@ -237,7 +237,11 @@ public:
     bool failed() const { return failed_; }
     void append(const void* rec, size_t len) {
         if (fill_ + len > cap()) {
-            emit(true);
+            /* Only flush something. With an MTU too small to hold even one
+             * record, `fill_` is always 0 here and emitting anyway sent one
+             * empty continuation frame *per record* — 80 of them for a preset
+             * listing — before the equally empty final frame. */
+            if (fill_ > 0) emit(true);
             if (len > cap()) return; /* record can never fit this MTU */
         }
         memcpy(s_tx + 5 + prefix_len_ + fill_, rec, len);
@@ -317,7 +321,10 @@ void handle_param_info(uint8_t seq, const uint8_t* p, uint16_t plen) {
     const uint16_t id = rd16(p);
 
     if (id == 0xFFFF) { /* id list + active engine and its caps mask */
-        uint16_t ids[ParamStore::kMaxParams];
+        /* 640 B at kMaxParams = 320, against a 4 KB task stack — by far the
+         * largest frame in this task. Static is safe for exactly the reason
+         * s_tx is: every handler here runs on ble_cmd and nowhere else. */
+        static uint16_t ids[ParamStore::kMaxParams];
         const size_t n = ps.listIds(ids, ParamStore::kMaxParams);
         const synth_engine_type_t eng = engines_active_type();
         const synth_engine_t* e = engines_get(eng);
@@ -660,11 +667,16 @@ void handle_seq_plock(uint8_t seq, const uint8_t* p, uint16_t plen) {
         case 2: { /* clear every lock on a step */
             if (plen != 5) break;
             const int pattern = p[1], track = p[2];
-            if (!seq_args_ok(pattern, track)) {
+            const int step = rd16(p + 3);
+            /* Same range check as sub-ops 0 and 1. seq_plock_clear_step()
+             * re-validates before it touches the step, so this was not a
+             * memory bug — but an out-of-range step silently answered OK
+             * instead of BAD_ARG, which is not what the other sub-ops do. */
+            if (!seq_args_ok(pattern, track) || step >= SEQ_MAX_STEPS) {
                 send_status(OP_SEQ_PLOCK, seq, ST_BAD_ARG);
                 return;
             }
-            seq_plock_clear_step(pattern, track, rd16(p + 3));
+            seq_plock_clear_step(pattern, track, step);
             send_status(OP_SEQ_PLOCK, seq, ST_OK);
             return;
         }

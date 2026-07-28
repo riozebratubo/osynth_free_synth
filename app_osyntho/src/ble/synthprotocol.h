@@ -115,6 +115,23 @@ enum ParamCurve : quint8 { PC_LINEAR = 0, PC_EXP = 1, PC_LOG = 2 };
 // Sentinel id for PARAM_INFO "list all registered ids".
 inline constexpr quint16 PARAM_INFO_LIST_ALL = 0xFFFF;
 
+// Truncates `s` to at most `maxBytes` of UTF-8 *without splitting a code
+// point*. A plain toUtf8().left(n) cuts on a byte boundary, so a name whose
+// last character straddles the limit is stored as a half sequence — the
+// firmware keeps the bytes verbatim and hands them back on the next listing,
+// where QString::fromUtf8 turns them into U+FFFD. Names arrive here from a
+// free-text field, so this is reachable with any accented character.
+inline QByteArray utf8Clamped(const QString& s, int maxBytes) {
+  QByteArray b = s.toUtf8();
+  if (b.size() <= maxBytes) return b;
+  // b[maxBytes] is a continuation byte (10xxxxxx) exactly when the cut would
+  // land inside a sequence; walk back to that sequence's start and drop it.
+  int cut = maxBytes;
+  while (cut > 0 && (quint8(b.at(cut)) & 0xC0) == 0x80) --cut;
+  b.truncate(cut);
+  return b;
+}
+
 // --- little-endian append helpers ---------------------------------------
 inline void appendU8(QByteArray& b, quint8 v) { b.append(char(v)); }
 
@@ -230,7 +247,7 @@ inline QByteArray payloadSavePreset(quint8 engine, quint8 slot, const QString& n
   QByteArray p;
   appendU8(p, engine);
   appendU8(p, slot);
-  p.append(name.toUtf8().left(23));  // rest of frame, 0..23 bytes
+  p.append(utf8Clamped(name, 23));  // rest of frame, 0..23 bytes
   return p;
 }
 inline QByteArray payloadListPresets(quint8 engine) {
@@ -638,18 +655,14 @@ inline QByteArray payloadSeqSetPattern(int pattern, int length, int scale, int r
   appendU8(p, quint8(scale));
   appendU8(p, quint8(root));
   appendU8(p, quint8(swing));
-  p.append(name.toUtf8().left(11));
+  p.append(utf8Clamped(name, 11));
   return p;
 }
-// op 0 list-step / 1 set / 2 clear-step / 3 clear-pattern / 4 list-pattern
-inline QByteArray payloadSeqPlockList(int pattern, int track, int step) {
-  QByteArray p;
-  appendU8(p, 0);
-  appendU8(p, quint8(pattern));
-  appendU8(p, quint8(track));
-  appendU16(p, quint16(step));
-  return p;
-}
+// Plock sub-ops: 1 set / 2 clear-step / 3 clear-pattern / 4 list-pattern.
+// Sub-op 0 (list one step) has no builder: the grid always loads the whole
+// pattern's locks in one request (sub-op 4) and serves single steps from that
+// cache, so a per-step request would only be a slower way to learn the same
+// thing.
 inline QByteArray payloadSeqPlockSet(int pattern, int track, int step, int pid,
                                      float value) {
   QByteArray p;

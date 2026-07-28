@@ -324,6 +324,29 @@ class SynthController : public QObject, public DatabaseClient, public SettingsCl
   void send(quint8 op, const QByteArray& payload, bool withResponse);
   void sendWithSeq(quint8 op, quint8 seq, const QByteArray& payload, bool withResponse);
 
+  // A request frame kept briefly so a BUSY can resend it. The firmware answers
+  // BUSY *instead of* running the frame, so an unretried request never happened.
+  struct PendingRequest {
+    QByteArray frame;
+    bool withResponse = true;
+    int retriesLeft = 0;
+  };
+  void trackRequest(quint8 seq, const QByteArray& frame, bool withResponse,
+                    int retriesLeft);
+  void forgetRequest(quint8 seq);  // answered or definitively rejected
+  void onRequestBusy(quint8 seq);
+  void drainRequestRetryQueue();
+
+  // Value the synth will actually store for `id`, given its discovered range
+  // and type. Own writes are echo-suppressed, so the app has to apply the same
+  // rounding/clamping locally or its cache drifts from the hardware.
+  float conformValue(quint16 id, float value) const;
+  // Applies a parameter the app wrote through a convenience opcode (TRANSPORT,
+  // ARP) rather than SET_PARAM, resolving it by name.
+  void mirrorLocal(const QString& name, double value);
+
+  void drainNoteOffQueue();
+
   // --- frame sizing ------------------------------------------------------
   // Payload bytes that fit one command frame on the live link (ATT payload
   // minus the 4-byte frame header). The batch limits below derive from it, so
@@ -443,6 +466,21 @@ class SynthController : public QObject, public DatabaseClient, public SettingsCl
   qint64 m_setBackoffUntilMs = 0;
   qint64 m_setNextSendMs = 0;  // earliest next send; paces a multi-frame burst
   QTimer m_setDrainTimer;
+
+  // Retry pool for every other request op (listings, sequencer/kit reads,
+  // preset and engine commands). Keyed by seq, which the resend reuses so the
+  // response stays routable by m_infoListSeq / m_trackGetSeq.
+  QHash<quint8, PendingRequest> m_sentRequests;
+  QList<quint8> m_sentRequestOrder;
+  QList<PendingRequest> m_requestRetryQueue;
+  QTimer m_requestRetryTimer;
+
+  // Notes the app believes are sounding, so allNotesOff() sends only those —
+  // and paces them, because 128 back-to-back frames would overrun the
+  // firmware's 4-deep command queue and mostly be dropped.
+  QSet<int> m_heldNotes;
+  QList<int> m_noteOffQueue;
+  QTimer m_noteOffTimer;
 
   // A patch load may need to switch engine first; the snapshot waits here.
   QList<QPair<int, double>> m_pendingPatchParams;

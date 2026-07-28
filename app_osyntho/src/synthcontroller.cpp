@@ -34,6 +34,16 @@ constexpr int kSetDrainIntervalMs = 15;
 constexpr int kSetBusyBackoffMs = 200;
 constexpr int kSetSentHistory = 8;  // frames kept for a BUSY re-queue
 
+// Resend of a request frame the firmware dropped. Its command queue is four
+// deep and answers BUSY *instead of* handling the frame, and discovery ends by
+// firing about a dozen requests back to back (two value sweeps, the preset
+// list, four sequencer reads, two kit reads, the song chain, the DRUM_TRIG
+// probe). Whatever lost that race used to be gone for good, leaving that page
+// blank until the user found the Refresh button.
+constexpr int kRequestRetryDelayMs = 120;
+constexpr int kRequestRetries = 3;
+constexpr int kSentRequestHistory = 16;
+
 // --- Flow-controlled PARAM_INFO discovery -------------------------------
 // The firmware has a SMALL command queue and returns BUSY (status 5) when
 // flooded — the old "blast all requests" pump caused BUSY storms, jammed the
@@ -74,6 +84,16 @@ SynthController::SynthController(QObject* parent) : QObject(parent) {
   m_setDrainTimer.setSingleShot(true);
   m_setDrainTimer.setInterval(kSetDrainIntervalMs);
   connect(&m_setDrainTimer, &QTimer::timeout, this, &SynthController::drainSetQueue);
+
+  m_requestRetryTimer.setSingleShot(true);
+  m_requestRetryTimer.setInterval(kRequestRetryDelayMs);
+  connect(&m_requestRetryTimer, &QTimer::timeout, this,
+          &SynthController::drainRequestRetryQueue);
+
+  m_noteOffTimer.setSingleShot(true);
+  m_noteOffTimer.setInterval(kSetDrainIntervalMs);
+  connect(&m_noteOffTimer, &QTimer::timeout, this,
+          &SynthController::drainNoteOffQueue);
 
   m_trackGetFallbackTimer.setSingleShot(true);
   m_trackGetFallbackTimer.setInterval(kTrackGetFallbackMs);
@@ -130,10 +150,86 @@ quint8 SynthController::nextSeq() {
   return m_seq;
 }
 
+namespace {
+// Which ops are worth resending after a BUSY.
+//
+// SET_PARAM has its own paced queue and PARAM_INFO its own discovery pump —
+// both already re-queue on BUSY, and tracking them here would retry each twice.
+// Notes and pad hits are excluded on purpose: by the time a resend went out the
+// gesture is over, and a late note is worse than a missing one. PING answers
+// nothing anyone waits on.
+bool isRetryableRequest(quint8 op) {
+  switch (op) {
+    case OP_SET_PARAM:
+    case OP_PARAM_INFO:
+    case OP_NOTE_ON:
+    case OP_NOTE_OFF:
+    case OP_DRUM_TRIG:
+    case OP_PING:
+      return false;
+    default:
+      return true;
+  }
+}
+}  // namespace
+
 void SynthController::sendWithSeq(quint8 op, quint8 seq, const QByteArray& payload,
                                   bool withResponse) {
   if (!m_connected) return;
-  emit writeToSynth(buildFrame(op, seq, payload), withResponse);
+  const QByteArray frame = buildFrame(op, seq, payload);
+  if (isRetryableRequest(op)) {
+    trackRequest(seq, frame, withResponse, kRequestRetries);
+  }
+  emit writeToSynth(frame, withResponse);
+}
+
+void SynthController::trackRequest(quint8 seq, const QByteArray& frame,
+                                   bool withResponse, int retriesLeft) {
+  m_sentRequestOrder.removeAll(seq);  // a wrapped seq must not evict its successor
+  m_sentRequests.insert(seq, PendingRequest{frame, withResponse, retriesLeft});
+  m_sentRequestOrder.append(seq);
+  while (m_sentRequestOrder.size() > kSentRequestHistory) {
+    m_sentRequests.remove(m_sentRequestOrder.takeFirst());
+  }
+}
+
+void SynthController::forgetRequest(quint8 seq) {
+  if (m_sentRequests.remove(seq) > 0) m_sentRequestOrder.removeAll(seq);
+}
+
+void SynthController::onRequestBusy(quint8 seq) {
+  const auto it = m_sentRequests.constFind(seq);
+  if (it == m_sentRequests.constEnd()) return;  // aged out; nothing to resend
+  PendingRequest req = it.value();
+  forgetRequest(seq);
+  if (req.retriesLeft <= 0) {
+    qWarning() << "Synth | op" << Qt::hex << quint8(req.frame.at(0))
+               << "still BUSY after" << kRequestRetries << "retries; giving up";
+    return;
+  }
+  req.retriesLeft--;
+  m_requestRetryQueue.append(req);
+  if (!m_requestRetryTimer.isActive()) m_requestRetryTimer.start(kRequestRetryDelayMs);
+}
+
+void SynthController::drainRequestRetryQueue() {
+  if (!m_connected) {
+    m_requestRetryQueue.clear();
+    m_requestRetryTimer.stop();
+    return;
+  }
+  if (m_requestRetryQueue.isEmpty()) {
+    m_requestRetryTimer.stop();
+    return;
+  }
+  const PendingRequest req = m_requestRetryQueue.takeFirst();
+  // The original bytes, so the resend keeps its seq. That matters: the
+  // discovery list response is matched by m_infoListSeq and refreshSequencer's
+  // track read by m_trackGetSeq, and a fresh seq would make both unroutable.
+  const quint8 seq = quint8(req.frame.at(1));
+  trackRequest(seq, req.frame, req.withResponse, req.retriesLeft);
+  emit writeToSynth(req.frame, req.withResponse);
+  if (!m_requestRetryQueue.isEmpty()) m_requestRetryTimer.start(kRequestRetryDelayMs);
 }
 
 void SynthController::send(quint8 op, const QByteArray& payload, bool withResponse) {
@@ -218,6 +314,15 @@ void SynthController::resetState() {
   m_setBackoffUntilMs = 0;
   m_setNextSendMs = 0;
   m_pendingSets.clear();
+  m_requestRetryTimer.stop();
+  m_requestRetryQueue.clear();
+  m_sentRequests.clear();
+  m_sentRequestOrder.clear();
+  // The link is gone, so anything it was holding is released on the synth side
+  // too (the firmware runs voice_manager_all_notes_off() on disconnect).
+  m_noteOffTimer.stop();
+  m_noteOffQueue.clear();
+  m_heldNotes.clear();
   m_params.clear();
   m_paramOrder.clear();
   m_pendingInfoIds.clear();
@@ -566,9 +671,24 @@ void SynthController::handleFrame(const Frame& f) {
         return;
       }
     }
+    if (f.status == ST_BUSY) {
+      // Command queue full: the firmware answered BUSY *instead of* running
+      // the frame, so this request simply did not happen. Resend it — without
+      // this, a listing or a sequencer read lost to a discovery burst left its
+      // page empty with nothing left to ask again.
+      onRequestBusy(f.seq);
+      return;
+    }
+    // A real rejection (MALFORMED / BAD_ARG / UNSUPPORTED): resending would
+    // only be rejected again.
+    forgetRequest(f.seq);
     qWarning() << "Synth | op" << Qt::hex << f.requestOp() << "status" << f.status;
     return;
   }
+
+  // Answered. Chunked responses repeat the seq, and removing on the first
+  // frame is right: the request has been served either way.
+  forgetRequest(f.seq);
 
   switch (f.requestOp()) {
     case OP_PARAM_INFO:
@@ -660,6 +780,23 @@ void SynthController::handleParamInfoSingle(const QByteArray& payload) {
 void SynthController::handleParamValues(const QByteArray& payload) {
   const QList<ParamValue> values = parseParamValues(payload);
   for (const ParamValue& pv : values) applyValue(pv.id, pv.value, /*echo=*/true);
+}
+
+// What ParamStore::set() will do to this value on the synth: round anything
+// that is not a Float, then clamp into the registered range (synth_params.cpp).
+// The app has to reproduce it because its own writes are echo-suppressed — the
+// synth never reports back the value it actually stored, so a local cache that
+// kept the raw number drifted from the hardware on every out-of-range or
+// fractional write. Unknown metadata means discovery has not reached this id
+// yet; pass the value through, as before.
+float SynthController::conformValue(quint16 id, float value) const {
+  const auto it = m_params.constFind(id);
+  if (it == m_params.constEnd() || !it->infoKnown) return value;
+  const ParamInfo& pi = it->info;
+  float v = (pi.type != PT_FLOAT) ? std::round(value) : value;
+  if (v < pi.min) v = pi.min;
+  if (v > pi.max) v = pi.max;
+  return v;
 }
 
 void SynthController::applyValue(quint16 id, float value, bool echo) {
@@ -847,7 +984,11 @@ QVariantList SynthController::paramPickerList() const {
 
 void SynthController::setParam(int id, double value) {
   const quint16 pid = quint16(id);
-  applyValue(pid, float(value), /*echo=*/true);  // optimistic, responsive UI
+  // Cache what the synth will store, not what the caller asked for: the write
+  // is echo-suppressed, so a value the store rounds or clamps would otherwise
+  // never be corrected here. The raw value still goes on the wire — the synth
+  // conforms it identically.
+  applyValue(pid, conformValue(pid, float(value)), /*echo=*/true);
   m_pendingSets.insert(pid, float(value));
   if (!m_setTimer.isActive()) m_setTimer.start();
 }
@@ -897,23 +1038,74 @@ void SynthController::listPresets(int engine) {
 }
 
 void SynthController::noteOn(int note, int velocity) {
+  if (note < 0 || note > 127) return;
+  // MIDI semantics, which the firmware also applies (it routes 0x90 with
+  // velocity 0 as a note-off): keep the held set honest either way.
+  if (velocity <= 0) {
+    noteOff(note);
+    return;
+  }
+  m_heldNotes.insert(note);
   send(OP_NOTE_ON, payloadNoteOn(quint8(note), quint8(velocity)), false);
 }
 
 void SynthController::noteOff(int note) {
+  if (note < 0 || note > 127) return;
+  m_heldNotes.remove(note);
   send(OP_NOTE_OFF, payloadNoteOff(quint8(note)), false);
 }
 
+// Panic. Two things make the obvious loop over all 128 notes wrong: the
+// firmware's command queue is four frames deep and answers BUSY *by dropping
+// the frame*, so a 128-frame blast would mostly evaporate — and the notes that
+// survived would be the arbitrary few that happened to land between drains,
+// which is the opposite of what a panic button is for. Send only what we
+// believe is sounding, and pace it like the SET_PARAM queue does.
 void SynthController::allNotesOff() {
-  for (int n = 0; n < 128; ++n) noteOff(n);
+  const QList<int> held = m_heldNotes.values();
+  m_heldNotes.clear();
+  for (int n : held) m_noteOffQueue.append(n);
+  drainNoteOffQueue();
+}
+
+void SynthController::drainNoteOffQueue() {
+  if (m_noteOffQueue.isEmpty()) {
+    m_noteOffTimer.stop();
+    return;
+  }
+  send(OP_NOTE_OFF, payloadNoteOff(quint8(m_noteOffQueue.takeFirst())), false);
+  if (!m_noteOffQueue.isEmpty()) m_noteOffTimer.start(kSetDrainIntervalMs);
+}
+
+// TRANSPORT and ARP are conveniences that land as ordinary parameter writes on
+// the synth — with origin Ble, which is precisely what EVT_PARAMS suppresses.
+// So nothing comes back, and a controller that only sent the frame kept serving
+// its *previous* seq.mode for the rest of the session: the toolbar transport
+// strip and the sequencer page's Rec button both bind that parameter, so they
+// sat on a stale state after every press. (seq.mode is written back by the
+// firmware on MIDI real-time start/stop, which is why this looked fine whenever
+// an external clock was driving it.) Mirror locally, exactly as setParam does.
+void SynthController::mirrorLocal(const QString& name, double value) {
+  const int pid = paramIdForName(name);
+  if (pid > 0) applyValue(quint16(pid), conformValue(quint16(pid), float(value)),
+                          /*echo=*/true);
 }
 
 void SynthController::transport(int cmd, double tempo) {
   send(OP_TRANSPORT, payloadTransport(quint8(cmd), float(tempo)), true);
+  mirrorLocal(QStringLiteral("seq.mode"), cmd);
+  // The firmware only writes the tempo when it is positive (handle_transport).
+  if (tempo > 0.0) mirrorLocal(QStringLiteral("seq.tempo"), tempo);
 }
 
 void SynthController::setArp(int enable, int mode, int octaves, int division) {
   send(OP_ARP, payloadArp(quint8(enable), quint8(mode), quint8(octaves), quint8(division)), true);
+  // Mirrors handle_arp(): enable 0 means mode 0, otherwise the mode is clamped
+  // into 1..5 before it is stored. Octaves and division are clamped by the
+  // store, which conformValue() reproduces from the discovered range.
+  mirrorLocal(QStringLiteral("arp.mode"), enable == 0 ? 0 : qBound(1, mode, 5));
+  mirrorLocal(QStringLiteral("arp.oct"), octaves);
+  mirrorLocal(QStringLiteral("seq.div"), division);
 }
 
 void SynthController::ping() { send(OP_PING, QByteArray(), true); }
@@ -1656,7 +1848,10 @@ void SynthController::setPatternField(const QString& field, double value) {
 }
 
 void SynthController::setPatternName(const QString& name) {
-  m_patternName = name.left(11);
+  // Clamp by UTF-8 bytes, not QChars — that is the limit the wire imposes, and
+  // caching a name longer than the one actually sent made the field snap back
+  // on the next read of the pattern.
+  m_patternName = QString::fromUtf8(utf8Clamped(name, 11));
   send(OP_SEQ_PATTERN,
        payloadSeqSetPattern(m_editPattern, m_patternLength, m_patternScale,
                             m_patternRoot, m_patternSwing, m_patternName),
