@@ -73,6 +73,16 @@ ApplicationWindow {
 
     ToastManager { id: toast }
 
+    // Which page the SwipeView opens on. The startup_screen setting holds either
+    // a page index or "last", in which case the page left on the previous run is
+    // used. Anything unparseable or out of range falls back to Home, so a stale
+    // stored index can never open the app on nothing.
+    function startupIndex() {
+        const want = App.setting("startup_screen")
+        const idx = parseInt(want === "last" ? App.setting("last_swipeview_index") : want)
+        return (isNaN(idx) || idx < 0 || idx >= UI.screens.length) ? 0 : idx
+    }
+
     function reApplySettings() {
         App.setThemeType(App.setting("theme_type"))
         App.applyThemePreset(parseInt(App.setting("theme_preset")))
@@ -182,28 +192,19 @@ ApplicationWindow {
                     spacing: 1
 
                     Repeater {
-                        model: [
-                            { label: "Home", icon: "\uf015", idx: 0 },  // house
-                            { label: "Osc",  icon: "\uf83e", idx: 1 },  // wave-square
-                            { label: "Flt",  icon: "\uf0b0", idx: 2 },  // filter
-                            { label: "Mod",  icon: "\uf4e2", idx: 3 },  // circle-nodes
-                            { label: "FX",   icon: "\uf72b", idx: 4 },  // wand-magic-sparkles
-                            { label: "Seq",  icon: "\uf00a", idx: 5 },  // table-cells
-                            { label: "Drum", icon: "\uf569", idx: 6 },  // drum
-                            { label: "Arp",  icon: "\uf550", idx: 7 },  // bars-staggered
-                            { label: "Loop", icon: "\uf363", idx: 8 },  // repeat
-                            { label: "Pre",  icon: "\uf0c7", idx: 9 },  // floppy-disk
-                            { label: "Lib",  icon: "\uf02d", idx: 10 }  // book
-                        ]
+                        // UI.screens is in SwipeView order, so the list index is
+                        // the page index (see the pages declared below).
+                        model: UI.screens
                         delegate: ToolButton {
                             id: navBtn
                             required property var modelData
-                            readonly property bool current: swipeView.currentIndex === modelData.idx
+                            required property int index
+                            readonly property bool current: swipeView.currentIndex === index
                             highlighted: current
                             // Compact padding: the stacked icon+label content
                             // keeps the dock close to its old single-line height.
                             padding: 4
-                            onClicked: swipeView.currentIndex = modelData.idx
+                            onClicked: swipeView.currentIndex = navBtn.index
                             contentItem: Column {
                                 spacing: 1
                                 Label {
@@ -237,7 +238,14 @@ ApplicationWindow {
                 anchors.bottom: parent.bottom
                 anchors.bottomMargin: Math.max(keyboard.visible ? keyboard.height : 0,
                                                drumPads.visible ? drumPads.height : 0)
-                currentIndex: 0
+
+                // Set once the pages exist, so an out-of-range stored index can
+                // be clamped against the real page count.
+                Component.onCompleted: currentIndex = mainWindow.startupIndex()
+                // Remembered for the "Last used" startup option. Written on every
+                // page change, which is what makes it survive a crash or a kill
+                // as well as a clean exit.
+                onCurrentIndexChanged: App.saveSetting("last_swipeview_index", currentIndex)
 
                 HomeScreen {}
                 ToneScreen {}

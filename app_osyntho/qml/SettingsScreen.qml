@@ -147,6 +147,31 @@ Pane {
                             font.pointSize: Math.max(8, UI.fontSize * 0.7)
                         }
 
+                        Text { text: t.t("Startup screen"); font.bold: true; color: Material.foreground }
+                        ComboBox {
+                            width: Math.min(parent.width - 20, 300)
+                            // "last" first, then one entry per page in SwipeView
+                            // order — the value is the page index as a string.
+                            model: {
+                                var entries = [{ text: t.t("Last used"), value: "last" }]
+                                for (var i = 0; i < UI.screens.length; i++)
+                                    entries.push({ text: t.t(UI.screens[i].name), value: String(i) })
+                                return entries
+                            }
+                            textRole: "text"
+                            valueRole: "value"
+                            Component.onCompleted: currentIndex = Math.max(0, indexOfValue(App.setting("startup_screen")))
+                            onActivated: App.saveSetting("startup_screen", currentValue)
+                        }
+                        Text {
+                            width: parent.width - 20
+                            wrapMode: Text.WordWrap
+                            text: t.t("Which page the app opens on. \"Last used\" reopens whichever page you were on when you closed it.")
+                            color: Material.foreground
+                            opacity: 0.6
+                            font.pointSize: Math.max(8, UI.fontSize * 0.7)
+                        }
+
                         Text { text: t.t("App language (restart to apply)"); font.bold: true; color: Material.foreground }
                         ComboBox {
                             width: Math.min(parent.width - 20, 300)

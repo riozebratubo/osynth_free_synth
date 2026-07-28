@@ -150,6 +150,10 @@ class App : public QObject {
   // A top-row key mapped to a drum pad (0..15), when keyboard_top_row_drums
   // is on. One-shot: there is no matching release.
   void computerDrumPadPressed(int pad);
+  // Focus moved into a text field, so the key-up of anything held right then
+  // goes to the field instead of here. Asks the Keyboard to drop what is
+  // sounding rather than leave a stranded note.
+  void computerKeysAllReleased();
 
  public slots:
   void onDatabaseRestoredAction();

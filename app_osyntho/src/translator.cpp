@@ -91,6 +91,20 @@ Translator::Translator()
       "Como os painéis de parâmetros (oscilador, filtro, FX…) são dispostos: agrupados da "
       "esquerda para a direita, cada um com a largura de que precisa, ou cada um sozinho em "
       "uma linha inteira.";
+  pt["Startup screen"] = "Tela inicial";
+  pt["Last used"] = "Última usada";
+  pt["Which page the app opens on. \"Last used\" reopens whichever page you were on when "
+     "you closed it."] =
+      "Em qual página o app abre. \"Última usada\" reabre a página em que você estava ao "
+      "fechá-lo.";
+  // Full page names for the picker above (UI.screens). "Home", "Sequencer",
+  // "Arpeggiator" and "Patch library" are already listed elsewhere; "Looper"
+  // and "Presets" read the same in pt_BR and are left to fall back.
+  pt["Oscillator"] = "Oscilador";
+  pt["Filter & envelopes"] = "Filtro e envelopes";
+  pt["Modulation"] = "Modulação";
+  pt["Effects"] = "Efeitos";
+  pt["Drums"] = "Bateria";
   pt["App language (restart to apply)"] = "Idioma (reinicie o app para aplicar)";
   pt["English"] = "Inglês";
   pt["Portuguese"] = "Português";

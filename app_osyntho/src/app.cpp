@@ -39,6 +39,21 @@ static QString mimeTypeForExtension(const QString& ext) {
 
 constexpr const char* globalFirmwareFileName = "firmware";
 
+// Is the focused object something the user is typing into?
+//
+// The whole class chain is walked, not just the leaf: a QML TextField focuses a
+// QQuickTextField and a TextArea a QQuickTextArea, and neither of those names
+// carries the word — it is their base class (QQuickTextInput / QQuickTextEdit)
+// that does. Checking only the leaf name was letting the piano keys eat every
+// letter typed into the patch/preset name fields.
+static bool focusedObjectTakesText(QObject* fo) {
+  for (const QMetaObject* mo = fo ? fo->metaObject() : nullptr; mo; mo = mo->superClass()) {
+    const QString name = QString::fromLatin1(mo->className());
+    if (name.contains("TextInput") or name.contains("TextEdit")) return true;
+  }
+  return false;
+}
+
 App& App::instance() {
   static App myInstance;
   return myInstance;
@@ -78,7 +93,15 @@ App::App(IDatabase& db, IBluetoothManager& btm, ISettings& st)
 
   // Global key filter for the computer-keyboard piano (desktop). Guarded so
   // DI/test construction without a running app doesn't touch qApp.
-  if (qApp) qApp->installEventFilter(this);
+  if (qApp) {
+    qApp->installEventFilter(this);
+    // Clicking into a name field while holding a key hands that key's release
+    // to the field, which would leave the note sounding forever.
+    connect(qApp, &QGuiApplication::focusObjectChanged, this, [this](QObject* focusObject) {
+      if (m_keyboardCaptureEnabled and focusedObjectTakesText(focusObject))
+        emit computerKeysAllReleased();
+    });
+  }
 
   // Theme from stored settings.
   {
@@ -586,11 +609,7 @@ bool App::eventFilter(QObject* watched, QEvent* event) {
   const QEvent::Type t = event->type();
   if (m_keyboardCaptureEnabled and (t == QEvent::KeyPress or t == QEvent::KeyRelease)) {
     // Don't steal keys from a focused text input (preset/patch name fields).
-    QObject* fo = QGuiApplication::focusObject();
-    const bool inTextInput =
-        fo and (QString::fromLatin1(fo->metaObject()->className()).contains("TextInput") or
-                QString::fromLatin1(fo->metaObject()->className()).contains("TextEdit"));
-    if (not inTextInput) {
+    if (not focusedObjectTakesText(QGuiApplication::focusObject())) {
       auto* ke = static_cast<QKeyEvent*>(event);
       // Checked first, and it fully shadows the upper octave's keys: with the
       // setting on, Q..I and the number row must not also emit semitones.

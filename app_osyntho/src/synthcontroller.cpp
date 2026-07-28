@@ -4,6 +4,7 @@
 
 #include <QDateTime>
 #include <QDebug>
+#include <QSet>
 
 #include <cmath>
 #include <limits>
@@ -761,11 +762,56 @@ void SynthController::ping() { send(OP_PING, QByteArray(), true); }
 
 /* --------------------------------------------------------- patch library */
 
+// Parameters a patch must neither capture nor replay.
+//
+// Not every registered parameter is a sound setting. Some are *actions*, where
+// the write itself is the operation; some are the transport; some are status
+// the synth reports and owns. A snapshot took every parameter with a known
+// value and load pushed all of them straight back, which performed those
+// actions: a drum hit from drums.trig, flash writes from the preset and looper
+// save triggers — loud enough to break up the audio, and they overwrite real
+// user slots — and a wiped loop from loop.clear.
+//
+// PARAM_INFO carries no "this is an action" flag (only type/curve/range), so
+// they go by name. The filter runs on load as well as on save, because patches
+// saved before it existed still carry these rows.
+static bool isNotPatchMaterial(const QString& name) {
+  static const QSet<QString> kSkip = {
+      // Actions: writing one performs it, whether or not the value moved.
+      QStringLiteral("drums.trig"),          // fires a drum pad
+      QStringLiteral("loop.clear"),          // wipes tracks; snaps back to none
+      QStringLiteral("loop.save"),           // writes a looper set to flash/SD
+      QStringLiteral("loop.load"),
+      QStringLiteral("preset.save"),         // writes a synth preset slot
+      QStringLiteral("preset.load"),
+      QStringLiteral("preset.seq.save"),     // writes a sequencer pattern slot
+      QStringLiteral("preset.seq.load"),
+      QStringLiteral("preset.seqset.save"),  // writes a whole sequencer set
+      QStringLiteral("preset.seqset.load"),
+      // Transport (stop/play/rec): replaying one would start the synth playing
+      // — or recording — behind the user.
+      QStringLiteral("seq.mode"),
+      QStringLiteral("loop.mode"),
+      // Read-only status the synth reports; writing them means nothing.
+      QStringLiteral("seq.pos"),
+      QStringLiteral("seq.curpat"),
+      QStringLiteral("loop.pos"),
+      QStringLiteral("loop.len"),
+      QStringLiteral("loop.filled"),
+      QStringLiteral("loop.rectrk"),
+      QStringLiteral("loop.armed"),
+      QStringLiteral("loop.maxlen"),
+  };
+  return kSkip.contains(name);
+}
+
 int SynthController::saveCurrentAsPatch(const QString& name) {
   QList<QPair<int, double>> params;
   for (quint16 id : std::as_const(m_paramOrder)) {
     const Param& p = m_params.value(id);
-    if (p.valueKnown) params.append({int(id), double(p.value)});
+    if (!p.valueKnown) continue;
+    if (isNotPatchMaterial(paramName(id))) continue;
+    params.append({int(id), double(p.value)});
   }
   if (params.isEmpty()) {
     emit showError(Translator::instance().t("Nothing to save yet — no parameters have been read."));
@@ -780,6 +826,11 @@ void SynthController::pushParams(const QList<QPair<int, double>>& params) {
   QByteArray payload;
   int pairs = 0;
   for (const auto& pv : params) {
+    // Patches saved before saveCurrentAsPatch() started filtering still carry
+    // rows for the action/status parameters, so drop them here too. An id whose
+    // name has not arrived yet is written as before — patches saved from now on
+    // never contain those rows anyway.
+    if (isNotPatchMaterial(paramName(pv.first))) continue;
     appendSetParam(payload, quint16(pv.first), float(pv.second));
     applyValue(quint16(pv.first), float(pv.second), /*echo=*/true);
     if (++pairs >= kMaxSetPairsPerFrame) {

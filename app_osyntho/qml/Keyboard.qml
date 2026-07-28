@@ -161,6 +161,8 @@ Rectangle {
             root.noteOff(n)
             root.setActive(n, false)
         }
+        // Focus went to a text field, so the releases are no longer coming.
+        function onComputerKeysAllReleased() { root.releaseSounding() }
     }
 
     // Which note is under a point in the key area's local coords.

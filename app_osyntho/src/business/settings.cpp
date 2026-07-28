@@ -99,7 +99,11 @@ void Settings::fillSettingsCacheDefaultValues() {
   // playing drums and a part together is the point of the pads.
   settingsCache["keyboard_top_row_drums"] = "true";
   settingsCache["android_immersive"] = "true";  // fullscreen/immersive on Android
-  settingsCache["last_swipeview_index"] = "0";
+  // Which page the app opens on: a SwipeView page index ("0" = Home), or "last"
+  // to reopen wherever the previous run was left. The index space is UI.screens
+  // in Main.qml/UI.qml; an out-of-range value falls back to Home there.
+  settingsCache["startup_screen"] = "0";
+  settingsCache["last_swipeview_index"] = "0";  // page left on the last run
 }
 
 void Settings::fillSettingsCacheCurrentValues() {

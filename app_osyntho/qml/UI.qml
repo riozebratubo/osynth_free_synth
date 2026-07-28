@@ -18,6 +18,26 @@ QtObject {
     property int fontSize: App.setting("app_font_size")
     property bool desktopLayout: !portrait
 
+    // The SwipeView pages of the main screen, in order — the one source for both
+    // the navigation dock (short `label` + icon, all the room it has) and the
+    // startup-screen picker in Settings (full `name`). A page's index in this
+    // list *is* its SwipeView index, so the two must stay in the same order as
+    // the pages declared in Main.qml. Strings are kept in English here and
+    // translated where they are shown, as everywhere else.
+    readonly property var screens: [
+        { label: "Home", name: "Home",               icon: "\uf015" },  // house
+        { label: "Osc",  name: "Oscillator",         icon: "\uf83e" },  // wave-square
+        { label: "Flt",  name: "Filter & envelopes", icon: "\uf0b0" },  // filter
+        { label: "Mod",  name: "Modulation",         icon: "\uf4e2" },  // circle-nodes
+        { label: "FX",   name: "Effects",            icon: "\uf72b" },  // wand-magic-sparkles
+        { label: "Seq",  name: "Sequencer",          icon: "\uf00a" },  // table-cells
+        { label: "Drum", name: "Drums",              icon: "\uf569" },  // drum
+        { label: "Arp",  name: "Arpeggiator",        icon: "\uf550" },  // bars-staggered
+        { label: "Loop", name: "Looper",             icon: "\uf363" },  // repeat
+        { label: "Pre",  name: "Presets",            icon: "\uf0c7" },  // floppy-disk
+        { label: "Lib",  name: "Patch library",      icon: "\uf02d" }   // book
+    ]
+
     // Panel layout (PanelFlow / ParamGroup): true packs the cards left to right
     // at the width each needs, false gives every card its own full-width line.
     // Same deal as fontSize — SettingsScreen re-assigns it on change.
