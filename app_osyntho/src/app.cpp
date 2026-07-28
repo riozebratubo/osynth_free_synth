@@ -13,6 +13,7 @@
 
 #include "src/apputils.h"
 #include "src/nativefiledialog.h"
+#include "src/translator.h"
 
 #if QT_CONFIG(permissions)
 #include <QPermissions>
@@ -288,9 +289,16 @@ bool App::saveBackupTo(const QString& fileFullPath) {
   return database.saveDatabaseBackupTo(fileFullPath);
 }
 
-void App::restoreBackupFrom(const QString& fileFullPath) {
-  database.restoreDatabaseFrom(fileFullPath);
+bool App::restoreBackupFrom(const QString& fileFullPath) {
+  QString error;
+  if (not database.restoreDatabaseFrom(fileFullPath, &error)) {
+    emit restoreFailed(error.isEmpty()
+                           ? Translator::instance().t("Could not restore the backup.")
+                           : error);
+    return false;
+  }
   emit databaseRestored();
+  return true;
 }
 
 void App::emitDatabaseRestored() { emit databaseRestored(); }

@@ -57,7 +57,14 @@ class IDatabase {
   // Replaces `whereToFile` if it exists. False on any failure, so the caller
   // can tell the user rather than reporting a backup that never landed.
   virtual bool saveDatabaseBackupTo(const QString& whereToFile) = 0;
-  virtual void restoreDatabaseFrom(const QString& whereFromFile) = 0;
+  // Replaces the app database with `whereFromFile`, which is checked for being
+  // a readable SQLite database first — the picker offers an "all files" entry,
+  // so the chosen file is not necessarily a backup at all. False on any
+  // failure, with a reason for `errorOut` (already translated, safe to show):
+  // every failure path used to be a silent qDebug() while the caller reported
+  // a successful restore regardless.
+  virtual bool restoreDatabaseFrom(const QString& whereFromFile,
+                                   QString* errorOut = nullptr) = 0;
   virtual void forceCloseDatabase() = 0;
   virtual void forceOpenOrCreateDatabase() = 0;
 };

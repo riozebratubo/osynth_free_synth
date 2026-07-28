@@ -30,6 +30,16 @@
 
 #define COM_INITFLAGS ::COINIT_APARTMENTTHREADED | ::COINIT_DISABLE_OLE1DDE
 
+/* LOCAL ADDITION (not upstream nfd) -- see NFD_SetParentWindow in nfd.h.
+   The window every dialog below is shown as owned by. NULL reproduces the
+   upstream ownerless behaviour. */
+static HWND g_parentWindow = NULL;
+
+void NFD_SetParentWindow( void *nativeWindowHandle )
+{
+    g_parentWindow = (HWND)nativeWindowHandle;
+}
+
 static BOOL COMIsInitialized(HRESULT coResult)
 {
     if (coResult == RPC_E_CHANGED_MODE)
@@ -235,12 +245,17 @@ static nfdresult_t AddFiltersToDialog( ::IFileDialog *fileOpenDialog, const char
     
     fileOpenDialog->SetFileTypes( filterCount+1, specList );
 
-    /* free speclist */
+    /* free speclist. Both members were allocated by their own
+       CopyNFDCharToWChar() above, so both have to be released -- upstream frees
+       only pszSpec and leaks one wide string per filter, per dialog raised.
+       The last entry is skipped by the bound: its two members point at the
+       static WILDCARD literal, not at anything malloc'd. */
     for ( size_t i = 0; i < filterCount; ++i )
     {
+        NFDi_Free( (void*)specList[i].pszName );
         NFDi_Free( (void*)specList[i].pszSpec );
     }
-    NFDi_Free( specList );    
+    NFDi_Free( specList );
 
     return NFD_OKAY;
 }
@@ -451,7 +466,7 @@ nfdresult_t NFD_OpenDialog( const nfdchar_t *filterList,
     }    
 
     // Show the dialog.
-    result = fileOpenDialog->Show(NULL);
+    result = fileOpenDialog->Show(g_parentWindow);
     if ( SUCCEEDED(result) )
     {
         // Get the file name
@@ -557,7 +572,7 @@ nfdresult_t NFD_OpenDialogMultiple( const nfdchar_t *filterList,
     }
  
     // Show the dialog.
-    result = fileOpenDialog->Show(NULL);
+    result = fileOpenDialog->Show(g_parentWindow);
     if ( SUCCEEDED(result) )
     {
         IShellItemArray *shellItems;
@@ -635,7 +650,7 @@ nfdresult_t NFD_SaveDialog( const nfdchar_t *filterList,
     }
 
     // Show the dialog.
-    result = fileSaveDialog->Show(NULL);
+    result = fileSaveDialog->Show(g_parentWindow);
     if ( SUCCEEDED(result) )
     {
         // Get the file name
@@ -735,7 +750,7 @@ nfdresult_t NFD_PickFolder(const nfdchar_t *defaultPath,
     }
 
     // Show the dialog to the user
-    result = fileDialog->Show(NULL);
+    result = fileDialog->Show(g_parentWindow);
     if ( SUCCEEDED(result) )
     {
         // Get the folder name

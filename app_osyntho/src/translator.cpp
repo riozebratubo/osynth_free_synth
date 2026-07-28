@@ -80,6 +80,17 @@ Translator::Translator() {
   pt["Backup restored."] = "Backup restaurado.";
   pt["Backup saved."] = "Backup salvo.";
   pt["Could not write the backup file."] = "Não foi possível gravar o arquivo de backup.";
+  // Why a restore did not happen (database.cpp). These used to be qDebug()
+  // lines only, with "Backup restored." shown regardless of the outcome.
+  pt["Could not restore the backup."] = "Não foi possível restaurar o backup.";
+  pt["That file is not an Osyntho backup."] = "Esse arquivo não é um backup do Osyntho.";
+  pt["That file no longer exists."] = "Esse arquivo não existe mais.";
+  pt["The app database cannot be written to."] =
+      "Não é possível gravar no banco de dados do aplicativo.";
+  pt["Could not back up the current data before restoring."] =
+      "Não foi possível fazer uma cópia dos dados atuais antes de restaurar.";
+  pt["Could not copy the backup over the app database."] =
+      "Não foi possível copiar o backup sobre o banco de dados do aplicativo.";
   pt["Nothing to save yet — no parameters have been read."] =
       "Nada para salvar ainda — nenhum parâmetro foi lido.";
   pt["Could not save the patch."] = "Não foi possível salvar o patch.";

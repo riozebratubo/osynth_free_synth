@@ -33,9 +33,28 @@ typedef enum {
 }nfdresult_t;
     
 
+/* LOCAL ADDITION (not upstream nfd).
+
+   Set the window the dialogs should belong to, as the platform's native handle
+   (an HWND on Windows), or NULL to go back to an ownerless dialog.
+
+   Upstream always calls IFileDialog::Show(NULL). With no owner, Windows neither
+   disables the calling window nor keeps the dialog in front of it: the dialog
+   could end up *behind* the app, which reads as a freeze because the call that
+   raised it is blocking, and the app window went on taking clicks -- so a
+   second press of the same button opened a second dialog on top of the first.
+
+   The handle is stored, not retained; the caller must clear it (or set a new
+   one) before the window it names is destroyed. Backends with no notion of an
+   owner window implement this as a no-op -- nfd_zenity.c does, since zenity is
+   a separate process. Implemented in nfd_win.cpp and nfd_zenity.c, the two
+   backends CMakeLists.txt builds; nfd_cocoa.m and nfd_gtk.c are vendored but
+   never compiled, and would each need a definition before they could be. */
+void NFD_SetParentWindow( void *nativeWindowHandle );
+
 /* nfd_<targetplatform>.c */
 
-/* single file open dialog */    
+/* single file open dialog */
 nfdresult_t NFD_OpenDialog( const nfdchar_t *filterList,
                             const nfdchar_t *defaultPath,
                             nfdchar_t **outPath );

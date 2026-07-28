@@ -201,14 +201,15 @@ Rectangle {
     }
 
     // Computer-keyboard piano (desktop): App's global key filter emits semitone
-    // offsets; apply the base octave + velocity here. Capture is enabled only
-    // while this keyboard is visible on a desktop platform, and only while the
-    // user leaves the computer-keys toggle on.
-    Component.onCompleted: App.keyboardCaptureEnabled = Qt.binding(function() {
-        return root.visible && App.isDesktop() && root.computerKeys
-    })
-    Component.onDestruction: App.keyboardCaptureEnabled = false
-
+    // offsets; apply the base octave + velocity here.
+    //
+    // The capture flag itself is NOT set here. The same key stream also feeds
+    // the drum pads, which are a separate surface with a visibility of their
+    // own, so binding capture to this component's `visible` meant hiding the
+    // keyboard from the toolbar menu also killed the pads' keys while the pads
+    // were still on screen. Main.qml owns the flag, because it is the only
+    // place that can see both. Notes are still gated on `visible` below, so a
+    // hidden keyboard sounds nothing either way.
     Connections {
         target: App
         enabled: root.visible

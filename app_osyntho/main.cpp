@@ -96,6 +96,8 @@ int main(int argc, char* argv[]) {
   if (instance.hasPrevious(APP_ID)) {
     return EXIT_SUCCESS;
   }
+  // Return value deliberately not fatal: failing to claim the name costs the
+  // single-instance guard, not the app. It is logged inside listen().
   instance.listen(APP_ID);
   // --
 
@@ -180,6 +182,23 @@ int main(int argc, char* argv[]) {
   engine.rootContext()->setContextProperty("Synth", &App::instance().getSynth());
 
   engine.loadFromModule("org.osynth.osyntho", "Main");
+
+  // A second launch exits immediately (see hasPrevious() above) — but exiting
+  // in silence is indistinguishable from failing to start, especially when this
+  // window is minimised or behind something. Bring it forward instead, which is
+  // what double-clicking the icon was asking for. The signal had no connection
+  // at all before, so the second process simply vanished.
+  QObject::connect(&instance, &SingleInstance::newInstance, &app, [&engine]() {
+    if (engine.rootObjects().isEmpty()) return;
+    auto* win = qobject_cast<QQuickWindow*>(engine.rootObjects().constFirst());
+    if (win == nullptr) return;
+    qDebug() << "App | Another instance was started; raising this window.";
+    win->show();
+    // Un-minimise without disturbing a maximised/fullscreen window.
+    win->setWindowStates(win->windowStates() & ~Qt::WindowMinimized);
+    win->raise();
+    win->requestActivate();
+  });
 
   // Detect the GL renderer once the scene graph has a live OpenGL context, so
   // the graph drawers can avoid the FBO paint path on drivers that corrupt it

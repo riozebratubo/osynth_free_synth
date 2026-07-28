@@ -12,7 +12,11 @@
 // no picker to drive (it uses the Storage Access Framework flows in App), and
 // macOS/iOS were left on Qt deliberately.
 //
-// Both calls are blocking and modal, like the native dialogs they wrap.
+// Both calls block until the dialog closes, and both raise it owned by the
+// app's active window where the platform has such a notion, so it cannot end
+// up behind the app. A call made while another dialog is already up answers ""
+// immediately rather than stacking a second one — blocking the *call* does not
+// stop the window underneath from taking another click on the same button.
 namespace NativeFileDialog {
 
 // False when no backend was compiled in, and -- on Linux -- when the zenity

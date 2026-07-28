@@ -78,7 +78,12 @@ class App : public QObject {
   Q_INVOKABLE QString getDatabaseFileLocation();
   // False if the backup could not be written, so QML can say so.
   Q_INVOKABLE bool saveBackupTo(const QString& fileFullPath);
-  Q_INVOKABLE void restoreBackupFrom(const QString& fileFullPath);
+  // False if the file was not a usable backup or could not be put in place, in
+  // which case restoreFailed() carries the reason and databaseRestored() is NOT
+  // emitted — the app is left on the data it already had. Every route (desktop
+  // picker, Android SAF) goes through this one call, so the file is validated
+  // the same way on all of them.
+  Q_INVOKABLE bool restoreBackupFrom(const QString& fileFullPath);
   Q_INVOKABLE void emitDatabaseRestored();
   Q_INVOKABLE void forceCloseDatabase();
   Q_INVOKABLE void forceOpenDatabase();
@@ -142,7 +147,12 @@ class App : public QObject {
   bool eventFilter(QObject* watched, QEvent* event) override;
 
  signals:
+  // A restore actually landed. Emitted only on success — it used to fire on
+  // every attempt, so a restore that failed its checks, or that rolled back to
+  // the old database, still showed the user a "Backup restored." toast.
   void databaseRestored();
+  // Why a restore did not happen; already translated and meant to be shown.
+  void restoreFailed(QString reason);
   void firmwareFileLoaded();
 
   // A setting was written through saveSetting(). setting() is a plain

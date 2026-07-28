@@ -17,6 +17,17 @@
 const char NO_ZENITY_MSG[] = "zenity not installed";
 
 
+/* LOCAL ADDITION (not upstream nfd) -- see NFD_SetParentWindow in nfd.h.
+
+   A no-op here: zenity is a separate process, so there is no owner window
+   relationship to establish from this side. The dialog is its own top-level
+   window and the window manager keeps it in front on its own. */
+void NFD_SetParentWindow( void *nativeWindowHandle )
+{
+    (void)nativeWindowHandle;
+}
+
+
 static void AddTypeToFilterName( const char *typebuf, char *filterName, size_t bufsize )
 {
     size_t len = strlen(filterName);
@@ -271,6 +282,15 @@ nfdresult_t NFD_SaveDialog( const nfdchar_t *filterList,
     command[1] = strdup("--file-selection");
     command[2] = strdup("--title=Save File");
     command[3] = strdup("--save");
+    /* LOCAL ADDITION (not upstream nfd). Without it, zenity releases before
+       3.91 replace an existing file with no prompt at all -- so "Export..."
+       onto a patch or backup that was already there destroyed it silently,
+       while the Windows backend asked (IFileSaveDialog defaults to
+       FOS_OVERWRITEPROMPT). 3.91 and newer confirm unconditionally and warn
+       that the flag is deprecated; the warning goes to stderr, which is sent
+       to /dev/null here (runCommandArray with includeStdErr 0), and the flag
+       is still accepted. */
+    command[4] = strdup("--confirm-overwrite");
 
     char* stdOut = NULL;
     nfdresult_t result = ZenityCommon(command, commandLen, defaultPath, filterList, &stdOut);

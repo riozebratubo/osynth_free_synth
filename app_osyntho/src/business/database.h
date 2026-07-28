@@ -50,9 +50,17 @@ class Database : public IDatabase {
   QString getDatabaseFileFolder() override;
   QString getDatabaseFileFullPath() override;
   bool saveDatabaseBackupTo(const QString& whereToFile) override;
-  void restoreDatabaseFrom(const QString& whereFromFile) override;
+  bool restoreDatabaseFrom(const QString& whereFromFile, QString* errorOut = nullptr) override;
   void forceCloseDatabase() override;
   void forceOpenOrCreateDatabase() override;
+
+  // True when `path` is a SQLite database this app could have written: it
+  // opens, its schema reads, and it holds the `setting` table. The restore
+  // picker always offers an "all files" entry (nfd appends one of its own), so
+  // without this any file at all could be copied over the app database — after
+  // which the app runs against something that is not a database and the tables
+  // silently do not exist.
+  static bool isSqliteDatabaseFile(const QString& path);
 
   // The schema version this build migrates databases to. Public (together with
   // getSchemaVersion) so tests can assert a DB ends up stamped at it after the

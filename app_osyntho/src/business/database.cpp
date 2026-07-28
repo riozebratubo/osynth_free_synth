@@ -1,5 +1,6 @@
 #include "database.h"
 
+#include <QDateTime>
 #include <QDebug>
 #include <QDir>
 #include <QFile>
@@ -9,6 +10,7 @@
 #include <QVariantMap>
 
 #include "src/apputils.h"
+#include "src/translator.h"
 
 constexpr const char* globalDatabaseFileName = "osyntho.db";
 constexpr const char* globalDatabaseTempFileName = "osyntho_temp.db";
@@ -519,37 +521,99 @@ bool Database::saveDatabaseBackupTo(const QString& whereToFile) {
   return false;
 }
 
-void Database::restoreDatabaseFrom(const QString& whereFromFile) {
+// Header magic first, so a 0-byte file and an obviously-wrong one are refused
+// without SQLite ever touching them (an empty file is a *valid* empty database
+// to SQLite, which would restore a working app with no data in it). Then an
+// actual open, because the 16 magic bytes are cheap to have by accident and say
+// nothing about the rest of the file being readable. Then the `setting` table,
+// because "is a SQLite database" is not the question the caller is asking:
+// without it, any database at all passes — someone else's app's — and
+// runCreateTables() would go on to build the Osyntho schema inside it, leaving
+// the app running on a stranger's file with all the user's data gone. `setting`
+// is the oldest table in the schema and the one every version writes, so no
+// backup this app has ever produced can fail on it.
+bool Database::isSqliteDatabaseFile(const QString& path) {
+  // The 16-byte header every SQLite file starts with: "SQLite format 3"
+  // followed by a NUL. Spelled as a size check plus a prefix compare rather
+  // than one literal, because a string literal with an embedded \0 is an easy
+  // thing to get subtly wrong (and silently truncate) later.
+  QFile probe{path};
+  if (not probe.open(QIODevice::ReadOnly)) return false;
+  const QByteArray header = probe.read(16);
+  probe.close();
+  if (header.size() != 16) return false;  // also catches the 0-byte file
+  if (not header.startsWith("SQLite format 3") or header.at(15) != '\0') return false;
+
+  // A private connection name so this never disturbs the live one, and a scope
+  // that closes before removeDatabase() — Qt warns and leaks the handle if the
+  // connection is still open when it is removed. Counter as well as clock: two
+  // probes in the same millisecond would otherwise reuse a name.
+  static quint64 probeSeq = 0;
+  const QString probeConnection = QStringLiteral("osyntho_restore_probe_%1_%2")
+                                      .arg(QDateTime::currentMSecsSinceEpoch())
+                                      .arg(++probeSeq);
+  bool ok = false;
+  {
+    QSqlDatabase candidate = QSqlDatabase::addDatabase("QSQLITE", probeConnection);
+    candidate.setDatabaseName(path);
+    if (candidate.open()) {
+      // Reads page 1 and walks the schema, so a truncated or corrupt file fails
+      // here rather than after it has replaced the real database — and answers
+      // the "is it ours" question in the same query.
+      QSqlQuery q{candidate};
+      q.prepare("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'setting'");
+      ok = q.exec() and q.next() and q.value(0).toInt() > 0;
+      candidate.close();
+    }
+  }
+  QSqlDatabase::removeDatabase(probeConnection);
+  return ok;
+}
+
+bool Database::restoreDatabaseFrom(const QString& whereFromFile, QString* errorOut) {
+  const auto fail = [errorOut](const QString& reason) {
+    qWarning() << "Db | Restore:" << reason;
+    if (errorOut != nullptr) *errorOut = reason;
+    return false;
+  };
+
   const QFileInfo dbFileInfo{dbFileFullPath};
-  if (dbFileInfo.exists() and not dbFileInfo.isWritable()) {
-    qDebug() << "Error restoring database: app database file is not writable!";
-    return;
-  }
-  QString whereFrom = AppUtils::getFilePathFromCanonical(whereFromFile);
-  if (not QFile::exists(whereFrom)) {
-    qDebug() << "Error restoring database: file to restore from does not exist!";
-    return;
-  }
+  if (dbFileInfo.exists() and not dbFileInfo.isWritable())
+    return fail(Translator::instance().t("The app database cannot be written to."));
+
+  const QString whereFrom = AppUtils::getFilePathFromCanonical(whereFromFile);
+  if (not QFile::exists(whereFrom))
+    return fail(Translator::instance().t("That file no longer exists."));
+
+  // Checked BEFORE anything is moved: the picker's filter is advisory (both nfd
+  // backends append an "all files" entry), so the chosen file may be any file
+  // at all. Restoring a non-database used to succeed silently and leave the app
+  // running against it.
+  if (not isSqliteDatabaseFile(whereFrom))
+    return fail(Translator::instance().t("That file is not an Osyntho backup."));
+
   // QFile::copy never overwrites: a stale temp backup left by an interrupted
   // previous restore would make this copy fail and abort the restore.
   QFile::remove(dbFileTempFullPath);
-  bool copiedBackup = QFile::copy(dbFileFullPath, dbFileTempFullPath);
-  if (not copiedBackup) {
-    qDebug() << "Error restoring database: cannot save backup before restoring!";
-    return;
-  }
+  if (not QFile::copy(dbFileFullPath, dbFileTempFullPath))
+    return fail(Translator::instance().t("Could not back up the current data before restoring."));
+
   closeDatabase();
   QFile::remove(dbFileFullPath);
-  bool copiedNew = QFile::copy(whereFrom, dbFileFullPath);
-  if (not copiedNew) {
-    qDebug() << "Error restoring database, reverting to the old one.";
-    QFile::copy(dbFileTempFullPath, dbFileFullPath);
-  }
+  const bool copiedNew = QFile::copy(whereFrom, dbFileFullPath);
+  if (not copiedNew) QFile::copy(dbFileTempFullPath, dbFileFullPath);
+
   openDatabase(dbFileFullPath);
   // The restored file may come from an older app version: run the create/migrate
   // pass so this session doesn't run against an outdated schema until restart.
   runCreateTables();
   QFile::remove(dbFileTempFullPath);
+
+  // Reported after the revert has been put back and reopened, so the app is
+  // left on its original data rather than on nothing.
+  if (not copiedNew)
+    return fail(Translator::instance().t("Could not copy the backup over the app database."));
+  return true;
 }
 
 void Database::forceCloseDatabase() { closeDatabase(); }

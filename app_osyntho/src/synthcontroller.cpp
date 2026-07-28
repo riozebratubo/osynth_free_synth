@@ -963,11 +963,43 @@ QString SynthController::paramName(int id) const {
   return (it != m_params.constEnd() && it->infoKnown) ? it->info.name : QString();
 }
 
+// Status the firmware owns and rewrites: there is no control to offer for it.
+//
+// These are registered as ordinary Int/Float parameters — PARAM_INFO has no
+// read-only flag — but the firmware headers mark them read-only (seqarp.h,
+// looper.h) and the firmware writes them itself, seq.pos on *every sequencer
+// step*. A ParamGroup drew each one as a draggable knob that jittered through
+// playback and could not do anything: the write lands in the store and the
+// next internal write overwrites it.
+//
+// Deliberately narrower than isNotPatchMaterial(): that list also holds the
+// transport (seq.mode / loop.mode) and the action triggers, which are things a
+// *patch* must not carry but which the UI does legitimately drive — the
+// transport strips write seq.mode, and ArpSeqScreen offers it on purpose.
+static bool isReadOnlyTelemetry(const QString& name) {
+  static const QSet<QString> kTelemetry = {
+      QStringLiteral("seq.pos"),      // playhead, -1 when stopped
+      QStringLiteral("seq.curpat"),   // pattern currently playing
+      QStringLiteral("loop.pos"),     // position in the loop, seconds
+      QStringLiteral("loop.len"),     // recorded length
+      QStringLiteral("loop.filled"),  // which tracks hold audio
+      QStringLiteral("loop.rectrk"),  // track being recorded
+      QStringLiteral("loop.armed"),   // count-in beats remaining
+      QStringLiteral("loop.maxlen"),  // buffer capacity for this build
+  };
+  return kTelemetry.contains(name);
+}
+
+// Feeds ParamGroup, and nothing else — so the telemetry filter belongs here
+// rather than at each call site. A screen that wants to *display* one of those
+// values reads it through ParamValue, which is not a control.
 QVariantList SynthController::paramIdsByPrefix(const QString& prefix) const {
   QVariantList out;
   for (quint16 id : m_paramOrder) {
     const Param& p = m_params.value(id);
-    if (p.infoKnown && p.info.name.startsWith(prefix)) out.append(id);
+    if (!p.infoKnown || !p.info.name.startsWith(prefix)) continue;
+    if (isReadOnlyTelemetry(p.info.name)) continue;
+    out.append(id);
   }
   return out;
 }
@@ -1113,8 +1145,12 @@ void SynthController::drainNoteOffQueue() {
 // an external clock was driving it.) Mirror locally, exactly as setParam does.
 void SynthController::mirrorLocal(const QString& name, double value) {
   const int pid = paramIdForName(name);
-  if (pid > 0) applyValue(quint16(pid), conformValue(quint16(pid), float(value)),
-                          /*echo=*/true);
+  // >= 0, not > 0: paramIdForName() answers -1 for "no such name", and 0 is a
+  // real parameter id — master.volume is PID 0x0000. No caller resolves to it
+  // today, so `> 0` was silently correct; it would have gone wrong without a
+  // symptom the first time one did.
+  if (pid >= 0) applyValue(quint16(pid), conformValue(quint16(pid), float(value)),
+                           /*echo=*/true);
 }
 
 void SynthController::transport(int cmd, double tempo) {
@@ -1557,8 +1593,13 @@ QVariantMap SynthController::importPatchesToLibrary(const QString& text) {
       // build does not know is dropped rather than followed to the file's id,
       // which on another firmware is some unrelated parameter. Without one,
       // the file's id is all there is.
-      const int id =
-          (byName && !item.name.isEmpty()) ? paramIdForName(item.name) : item.id;
+      int id = (byName && !item.name.isEmpty()) ? paramIdForName(item.name) : item.id;
+      // A nameless entry falling back to its file id gets the same check the
+      // push route applies (resolveAndPushImport): with a table in hand, an id
+      // this build has no parameter for is dropped rather than stored. Without
+      // the check the row still went into the library and loadPatch() pushed it
+      // at the synth later, addressing nothing.
+      if (byName && item.name.isEmpty() && !paramExists(id)) id = -1;
       if (id < 0) continue;
       // A nameless entry can still land on an action. pushParams() drops those
       // at load time, but they have no business in a stored row either.

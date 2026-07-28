@@ -44,7 +44,13 @@ ToolBar {
             visible: swipeView.currentIndex > 0
             onClicked: if (swipeView.currentIndex > 0) swipeView.currentIndex--
         }
-        Item { visible: !prevButton.visible; width: 8 }
+        // Stands in for the hidden prev button so the title does not jump to the
+        // edge on the first page. Layout.preferredWidth, not width: a RowLayout
+        // sets its children's width itself, from their preferred/implicit size,
+        // so a plain `width: 8` was overwritten with the Item's implicitWidth of
+        // 0 — the spacer was not there at all, while fixedChromeWidth below has
+        // always charged 8 px for it.
+        Item { visible: !prevButton.visible; Layout.preferredWidth: 8 }
 
         ColumnLayout {
             Layout.fillWidth: true

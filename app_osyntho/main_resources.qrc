@@ -6,7 +6,13 @@
         <file>assets/fontawesome/freesolid6.otf</file>
         <file>assets/graph.svg</file>
     </qresource>
-    <qresource prefix="/">
-        <file>qml/Toast.qml</file>
-    </qresource>
+    <!-- No qml/ entries here. Every QML file is registered through
+         qt_add_qml_module (QML_FILES) in CMakeLists.txt, which compiles it and
+         then drops the source thanks to DISCARD_QML_CONTENTS. Toast.qml used to
+         be listed here as well, under the "/" prefix: it was compiled into the
+         module AND embedded a second time as raw source, which is exactly what
+         DISCARD_QML_CONTENTS is there to prevent. Nothing loaded it from
+         :/qml/Toast.qml — ToastManager's Qt.createComponent("Toast.qml")
+         resolves relative to its own module URL, so it always used the module
+         copy. -->
 </RCC>

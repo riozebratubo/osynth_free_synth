@@ -120,11 +120,18 @@ ApplicationWindow {
             toast.show(t.t("Could not write the backup file."), 4000)
     }
 
+    // Where an Android restore is staged; the picker copies the chosen file
+    // here. Deliberately NOT the database's own path: the picker would then be
+    // writing straight over the live database, which meant the file had to be
+    // taken on trust — anything the user picked became the database, valid or
+    // not. Staged first, restoreBackupFrom() checks it, and the app is left
+    // alone if it isn't a backup.
+    readonly property string backupImportPath: App.exportFileLocation("restore.db")
+
     function restoreBackup() {
         if (App.isAndroid()) {
-            App.forceCloseDatabase()
             pendingRestore = true
-            App.selectFile(App.getDatabaseFileLocation(), "db")
+            App.selectFile(backupImportPath, "db")
         } else if (nativePickers) {
             const path = App.openFileDialog("db", downloadsFolder)
             if (path.length > 0) App.restoreBackupFrom(path)
@@ -273,8 +280,10 @@ ApplicationWindow {
             }
             if (pendingRestore) {
                 pendingRestore = false
-                App.forceOpenDatabase()
-                App.emitDatabaseRestored()
+                // Reports its own failure through onRestoreFailed below, and
+                // leaves the database untouched unless the staged file checks
+                // out — so there is nothing to roll back here any more.
+                App.restoreBackupFrom(mainWindow.backupImportPath)
             }
         }
         function onSelectFileCanceled() {
@@ -282,16 +291,17 @@ ApplicationWindow {
                 pendingJsonImport = false
                 return
             }
-            if (pendingRestore) {
-                pendingRestore = false
-                App.forceOpenDatabase()
-            }
+            if (pendingRestore) pendingRestore = false
         }
         function onDatabaseRestored() {
             App.onDatabaseRestoredAction()
             reApplySettings()
             toast.show(t.t("Backup restored."), 3000)
         }
+        // A restore that did not happen. Without this the success toast above
+        // was shown either way, so a rejected file — or one that failed to copy
+        // and was rolled back — looked exactly like a restore that worked.
+        function onRestoreFailed(reason) { toast.show(reason, 5000, "#B00020", "white") }
     }
 
     Connections {
@@ -418,6 +428,26 @@ ApplicationWindow {
                 anchors.bottom: parent.bottom
                 visible: mainWindow.keyboardVisible && Synth.connected
             }
+
+            // Computer-keyboard capture, owned here because it feeds BOTH
+            // performance surfaces and this is the only place that can see the
+            // two. It used to be bound inside Keyboard.qml to that component's
+            // own `visible`, so turning the keyboard off from the toolbar menu
+            // also stopped Q…I / 1…8 firing drum pads that were still on
+            // screen. Each surface still gates what it does with the keys:
+            // Keyboard's note handlers are enabled only while it is visible,
+            // and DrumPads answers whether or not it is (playing pads from the
+            // keys while they are hidden is the point of having them there).
+            //
+            // While only the pads are up the piano rows are consumed without
+            // sounding anything. That costs nothing: the app binds no other
+            // keys, and App's filter already steps aside for focused text
+            // fields and for anything held with Ctrl/Alt/Meta.
+            Component.onCompleted: App.keyboardCaptureEnabled = Qt.binding(function() {
+                return App.isDesktop() && keyboard.computerKeys
+                       && (keyboard.visible || drumPads.visible)
+            })
+            Component.onDestruction: App.keyboardCaptureEnabled = false
         }
     }
 

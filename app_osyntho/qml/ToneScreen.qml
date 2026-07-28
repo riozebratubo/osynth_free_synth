@@ -18,7 +18,10 @@ Item {
 
             ParamGroup { title: "Oscillator 1"; prefix: "osc1" }
             ParamGroup { title: "Oscillator 2"; prefix: "osc2" }
-            ParamGroup { title: "Noise"; prefix: "noise" }
+            // No "Noise" card: no parameter is named noise.* on any engine —
+            // the noise level is mix.noise, which the Mixer card below already
+            // shows. The card was permanently empty, and an empty ParamGroup
+            // hides itself, so nothing ever pointed it out.
             ParamGroup { title: "Mixer"; prefix: "mix"; capBit: 16 }
             ParamGroup { title: "Partials / Spectrum"; prefix: "add" }
             ParamGroup { title: "Velocity"; prefix: "vel." }
