@@ -229,6 +229,33 @@ Translator::Translator()
   pt["Preset name"] = "Nome do preset";
   pt["Save"] = "Salvar";
 
+  // ── Patch interchange (Main.qml, PresetsScreen.qml, PatchLibraryScreen.qml,
+  //    synthcontroller.cpp) ────────────────────────────────────────────────
+  pt["Import…"] = "Importar…";
+  pt["Export all…"] = "Exportar tudo…";
+  pt["Export this patch to a JSON file"] = "Exportar este patch para um arquivo JSON";
+  pt["Export this preset to a JSON file. It is loaded first — the only way to read a slot."] =
+      "Exportar este preset para um arquivo JSON. Ele é carregado antes — é a única forma de "
+      "ler um slot.";
+  pt["Patch files (*.json)"] = "Arquivos de patch (*.json)";
+  pt["Exported."] = "Exportado.";
+  pt["Nothing to export."] = "Nada para exportar.";
+  pt["Could not write the file."] = "Não foi possível gravar o arquivo.";
+  pt["Could not read the file."] = "Não foi possível ler o arquivo.";
+  pt["Connect to the synth first."] = "Conecte-se ao sintetizador primeiro.";
+  pt["Loading preset %1 to read it…"] = "Carregando o preset %1 para lê-lo…";
+  pt["That file is not valid JSON."] = "Esse arquivo não é um JSON válido.";
+  pt["That file holds no patch."] = "Esse arquivo não contém nenhum patch.";
+  pt["That patch file is version %1; this app reads up to %2."] =
+      "Esse arquivo de patch é da versão %1; este app lê até a versão %2.";
+  pt["That file holds %1 patches; imported the first."] =
+      "Esse arquivo contém %1 patches; o primeiro foi importado.";
+  pt["No parameter in that file matches this synth."] =
+      "Nenhum parâmetro desse arquivo corresponde a este sintetizador.";
+  pt["Applied %1 parameters."] = "%1 parâmetros aplicados.";
+  pt["Applied %1 parameters; %2 in the file do not apply to this synth."] =
+      "%1 parâmetros aplicados; %2 do arquivo não se aplicam a este sintetizador.";
+
   // ── Patch library (PatchLibraryScreen.qml) ─────────────────────────────
   pt["Patch library"] = "Biblioteca de patches";
   pt["Save current…"] = "Salvar atual…";

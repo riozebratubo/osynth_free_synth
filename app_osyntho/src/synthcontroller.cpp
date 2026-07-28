@@ -4,7 +4,10 @@
 
 #include <QDateTime>
 #include <QDebug>
-#include <QSet>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonValue>
 
 #include <cmath>
 #include <limits>
@@ -15,6 +18,8 @@ using namespace SynthProto;
 namespace {
 constexpr int kSetCoalesceMs = 40;         // ~25 Hz knob-write batches
 constexpr int kEngineSwitchSettleMs = 400; // let 0x02xx re-register before a patch push
+constexpr int kPresetLoadSettleMs = 500;   // firmware finishes loading a preset slot
+constexpr int kPresetReadSettleMs = 400;   // GET_PARAM answers land before snapshotting
 constexpr int kMaxSetPairsPerFrame = 40;   // 4B header + 40×6B = 244B < 252
 constexpr int kMaxGetIdsPerFrame = 120;    // 4B header + 120×2B = 244B < 252
 
@@ -876,6 +881,235 @@ bool SynthController::renamePatch(int patchId, const QString& name) {
 bool SynthController::deletePatch(int patchId) { return db().deletePatch(patchId); }
 
 QVariantList SynthController::patches(int engine) { return db().getPatches(engine); }
+
+/* ---------------------------------------------- patch interchange (JSON) */
+
+// One patch as it travels in a file. `created` is written only when there is
+// one to write (the library rows carry it; a live snapshot does not).
+//
+//   { "format": "osyntho.patch", "version": 1, "name": …, "engine": 2,
+//     "engineName": "FM",
+//     "params": [ { "name": "flt.cutoff", "id": 42, "value": 0.63 }, … ] }
+//
+// A parameter with no name is one this build has no metadata for — it still
+// goes out with its id so a round trip on the same firmware is lossless.
+QJsonObject SynthController::patchJsonObject(const QString& name,
+                                             int engine,
+                                             const QString& created,
+                                             const QList<QPair<int, double>>& params) const {
+  QJsonArray items;
+  for (const auto& pv : params) {
+    const QString pname = paramName(pv.first);
+    // Skip what a patch must never carry, so a file can never make an importer
+    // fire a drum or overwrite a preset slot. See isNotPatchMaterial().
+    if (isNotPatchMaterial(pname)) continue;
+    QJsonObject item;
+    if (!pname.isEmpty()) item["name"] = pname;
+    item["id"] = pv.first;
+    item["value"] = pv.second;
+    items.append(item);
+  }
+
+  QJsonObject out;
+  out["format"] = QStringLiteral("osyntho.patch");
+  out["version"] = kPatchJsonVersion;
+  out["name"] = name;
+  out["engine"] = engine;
+  out["engineName"] = engineNameFor(engine);
+  if (!created.isEmpty()) out["created"] = created;
+  out["params"] = items;
+  return out;
+}
+
+QString SynthController::patchToJson(int patchId) const {
+  const QVariantList rows = db().getPatches(-1);
+  for (const QVariant& r : rows) {
+    const QVariantMap m = r.toMap();
+    if (m.value("id").toInt() != patchId) continue;
+    const QJsonObject obj = patchJsonObject(m.value("name").toString(),
+                                            m.value("engine").toInt(),
+                                            m.value("created").toString(),
+                                            db().getPatchParams(patchId));
+    return QString::fromUtf8(QJsonDocument(obj).toJson(QJsonDocument::Indented));
+  }
+  return QString();
+}
+
+// The whole library: the same per-patch objects, in an array, under an envelope
+// that names and versions the collection itself.
+QString SynthController::libraryToJson() const {
+  QJsonArray patchArray;
+  const QVariantList rows = db().getPatches(-1);
+  for (const QVariant& r : rows) {
+    const QVariantMap m = r.toMap();
+    patchArray.append(patchJsonObject(m.value("name").toString(),
+                                      m.value("engine").toInt(),
+                                      m.value("created").toString(),
+                                      db().getPatchParams(m.value("id").toInt())));
+  }
+
+  QJsonObject out;
+  out["format"] = QStringLiteral("osyntho.patchlib");
+  out["version"] = kPatchJsonVersion;
+  out["exported"] = QDateTime::currentDateTime().toString(Qt::ISODate);
+  out["patches"] = patchArray;
+  return QString::fromUtf8(QJsonDocument(out).toJson(QJsonDocument::Indented));
+}
+
+void SynthController::exportPresetJson(int engine, int slot) {
+  if (!m_connected || !m_ready) {
+    emit showError(Translator::instance().t("Connect to the synth first."));
+    return;
+  }
+
+  // A preset lives on the synth and there is no "read slot" opcode: the only
+  // way to see its parameters is to load it and read back what changed. So the
+  // export really does load the preset — the toast says so, because the sound
+  // changing under the user would otherwise look like a bug.
+  QString name;
+  for (const PresetEntry& e : m_presets.value(engine)) {
+    if (int(e.slot) == slot) {
+      name = e.name;
+      break;
+    }
+  }
+  if (name.isEmpty()) name = QStringLiteral("preset-%1").arg(slot);
+
+  emit showInfo(Translator::instance().ts("Loading preset %1 to read it…", QString::number(slot)));
+  loadPreset(engine, slot);
+
+  // Two hops: let the firmware finish loading the slot, then sweep the values
+  // (EVT_PARAMS after a preset load is not guaranteed to reach us complete) and
+  // let the answers land before snapshotting.
+  QTimer::singleShot(kPresetLoadSettleMs, this, [this, engine, name]() {
+    requestAllParamValues();
+    QTimer::singleShot(kPresetReadSettleMs, this, [this, engine, name]() {
+      QList<QPair<int, double>> params;
+      for (quint16 id : std::as_const(m_paramOrder)) {
+        const Param& p = m_params.value(id);
+        if (p.valueKnown) params.append({int(id), double(p.value)});
+      }
+      if (params.isEmpty()) {
+        emit showError(Translator::instance().t("Nothing to save yet — no parameters have been read."));
+        return;
+      }
+      const QJsonObject obj = patchJsonObject(name, engine, QString(), params);
+      emit presetJsonReady(QString::fromUtf8(QJsonDocument(obj).toJson(QJsonDocument::Indented)),
+                           name);
+    });
+  });
+}
+
+// Names first. The id is used only for an entry that carries no name at all —
+// a file exported with no parameter table to name it by — and only when this
+// build has that id. A name this firmware does not know is dropped rather than
+// followed to its id, which on another firmware is some unrelated parameter.
+void SynthController::resolveAndPushImport(const QList<NamedParam>& items) {
+  QList<QPair<int, double>> resolved;
+  int skipped = 0;
+  for (const NamedParam& item : items) {
+    int id = item.name.isEmpty() ? -1 : paramIdForName(item.name);
+    if (id < 0 && item.name.isEmpty() && item.id >= 0 && paramExists(item.id)) id = item.id;
+    // A nameless entry can still resolve to an action parameter. pushParams()
+    // drops it either way, but not counting it here would make the tally lie.
+    if (id < 0 || isNotPatchMaterial(paramName(id))) {
+      ++skipped;
+      continue;
+    }
+    resolved.append({id, item.value});
+  }
+
+  if (resolved.isEmpty()) {
+    emit showError(Translator::instance().t("No parameter in that file matches this synth."));
+    return;
+  }
+  pushParams(resolved);
+  if (skipped > 0) {
+    emit showInfo(Translator::instance().ts("Applied %1 parameters; %2 in the file do not apply to this synth.",
+                                            QString::number(resolved.size()),
+                                            QString::number(skipped)));
+  } else {
+    emit showInfo(Translator::instance().ts("Applied %1 parameters.", QString::number(resolved.size())));
+  }
+}
+
+QVariantMap SynthController::importPatchJson(const QString& text) {
+  // Reported as a toast as well as returned: every caller wants it shown, and
+  // showError is already wired to one.
+  const auto fail = [this](const QString& why) {
+    emit showError(why);
+    return QVariantMap{{"ok", false}, {"error", why}, {"name", QString()}};
+  };
+
+  QJsonParseError err{};
+  const QJsonDocument doc = QJsonDocument::fromJson(text.toUtf8(), &err);
+  if (err.error != QJsonParseError::NoError)
+    return fail(Translator::instance().t("That file is not valid JSON."));
+
+  // Accept a single patch, the library envelope, or a bare array of patches —
+  // the last two hold more than one, and importing means "push one to the
+  // synth", so the first is taken and the count is reported.
+  QJsonObject patch;
+  int total = 1;
+  if (doc.isArray()) {
+    const QJsonArray arr = doc.array();
+    total = arr.size();
+    if (!arr.isEmpty()) patch = arr.first().toObject();
+  } else if (doc.isObject()) {
+    const QJsonObject root = doc.object();
+    if (root.value("patches").isArray()) {
+      const QJsonArray arr = root.value("patches").toArray();
+      total = arr.size();
+      if (!arr.isEmpty()) patch = arr.first().toObject();
+    } else {
+      patch = root;
+    }
+  }
+  if (patch.isEmpty() || !patch.value("params").isArray())
+    return fail(Translator::instance().t("That file holds no patch."));
+
+  const int version = patch.value("version").toInt(0);
+  if (version > kPatchJsonVersion)
+    return fail(Translator::instance().ts("That patch file is version %1; this app reads up to %2.",
+                                          QString::number(version),
+                                          QString::number(kPatchJsonVersion)));
+
+  QList<NamedParam> items;
+  const QJsonArray arr = patch.value("params").toArray();
+  for (const QJsonValue& v : arr) {
+    const QJsonObject o = v.toObject();
+    if (!o.value("value").isDouble()) continue;
+    NamedParam item;
+    item.name = o.value("name").toString();
+    item.id = o.value("id").isDouble() ? o.value("id").toInt() : -1;
+    item.value = o.value("value").toDouble();
+    if (isNotPatchMaterial(item.name)) continue;  // never replay an action
+    items.append(item);
+  }
+  if (items.isEmpty()) return fail(Translator::instance().t("That file holds no patch."));
+
+  const QString name = patch.value("name").toString();
+  const int engine = patch.value("engine").isDouble() ? patch.value("engine").toInt() : -1;
+
+  if (engine >= 0 && engine != m_engine) {
+    // The ids the names resolve to only exist after the new engine has
+    // re-registered, so resolution waits with the push.
+    selectEngine(engine);
+    m_pendingImport = items;
+    QTimer::singleShot(kEngineSwitchSettleMs, this, [this]() {
+      resolveAndPushImport(m_pendingImport);
+      m_pendingImport.clear();
+    });
+  } else {
+    resolveAndPushImport(items);
+  }
+
+  if (total > 1) {
+    emit showInfo(Translator::instance().ts("That file holds %1 patches; imported the first.",
+                                            QString::number(total)));
+  }
+  return QVariantMap{{"ok", true}, {"error", QString()}, {"name", name}};
+}
 
 /* ======================================================================== */
 /*  Sequencer (S23)                                                         */

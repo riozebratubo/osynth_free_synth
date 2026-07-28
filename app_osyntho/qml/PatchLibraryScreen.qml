@@ -27,7 +27,16 @@ Item {
                 font.bold: true
                 font.pointSize: UI.fontSize * 1.1
                 color: Material.foreground
+                elide: Label.ElideRight
                 Layout.fillWidth: true
+            }
+            Button {
+                text: t.t("Export all…")
+                // Exports from the stored rows, so it works disconnected; the
+                // parameter names are filled in only when the synth is there to
+                // supply them (see patchToJson).
+                enabled: screen.patchList.length > 0
+                onClicked: UI.exportJsonRequested(Synth.libraryToJson(), "osyntho-patches")
             }
             Button {
                 text: t.t("Save current…")
@@ -71,6 +80,17 @@ Item {
                         // the parameter table, which is what `ready` announces.
                         enabled: Synth.connected && Synth.ready
                         onClicked: Synth.loadPatch(modelData.id)
+                    }
+                    // Icon-only: a fourth worded button does not fit a phone row.
+                    ToolButton {
+                        text: ""  // file-export
+                        font.family: App.fontAwesomeName
+                        font.weight: Font.Black  // solid face
+                        font.pointSize: UI.fontSize
+                        onClicked: UI.exportJsonRequested(Synth.patchToJson(modelData.id),
+                                                          modelData.name)
+                        ToolTip.visible: hovered
+                        ToolTip.text: t.t("Export this patch to a JSON file")
                     }
                     Button {
                         text: t.t("Rename")

@@ -23,6 +23,19 @@ Item {
         function onEngineChanged() { screen.engine = Synth.engine; screen.requestList(); screen.refresh() }
         function onReadyChanged() { screen.requestList() }
         function onConnectedChanged() { if (Synth.connected) screen.requestList() }
+        // exportPresetJson() had to load the slot to read it; the file text
+        // comes back here once the values have landed.
+        function onPresetJsonReady(json, name) { UI.exportJsonRequested(json, name) }
+    }
+
+    Connections {
+        target: UI
+        // This page owns the Import button, so it is the one that consumes the
+        // picked file. The name seeds the save row below, ready to store it.
+        function onJsonImported(text) {
+            const result = Synth.importPatchJson(text)
+            if (result.ok && result.name.length > 0) nameField.text = result.name
+        }
     }
 
     ColumnLayout {
@@ -37,7 +50,15 @@ Item {
                 font.bold: true
                 font.pointSize: UI.fontSize * 1.1
                 color: Material.foreground
+                elide: Label.ElideRight
                 Layout.fillWidth: true
+            }
+            ToolButton {
+                text: t.t("Import…")
+                // Applies the file to the live sound; the save row below then
+                // writes it to a slot, which is the synth's own step.
+                enabled: Synth.connected && Synth.ready
+                onClicked: UI.importJsonRequested()
             }
             ToolButton {
                 text: t.t("Refresh")
@@ -77,6 +98,17 @@ Item {
                         text: t.t("factory")
                         opacity: 0.6
                         color: Material.foreground
+                    }
+                    // Icon-only, to keep the row usable on a phone.
+                    ToolButton {
+                        text: "\uf56e"  // file-export
+                        font.family: App.fontAwesomeName
+                        font.weight: Font.Black  // solid face
+                        font.pointSize: UI.fontSize
+                        enabled: Synth.connected && Synth.ready
+                        onClicked: Synth.exportPresetJson(screen.engine, modelData.slot)
+                        ToolTip.visible: hovered
+                        ToolTip.text: t.t("Export this preset to a JSON file. It is loaded first — the only way to read a slot.")
                     }
                     Button {
                         text: t.t("Load")

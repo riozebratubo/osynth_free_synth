@@ -62,6 +62,16 @@ QtObject {
     readonly property int drumNote: paintDrumNote >= 0 ? paintDrumNote
                                                        : Synth.defaultDrumNote
 
+    // Patch interchange. The pages build and consume the JSON; the shell
+    // (Main.qml) owns the pickers and the per-platform delivery, exactly as it
+    // does for the database backup. `suggestedName` is a bare base name — the
+    // shell makes it safe for a file system and adds the extension.
+    signal exportJsonRequested(string text, string suggestedName)
+    signal importJsonRequested()
+    // A picked file's contents, answering importJsonRequested(). Only the page
+    // that asked should act on it — today that is PresetsScreen alone.
+    signal jsonImported(string text)
+
     signal restoreBackupRequested()
     signal shareBackupRequested()
     signal updateFirmwareRequested(string extension)

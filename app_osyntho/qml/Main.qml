@@ -107,6 +107,79 @@ ApplicationWindow {
         }
     }
 
+    // ---- Patch interchange (JSON): pickers and per-platform delivery ----
+    // Held between opening the save picker and the user choosing a path.
+    property string pendingExportText: ""
+    // True while a native "import patch" file pick is in flight (Android).
+    property bool pendingJsonImport: false
+    // Where an Android import is staged; the picker copies the chosen file here.
+    readonly property string jsonImportPath: App.exportFileLocation("import.json")
+
+    // Patch names are free text and file names are not.
+    function safeFileName(name, fallback) {
+        var base = String(name || "").replace(/[^A-Za-z0-9 ._-]/g, "_").trim()
+        if (base.length === 0) base = fallback
+        return base + ".json"
+    }
+
+    function exportJson(text, suggestedName) {
+        if (!text || text.length === 0) {
+            toast.show(t.t("Nothing to export."), 3000)
+            return
+        }
+        const fileName = safeFileName(suggestedName, "osyntho-patch")
+        if (App.isAndroid()) {
+            // No save picker on Android: stage the file in app storage and hand
+            // it to the share sheet, the same route the database backup takes.
+            const path = App.exportFileLocation(fileName)
+            if (App.writeTextFile(path, text)) App.shareFile(path)
+            else toast.show(t.t("Could not write the file."), 4000)
+        } else {
+            pendingExportText = text
+            jsonSaveDialog.selectedFile = jsonSaveDialog.currentFolder + "/" + fileName
+            jsonSaveDialog.open()
+        }
+    }
+
+    function importJson() {
+        if (App.isAndroid()) {
+            pendingJsonImport = true
+            App.selectFile(jsonImportPath, "json")
+        } else {
+            jsonOpenDialog.open()
+        }
+    }
+
+    FileDialog {
+        id: jsonSaveDialog
+        fileMode: FileDialog.SaveFile
+        options: FileDialog.DontUseNativeDialog
+        defaultSuffix: "json"
+        currentFolder: StandardPaths.standardLocations(StandardPaths.DocumentsLocation)[0]
+        nameFilters: [t.t("Patch files (*.json)"), t.t("All files (*)")]
+        onAccepted: {
+            if (App.writeTextFile(selectedFile, mainWindow.pendingExportText))
+                toast.show(t.t("Exported."), 3000)
+            else
+                toast.show(t.t("Could not write the file."), 4000)
+            mainWindow.pendingExportText = ""
+        }
+        onRejected: mainWindow.pendingExportText = ""
+    }
+
+    FileDialog {
+        id: jsonOpenDialog
+        fileMode: FileDialog.OpenFile
+        options: FileDialog.DontUseNativeDialog
+        currentFolder: StandardPaths.standardLocations(StandardPaths.DocumentsLocation)[0]
+        nameFilters: [t.t("Patch files (*.json)"), t.t("All files (*)")]
+        onAccepted: {
+            const text = App.readTextFile(selectedFile)
+            if (text.length > 0) UI.jsonImported(text)
+            else toast.show(t.t("Could not read the file."), 4000)
+        }
+    }
+
     FileDialog {
         id: backupSaveDialog
         fileMode: FileDialog.SaveFile
@@ -129,6 +202,8 @@ ApplicationWindow {
         target: UI
         function onShareBackupRequested() { shareBackup() }
         function onRestoreBackupRequested() { restoreBackup() }
+        function onExportJsonRequested(text, suggestedName) { exportJson(text, suggestedName) }
+        function onImportJsonRequested() { importJson() }
         function onSettingsRequested() { mainStackView.push("SettingsScreen.qml", {}) }
         function onSelectDeviceRequested() { mainStackView.push("BluetoothDeviceSelectorScreen.qml", {}) }
         function onUpdateFirmwareRequested(extension) {
@@ -139,6 +214,15 @@ ApplicationWindow {
     Connections {
         target: App
         function onSelectFileSelected(filename) {
+            // The signal carries a display name, not a path — the picker copied
+            // the file to the destination we asked for, so read that.
+            if (pendingJsonImport) {
+                pendingJsonImport = false
+                const text = App.readTextFile(mainWindow.jsonImportPath)
+                if (text.length > 0) UI.jsonImported(text)
+                else toast.show(t.t("Could not read the file."), 4000)
+                return
+            }
             if (pendingRestore) {
                 pendingRestore = false
                 App.forceOpenDatabase()
@@ -146,6 +230,10 @@ ApplicationWindow {
             }
         }
         function onSelectFileCanceled() {
+            if (pendingJsonImport) {
+                pendingJsonImport = false
+                return
+            }
             if (pendingRestore) {
                 pendingRestore = false
                 App.forceOpenDatabase()

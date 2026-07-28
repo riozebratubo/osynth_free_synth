@@ -3,6 +3,7 @@
 
 #include <QByteArray>
 #include <QHash>
+#include <QJsonObject>
 #include <QList>
 #include <QObject>
 #include <QPair>
@@ -242,6 +243,23 @@ class SynthController : public QObject, public DatabaseClient, public SettingsCl
   Q_INVOKABLE bool deletePatch(int patchId);
   Q_INVOKABLE QVariantList patches(int engine = -1);  // -1 = all engines
 
+  // --- patch interchange (JSON, format version 1) -------------------------
+  // Parameters travel by NAME ("flt.cutoff"), because ids are registration
+  // order and shift between engines and firmware builds. The id is written
+  // alongside as a fallback for files exported while disconnected, when the
+  // stored patch's names cannot be resolved.
+  static constexpr int kPatchJsonVersion = 1;
+  Q_INVOKABLE QString patchToJson(int patchId) const;  // one stored library patch
+  Q_INVOKABLE QString libraryToJson() const;           // every stored patch, as an array
+  // Reads a synth preset slot: loads it, re-reads the values, then hands the
+  // JSON back through presetJsonReady(). Loading is the only way to see a
+  // preset's parameters — the synth does not serve slots it has not loaded —
+  // so this *does* change the live sound.
+  Q_INVOKABLE void exportPresetJson(int engine, int slot);
+  // Parses a patch file and pushes it to the synth. Returns
+  // { ok, error, name }; the applied/skipped counts arrive as a showInfo().
+  Q_INVOKABLE QVariantMap importPatchJson(const QString& text);
+
   static QString engineNameFor(int engine);
 
  public slots:
@@ -267,6 +285,9 @@ class SynthController : public QObject, public DatabaseClient, public SettingsCl
   void paramsDiscovered();
   // A preset list arrived for an engine.
   void presetsChanged(int engine);
+  // exportPresetJson() finished reading a slot: the patch file text, and the
+  // preset's name for the suggested file name.
+  void presetJsonReady(const QString& json, const QString& name);
 
   // Sequencer: sizing/capacity, the cached steps or track config, the edited
   // target, and the playhead (which moves ~20 Hz and drives only the grid's
@@ -392,6 +413,22 @@ class SynthController : public QObject, public DatabaseClient, public SettingsCl
   // A patch load may need to switch engine first; the snapshot waits here.
   QList<QPair<int, double>> m_pendingPatchParams;
   void pushParams(const QList<QPair<int, double>>& params);
+
+  // --- patch interchange helpers -----------------------------------------
+  // One parameter as it travels in a file: name is authoritative, id the
+  // fallback for files written with no parameter table to name them by.
+  struct NamedParam {
+    QString name;
+    int id = -1;
+    double value = 0.0;
+  };
+  // Built after an engine switch, when the ids the names resolve to exist.
+  QList<NamedParam> m_pendingImport;
+  QJsonObject patchJsonObject(const QString& name,
+                              int engine,
+                              const QString& created,
+                              const QList<QPair<int, double>>& params) const;
+  void resolveAndPushImport(const QList<NamedParam>& items);
 
   // Cached preset lists per engine, and accumulation across chunked frames.
   QHash<int, QList<SynthProto::PresetEntry>> m_presets;

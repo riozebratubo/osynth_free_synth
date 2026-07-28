@@ -284,6 +284,40 @@ void App::forceCloseDatabase() { database.forceCloseDatabase(); }
 
 void App::forceOpenDatabase() { database.forceOpenOrCreateDatabase(); }
 
+bool App::writeTextFile(const QString& fileFullPath, const QString& text) {
+  const QString path = AppUtils::getFilePathFromCanonical(fileFullPath);
+  QFile file{path};
+  // No QIODevice::Text: the bytes are written verbatim, so what lands on disk is
+  // exactly the UTF-8 that was handed in — no CRLF translation to reason about
+  // when the same file is read back on another platform.
+  if (not file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+    qWarning() << "App | Could not open for writing:" << path << file.errorString();
+    return false;
+  }
+  const QByteArray utf8 = text.toUtf8();
+  const bool ok = file.write(utf8) == utf8.size();
+  file.close();
+  return ok;
+}
+
+QString App::readTextFile(const QString& fileFullPath) {
+  const QString path = AppUtils::getFilePathFromCanonical(fileFullPath);
+  QFile file{path};
+  if (not file.open(QIODevice::ReadOnly)) {
+    qWarning() << "App | Could not open for reading:" << path << file.errorString();
+    return QString();
+  }
+  const QString text = QString::fromUtf8(file.readAll());
+  file.close();
+  return text;
+}
+
+QString App::exportFileLocation(const QString& fileName) {
+  const QString path = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+  QDir{}.mkpath(path);  // first export of a fresh install: the dir may not exist
+  return path + (((path.right(1) == "\\") or (path.right(1) == "/")) ? "" : "/") + fileName;
+}
+
 void App::setFirmwareFileExtension(const QString& extension) { m_firmwareFileExtension = extension; }
 
 QString App::getFirmwareFileExtension() { return m_firmwareFileExtension; }

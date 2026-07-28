@@ -82,6 +82,13 @@ class App : public QObject {
   Q_INVOKABLE void forceCloseDatabase();
   Q_INVOKABLE void forceOpenDatabase();
 
+  // Patch interchange files. Both take either a plain path or the file:// URL a
+  // QML FileDialog hands back. exportFileLocation() is the app-private staging
+  // path Android exports are written to before being handed to shareFile().
+  Q_INVOKABLE bool writeTextFile(const QString& fileFullPath, const QString& text);
+  Q_INVOKABLE QString readTextFile(const QString& fileFullPath);
+  Q_INVOKABLE QString exportFileLocation(const QString& fileName);
+
   // Kept for a future osynth firmware-update capability (none today).
   Q_INVOKABLE void setFirmwareFileExtension(const QString& extension);
   Q_INVOKABLE QString getFirmwareFileExtension();
