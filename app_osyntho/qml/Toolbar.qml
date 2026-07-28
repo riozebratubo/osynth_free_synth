@@ -1,0 +1,271 @@
+import QtQuick
+import QtQuick.Layouts
+import QtQuick.Controls.Material
+
+import org.osynth.osyntho
+
+// Top toolbar: page prev/next for the horizontal SwipeView, a connection
+// indicator, and the overflow menu (Backup / Device / Firmware / Settings).
+// Instantiated inside Main.qml, so it resolves Main's ids (swipeView,
+// mainStackView) through the context chain.
+//
+// Icons are Font Awesome 6 Free solid glyphs written as "\uXXXX" escapes; the
+// weight pin (Font.Black) selects the solid face over the regular one.
+ToolBar {
+    id: t1
+
+    property string title: "Osyntho"
+    property string subtitle: ""
+
+    Material.foreground: App.theme.primaryColor
+    Material.background: App.theme.primaryBgColor
+
+    // Toolbar width spent on chrome that is never dropped. Deliberately built
+    // from constants and from items whose width cannot depend on the
+    // transports — measuring the (fillWidth) title column instead would make
+    // the fit test oscillate: hide the strip, gain room, show it again.
+    readonly property real fixedChromeWidth:
+        (prevButton.visible ? prevButton.width : 8)
+        + (masterVol.visible ? 76 : 0)
+        + plugLabel.width + 4
+        + menuButton.width
+        + (nextButton.visible ? nextButton.width : 0)
+        + 24  // RowLayout spacing and margins
+
+    RowLayout {
+        anchors.fill: parent
+
+        ToolButton {
+            id: prevButton
+            text: "\uf104"  // angle-left
+            font.family: App.fontAwesomeName
+            font.weight: Font.Black  // solid face
+            font.pointSize: UI.fontSize * 1.2
+            visible: swipeView.currentIndex > 0
+            onClicked: if (swipeView.currentIndex > 0) swipeView.currentIndex--
+        }
+        Item { visible: !prevButton.visible; width: 8 }
+
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: -4
+            Label {
+                text: t1.title
+                font.family: "Open Sans"
+                font.pointSize: UI.fontSize * 1.4
+                color: App.theme.primaryColor
+                elide: Label.ElideRight
+                Layout.fillWidth: true
+            }
+            Label {
+                text: t1.subtitle
+                font.family: "Open Sans"
+                font.pointSize: UI.fontSize * 0.8
+                color: App.theme.primaryColor
+                elide: Label.ElideRight
+                visible: t1.subtitle !== ""
+                Layout.fillWidth: true
+            }
+        }
+
+        BusyIndicator {
+            running: BluetoothManager.scanning
+            visible: running
+            Layout.maximumHeight: parent.height - 8
+        }
+
+        // Master volume: bound to the master.volume param (id 0x0000). Visible
+        // once discovered; reflects external changes (presets/MIDI) unless the
+        // user is dragging it. meta is refreshed imperatively because
+        // Synth.paramMeta() has no change signal (a plain binding would stay at
+        // its pre-discovery {exists:false} value forever).
+        RowLayout {
+            id: masterVol
+            readonly property int volId: 0  // master.volume == 0x0000
+            property var meta: ({ exists: false })
+            visible: meta.exists
+            spacing: 4
+            Layout.rightMargin: 6
+            Layout.preferredWidth: 70  // reserve space so the slider isn't squeezed to 0
+
+            function refresh() {
+                meta = Synth.paramMeta(volId)
+                if (meta.exists) {
+                    volSlider.syncing = true
+                    volSlider.value = Synth.paramValue(volId)
+                    volSlider.syncing = false
+                }
+            }
+            Component.onCompleted: refresh()
+
+            Connections {
+                target: Synth
+                function onParamsDiscovered() { masterVol.refresh() }
+                function onParamChanged(id, v) {
+                    if (id === masterVol.volId && !volSlider.pressed) {
+                        volSlider.syncing = true
+                        volSlider.value = v
+                        volSlider.syncing = false
+                    }
+                }
+            }
+
+            Label {
+                text: "\uf028"  // volume-up
+                font.family: App.fontAwesomeName
+                font.weight: Font.Black  // solid face
+                font.pointSize: UI.fontSize
+                color: App.theme.primaryColor
+                Layout.alignment: Qt.AlignVCenter
+            }
+            Slider {
+                id: volSlider
+                Layout.fillWidth: true
+                Layout.alignment: Qt.AlignVCenter
+                // Contrast against the coloured toolbar: the default accent equals
+                // the toolbar background (purple-on-purple = invisible handle).
+                Material.accent: App.theme.primaryColor
+                from: masterVol.meta.exists ? masterVol.meta.min : 0
+                to: masterVol.meta.exists ? masterVol.meta.max : 1
+                property bool syncing: false
+                onMoved: if (!syncing) Synth.setParam(masterVol.volId, value)
+            }
+        }
+
+        // Transports: looper and sequencer. Both when there is room, looper
+        // only when there is not \u2014 it is the one you reach for mid-take, and
+        // the sequencer has its own transport on its page anyway.
+        //
+        // The fit test is measured, not guessed at a breakpoint: each group
+        // reports its own implicitWidth, and the title column is allowed to
+        // shrink to `titleFloor` before either group is dropped. A hard-coded
+        // width threshold would be wrong at a different font size, and
+        // UI.fontSize is user-adjustable.
+        Item {
+            id: transports
+
+            // Resolved imperatively (paramIdForName has no change signal), so
+            // they update when discovery completes rather than staying at
+            // their pre-discovery value of -1 and hiding both groups forever.
+            property int seqModeId: -1
+            property int loopModeId: -1
+            property int loopArmedId: -1
+            function refreshIds() {
+                seqModeId = Synth.paramIdForName("seq.mode")
+                loopModeId = Synth.paramIdForName("loop.mode")
+                loopArmedId = Synth.paramIdForName("loop.armed")
+            }
+            Component.onCompleted: refreshIds()
+            Connections {
+                target: Synth
+                function onParamsDiscovered() { transports.refreshIds() }
+            }
+
+            readonly property real titleFloor: UI.fontSize * 5
+            readonly property real spare: t1.width - titleFloor - fixedChromeWidth
+            readonly property bool showLooper: loopTransport.present
+                                               && spare >= loopTransport.estimatedWidth
+            readonly property bool showSeq: seqTransport.present && showLooper
+                                            && spare >= loopTransport.estimatedWidth
+                                                        + seqTransport.estimatedWidth + 8
+
+            implicitWidth: (showSeq ? seqTransport.estimatedWidth + 8 : 0)
+                           + (showLooper ? loopTransport.estimatedWidth : 0)
+            implicitHeight: Math.max(seqTransport.implicitHeight,
+                                     loopTransport.implicitHeight)
+            Layout.alignment: Qt.AlignVCenter
+
+            RowLayout {
+                anchors.fill: parent
+                spacing: 8
+
+                TransportStrip {
+                    id: seqTransport
+                    caption: t.t("SEQ")
+                    modeId: transports.seqModeId
+                    visible: transports.showSeq
+                }
+                TransportStrip {
+                    id: loopTransport
+                    caption: t.t("LOOP")
+                    modeId: transports.loopModeId
+                    armedId: transports.loopArmedId
+                    visible: transports.showLooper
+                }
+            }
+        }
+
+        // Connection indicator (plug icon).
+        Label {
+            id: plugLabel
+            text: "\uf1e6"  // plug
+            font.family: App.fontAwesomeName
+            font.weight: Font.Black  // solid face
+            font.pointSize: UI.fontSize * 1.1
+            color: Synth.connected ? "#69F0AE" : Qt.rgba(1, 1, 1, 0.35)
+            Layout.rightMargin: 4
+        }
+
+        ToolButton {
+            id: menuButton
+            text: "\uf0c9"  // bars
+            font.family: App.fontAwesomeName
+            font.weight: Font.Black  // solid face
+            font.pointSize: UI.fontSize * 1.15
+            onClicked: mainMenu.open()
+
+            Menu {
+                id: mainMenu
+                y: menuButton.height
+
+                Menu {
+                    title: t.t("Backup")
+                    MenuItem { text: t.t("Save data..."); onTriggered: UI.shareBackupRequested() }
+                    MenuItem { text: t.t("Restore data..."); onTriggered: UI.restoreBackupRequested() }
+                }
+
+                MenuItem {
+                    text: t.t("Show keyboard")
+                    checkable: true
+                    checked: mainWindow.keyboardVisible
+                    onTriggered: mainWindow.keyboardVisible = !mainWindow.keyboardVisible
+                }
+
+                MenuItem {
+                    text: t.t("Show drum pads")
+                    checkable: true
+                    checked: mainWindow.drumPadsVisible
+                    onTriggered: mainWindow.drumPadsVisible = !mainWindow.drumPadsVisible
+                }
+
+                MenuItem {
+                    text: t.t("Select device...")
+                    onTriggered: mainStackView.push("BluetoothDeviceSelectorScreen.qml", {})
+                }
+
+                MenuItem {
+                    text: t.t("Update firmware...")
+                    enabled: Synth.firmwareUpdateSupported
+                    onTriggered: UI.updateFirmwareRequested("bin")
+                }
+
+                MenuSeparator {}
+
+                MenuItem {
+                    text: t.t("Settings")
+                    onTriggered: mainStackView.push("SettingsScreen.qml", {})
+                }
+            }
+        }
+
+        ToolButton {
+            id: nextButton
+            text: "\uf105"  // angle-right
+            font.family: App.fontAwesomeName
+            font.weight: Font.Black  // solid face
+            font.pointSize: UI.fontSize * 1.2
+            visible: swipeView.currentIndex < swipeView.count - 1
+            onClicked: if (swipeView.currentIndex < swipeView.count - 1) swipeView.currentIndex++
+        }
+    }
+}

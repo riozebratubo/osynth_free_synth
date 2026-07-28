@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>org.poproaster.caramel</string>
+    <key>CFBundleName</key>
+    <string>Caramel 2</string>
+    <key>CFBundleDisplayName</key>
+    <string>Caramel 2</string>
+    <key>CFBundleShortVersionString</key>
+    <string>@MACOSX_BUNDLE_SHORT_VERSION_STRING@</string>
+    <key>CFBundleVersion</key>
+    <string>@MACOSX_BUNDLE_BUNDLE_VERSION@</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleSignature</key>
+    <string>????</string>
+    <key>CFBundleExecutable</key>
+    <string>@MACOSX_BUNDLE_EXECUTABLE_NAME@</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>Caramel 2 needs Bluetooth to connect to your roaster device.</string>
+    <key>NSBluetoothPeripheralUsageDescription</key>
+    <string>Caramel 2 needs Bluetooth to connect to your roaster device.</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>Caramel 2 uses location to scan for nearby Bluetooth roaster devices.</string>
+    <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+    <string>Caramel 2 uses location to scan for nearby Bluetooth roaster devices.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Caramel 2 uses the camera to take pictures of your roast.</string>
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>Caramel 2 saves roast pictures to your photo library.</string>
+    <key>NSPhotoLibraryAddUsageDescription</key>
+    <string>Caramel 2 saves roast pictures to your photo library.</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>12.0</string>
+</dict>
+</plist>

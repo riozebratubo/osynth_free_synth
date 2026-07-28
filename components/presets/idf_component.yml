@@ -1,0 +1,7 @@
+## presets — LittleFS driver for the 1 MB `storage` partition (user presets
+## + sequence slots). ESP-IDF ships no littlefs of its own; joltwallet/littlefs
+## is the registry component the esp_littlefs project publishes. Works on both
+## targets; the first build after adding it downloads the component (network
+## needed once, like S3's tinyusb).
+dependencies:
+  joltwallet/littlefs: "^1.14.0"

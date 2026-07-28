@@ -1,0 +1,48 @@
+# osynth — shared defaults for all targets.
+# Target-specific overrides live in sdkconfig.defaults.esp32 / sdkconfig.defaults.esp32s3
+# (ESP-IDF picks those up automatically after this file).
+
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# -O2: the DSP code needs it
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# Max CPU clock (IDF defaults to 160 MHz): the render budget needs it.
+# ~27% idle FX load + ~12% per subtractive voice at 160 MHz meant full
+# polyphony overran the 1.33 ms block deadline (audible as noise bursts).
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# 1 kHz tick for fine-grained delays in control tasks
+CONFIG_FREERTOS_HZ=1000
+
+# Bluetooth (NimBLE) — used by ble_ctrl (Session 14). Enabled from day one so the
+# flash/RAM budget stays realistic throughout development.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+# ble_ctrl is a single-connection peripheral: drop the central/observer roles
+# and the spare connection slots to save RAM (matters on the classic ESP32,
+# which also carries the FX buffers in internal RAM).
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+# NimBLE logs two INFO lines for every notification. The synth sends events at
+# ~20 Hz and floods during parameter discovery, so at INFO the host task spends
+# a large part of its time in blocking UART writes — and it is the task that
+# has to find an mbuf for the next notification, so the chatter costs
+# reliability, not just readability. It also buries the firmware's own logs.
+CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y
+
+# Room for the param-registry dump and init logging in app_main
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
+
+# experiment — NOTE: the symbol is OSYNTH_BLOCK_SIZE (see
+# components/synth_core/Kconfig.projbuild). It was written as
+# CONFIG_AUDIO_BLOCK_SIZE, which is not a real symbol, so IDF silently
+# ignored it and the S21b measurements were taken at the default 64.
+# The per-stage meter since showed load is not the problem (peak 71% of
+# budget at 8 voices), so this is optional — drop it back to 64 if you
+# prefer the lower latency.
+CONFIG_OSYNTH_BLOCK_SIZE=64
+
+CONFIG_OSYNTH_HEARTBEAT_MS=5000

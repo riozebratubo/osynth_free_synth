@@ -1,0 +1,3 @@
+# Classic ESP32 target overrides (typical devkit: 4 MB flash, no PSRAM, no USB-OTG)
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+# CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y

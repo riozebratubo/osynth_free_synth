@@ -1,0 +1,12 @@
+<RCC>
+    <qresource prefix="/assets">
+        <file>assets/opensans/opensans.ttf</file>
+        <file>assets/fontawesome/brandsregular6.otf</file>
+        <file>assets/fontawesome/freeregular6.otf</file>
+        <file>assets/fontawesome/freesolid6.otf</file>
+        <file>assets/graph.svg</file>
+    </qresource>
+    <qresource prefix="/">
+        <file>qml/Toast.qml</file>
+    </qresource>
+</RCC>

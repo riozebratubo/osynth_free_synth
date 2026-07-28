@@ -1,0 +1,50 @@
+pragma Singleton
+
+import QtQuick
+
+// Session-state singleton shared by every screen/component. Main.qml assigns
+// `window` once on startup; components depend on this explicit object instead of
+// Main.qml internals. Upward requests (backup/firmware/settings/device flows)
+// are signals the shell (Main.qml, which owns the dialogs and pickers) connects
+// to.
+QtObject {
+    // The root ApplicationWindow. Set by Main.qml on startup.
+    property Window window
+
+    readonly property bool portrait: window ? window.width < window.height : false
+
+    // App.setting() reads are not tracked by the binding engine, so SettingsScreen
+    // re-assigns fontSize when the underlying setting changes.
+    property int fontSize: App.setting("app_font_size")
+    property bool desktopLayout: !portrait
+
+    // Panel layout (PanelFlow / ParamGroup): true packs the cards left to right
+    // at the width each needs, false gives every card its own full-width line.
+    // Same deal as fontSize — SettingsScreen re-assigns it on change.
+    property bool tiledPanels: App.setting("panel_layout") !== "rows"
+
+    // Note written into a step when you tap an empty cell in the sequencer
+    // grid. These live here rather than on SequencerScreen because the
+    // surfaces that *pick* them — the on-screen keyboard and the drum pads —
+    // are siblings of the SwipeView in Main.qml and cannot reach into a page.
+    // Right-click (desktop) or press-and-hold (touch) a key or pad to set one.
+    //
+    // Melodic and percussive picks are kept apart on purpose: choosing a kick
+    // on the pads should not throw away the C4 you lined up for a bass lane,
+    // and one shared value cannot have a sensible default for both — 60 is
+    // middle C on a keyboard and answers to no drum slot at all.
+    property int paintNote: 60
+
+    // -1 = nothing picked yet, so fall back to the kit's first slot (the kick
+    // in the factory kit). Resolved rather than stored, because the kit — and
+    // therefore the right default — can change at runtime.
+    property int paintDrumNote: -1
+    readonly property int drumNote: paintDrumNote >= 0 ? paintDrumNote
+                                                       : Synth.defaultDrumNote
+
+    signal restoreBackupRequested()
+    signal shareBackupRequested()
+    signal updateFirmwareRequested(string extension)
+    signal settingsRequested()
+    signal selectDeviceRequested()
+}

@@ -1,0 +1,85 @@
+#ifndef DATABASE_H
+#define DATABASE_H
+
+#include <QHash>
+#include <QList>
+#include <QPair>
+#include <QSqlDatabase>
+#include <QSqlDriver>
+#include <QSqlError>
+#include <QSqlQuery>
+#include <QVariantList>
+
+#include "src/business/idatabase.h"
+
+class Database : public IDatabase {
+ public:
+  static Database& instance();
+
+  // Test/DI construction: builds a Database on a private named connection so it
+  // does not clash with the production singleton's default connection. The
+  // caller owns the returned instance. Pass ":memory:" for an in-memory DB.
+  // Tables are created automatically. No app-name hack or file cleanup needed.
+  static Database* create(const QString& connectionName, const QString& filePath = ":memory:");
+
+  ~Database() override;
+
+  /* settings */
+  bool saveSetting(const QString& name, const QString& value) override;
+  bool getSetting(const QString& name, QString& outValue) override;
+  QHash<QString, QString> getSettingsCurrentValues() override;
+
+  /* last bluetooth hosts */
+  QList<QString> getAllLastBluetoothHosts() override;
+  bool insertLastBluetoothHost(const QString& address) override;
+
+  /* bluetooth devices */
+  bool updateConnectedBluetoothDevice(const QString& name, const QString& address) override;
+  QList<QString> getLastConnectedDevices(int maxDevices = MAX_LAST_CONNECTED_DEVICES) override;
+
+  /* patch library */
+  int insertPatch(const QString& name,
+                  int engine,
+                  const QList<QPair<int, double>>& params) override;
+  bool renamePatch(int id, const QString& name) override;
+  bool deletePatch(int id) override;
+  QVariantList getPatches(int engine = -1) override;
+  QList<QPair<int, double>> getPatchParams(int patchId) override;
+
+  /* file paths / backup / lifecycle */
+  QString getDatabaseFileFolder() override;
+  QString getDatabaseFileFullPath() override;
+  void saveDatabaseBackupTo(const QString& whereToFile) override;
+  void restoreDatabaseFrom(const QString& whereFromFile) override;
+  void forceCloseDatabase() override;
+  void forceOpenOrCreateDatabase() override;
+
+  // The schema version this build migrates databases to. Public (together with
+  // getSchemaVersion) so tests can assert a DB ends up stamped at it after the
+  // create/migrate pass.
+  static constexpr unsigned int currentSchemaVersion = 1;
+  // Version recorded in the DB's schema_version table (0 = none/pre-versioning).
+  // Stamped at the END of the create/migrate pass, so a migration interrupted
+  // mid-way keeps the old version recorded and is retried on the next open.
+  int getSchemaVersion();
+
+ private:
+  Database();
+  Database(const QString& connectionName, const QString& filePath);
+  void openDatabase(QString fileLocation);
+  void closeDatabase();
+
+  void runCreateTables();
+  bool isDatabaseOpen();
+
+  // Empty for the production singleton (Qt default connection). Non-empty for
+  // test/DI instances created via create(), keeping their connection isolated.
+  QString dbConnectionName;
+  QString dbFileFolder;
+  QString dbFileFullPath;
+  QString dbFileTempFullPath;
+  QSqlDatabase db;
+  bool isDbOpen;
+};
+
+#endif  // DATABASE_H

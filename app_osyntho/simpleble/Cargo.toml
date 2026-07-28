@@ -1,0 +1,35 @@
+[package]
+edition = "2021"
+
+name = "simplersble"
+version = "0.10.4"
+license = "BUSL-1.1"
+description = "The all-in-one Bluetooth library that makes it easy to add wireless connectivity to your projects."
+readme = "simplersble/README.md"
+repository = "https://github.com/simpleble/simpleble"
+
+include = [
+    "/VERSION",
+    "/cmake",
+    "/dependencies",
+    "/simpleble",
+    "/simplebluez",
+    "/simpledbus",
+    "/simplersble",
+]
+
+build = "simplersble/build.rs"
+links = "simpleble"
+
+[lib]
+path = "simplersble/src/lib.rs"
+
+[dependencies]
+cxx = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["full"] }
+futures = "0.3"
+
+[build-dependencies]
+cmake = "0.1"
+cxx-build = "1.0"

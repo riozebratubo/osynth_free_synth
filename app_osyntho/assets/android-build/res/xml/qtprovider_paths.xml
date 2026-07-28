@@ -1,0 +1,11 @@
+<?xml version='1.0' encoding='utf-8'?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Covers the app's private storage (where the SQLite DB lives) and the
+         external dirs, so FileProvider can hand out content:// URIs for the
+         backup file shared via ACTION_SEND. -->
+    <files-path name="qt_files" path="./" />
+    <cache-path name="qt_cache" path="./" />
+    <external-path name="qt_external" path="./" />
+    <external-files-path name="qt_external_files" path="./" />
+    <external-cache-path name="qt_external_cache" path="./" />
+</paths>

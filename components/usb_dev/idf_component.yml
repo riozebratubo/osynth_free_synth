@@ -1,0 +1,9 @@
+## usb_dev — TinyUSB stack (raw component, not esp_tinyusb: the esp_tinyusb
+## wrapper has no UAC/audio class support). Version pinned to the same release
+## esp-iot-solution's usb_device_uac builds against (see tools/ref/).
+## The classic ESP32 has no USB-OTG hardware, so the dependency is skipped there.
+dependencies:
+  espressif/tinyusb:
+    version: "^0.19.0~3"
+    rules:
+      - if: target == esp32s3

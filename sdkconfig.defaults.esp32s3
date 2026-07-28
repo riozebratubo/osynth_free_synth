@@ -1,0 +1,26 @@
+# ESP32-S3 target overrides — assumes an N8R8-class board (8 MB flash, 8 MB octal PSRAM).
+# For quad-PSRAM boards (R2 variants) switch CONFIG_SPIRAM_MODE_OCT to CONFIG_SPIRAM_MODE_QUAD;
+# see docs/HARDWARE.md. SPIRAM_IGNORE_NOTFOUND keeps boards without (working) PSRAM booting.
+# CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_OSYNTH_S3_FLASH_N16R8=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+
+# 32 KB instruction cache (default 16 KB, costs 16 KB internal RAM): the
+# render chain runs from flash and the engine code path is cold at note-on,
+# so the small i-cache showed up as underrun spikes on note onsets.
+CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
+
+# Loop-persistence flash backend (S16): auto-suspend would let cache fetches
+# suspend an in-progress flash erase/program so a multi-MB loop save doesn't
+# starve the render chain. DO NOT enable it here: on ESP-IDF v6.0.1 a chip
+# whose suspend support isn't in the IDF allow-list (e.g. the Boya modules on
+# these boards) fails esp_flash_init() and the assert at esp_flash_spi_init.c
+# hard-faults into a bootloop (S17 regression). The looper transport is stopped
+# while saving in code regardless, so suspend only ever softened residual
+# stalls — not worth bricking boot. Re-enable only per-board once the chip is
+# confirmed on IDF's suspend-supported list.
+# CONFIG_SPI_FLASH_AUTO_SUSPEND is not set

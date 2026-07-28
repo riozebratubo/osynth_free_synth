@@ -1,0 +1,181 @@
+menu "osynth Synthesizer"
+
+    config OSYNTH_ENABLE_BLE
+        bool "Enable BLE control (mobile app)"
+        default y
+        help
+            Custom GATT service with a binary TLV protocol for the companion
+            mobile app. See docs/BLE_PROTOCOL.md.
+
+    config OSYNTH_ENABLE_I2S_DAC
+        bool "Enable I2S output to an external DAC"
+        default n
+        help
+            Routes audio to an external I2S DAC (e.g. PCM5102) for higher
+            quality output. Pinout in docs/HARDWARE.md. Off by default.
+
+    config OSYNTH_ENABLE_LOCAL_UI
+        bool "Enable local UI (LCD + encoders + buttons)"
+        default n
+        help
+            Local control surface for the synthesizer settings.
+            Off by default; the component compiles to a stub.
+
+    config OSYNTH_ENABLE_SERIAL_MIDI
+        bool "Enable serial (UART/DIN) MIDI input"
+        default n
+        help
+            Alternative MIDI input, mainly for the classic ESP32 which has
+            no USB-OTG hardware.
+
+    config OSYNTH_SERIAL_MIDI_RX_GPIO
+        int "Serial MIDI RX GPIO"
+        depends on OSYNTH_ENABLE_SERIAL_MIDI
+        default 35 if IDF_TARGET_ESP32
+        default 5
+        help
+            UART RX pin for DIN MIDI input (UART1, 31250 baud). Needs a
+            proper MIDI input circuit (optocoupler, e.g. 6N138) — see
+            docs/HARDWARE.md.
+
+    config OSYNTH_LOOP_PERSIST
+        bool "Persist looper tracks (save/load slots)"
+        depends on IDF_TARGET_ESP32S3 && SPIRAM
+        default y
+        help
+            Adds loop.save / loop.load trigger params (0x0605/0x0606) that
+            copy the S15 looper's track set between PSRAM and durable
+            storage. Tracks are IMA-ADPCM (4:1 vs raw int16; mono sets,
+            S19, halve that again) both live in PSRAM and in storage since
+            S20, so saves and loads are straight copies. Storage backend
+            and sizing below. ESP32-S3 only (the looper itself needs
+            PSRAM).
+
+    choice OSYNTH_LOOP_STORE
+        prompt "Looper track storage backend"
+        depends on OSYNTH_LOOP_PERSIST
+        default OSYNTH_LOOP_STORE_FLASH
+
+        config OSYNTH_LOOP_STORE_FLASH
+            bool "Internal flash (spare region, no extra hardware)"
+            help
+                Raw flash above the partition table (0x400000 up to the
+                module's flash end — pick the module below). One slot.
+                Flash writes stall XIP code fetches, so save/load require
+                the looper transport to be stopped. (SPI_FLASH_AUTO_SUSPEND
+                would soften the residual stalls, but leave it off: on
+                unsupported chips it fails flash init and bootloops on
+                IDF v6 — see the note in sdkconfig.defaults.esp32s3.)
+
+        config OSYNTH_LOOP_STORE_SD
+            bool "External SD card (SPI mode, FAT)"
+            help
+                SD card on the FSPI pins (configurable below), 8 slots,
+                song-scale capacity, and no XIP interference — save/load
+                work while the loop keeps playing. Wiring in
+                docs/HARDWARE.md.
+    endchoice
+
+    choice OSYNTH_S3_FLASH_MODEL
+        prompt "ESP32-S3 module (flash size for the loops region)"
+        depends on OSYNTH_LOOP_STORE_FLASH
+        default OSYNTH_S3_FLASH_N8R8
+
+        config OSYNTH_S3_FLASH_N8R8
+            bool "N8R8 - 8 MB flash (4 MB loops region, ~87 s stereo ADPCM, 2x mono)"
+
+        config OSYNTH_S3_FLASH_N16R8
+            bool "N16R8 - 16 MB flash (12 MB loops region, ~260 s stereo ADPCM, 2x mono)"
+            help
+                Also set Serial flasher config -> Flash size -> 16 MB so
+                the image header matches the chip. The loops region is
+                verified against the detected chip size at boot and
+                trimmed (or disabled) with a warning if it doesn't fit.
+    endchoice
+
+    config OSYNTH_DRUM_SD_KITS
+        bool "Load drum kits from an SD card"
+        depends on SPIRAM
+        default n
+        help
+            Lets the drum bus (S22) load kits from /sd/osynth/kits, either
+            as `<name>.okit` images built by tools/gen_drumkit.py or as
+            folders of .wav one-shots (name a file "03_snare.wav" to pin it
+            to a slot). Kits are read into PSRAM, so this needs a PSRAM
+            board; the factory kit embedded in the firmware works without
+            it. Shares the SD bus and mount point with the looper's SD
+            backend when both are enabled — whichever gets there first
+            mounts the card.
+
+    # The SD bus is shared: either feature turning it on makes the pins
+    # relevant, so the pin options hang off this rather than off one of them.
+    config OSYNTH_SD_BUS
+        bool
+        default y if OSYNTH_LOOP_STORE_SD || OSYNTH_DRUM_SD_KITS
+
+    config OSYNTH_SD_CS_GPIO
+        int "SD card CS GPIO"
+        depends on OSYNTH_SD_BUS
+        default 10
+
+    config OSYNTH_SD_SCK_GPIO
+        int "SD card SCK GPIO"
+        depends on OSYNTH_SD_BUS
+        default 12
+
+    config OSYNTH_SD_MOSI_GPIO
+        int "SD card MOSI GPIO"
+        depends on OSYNTH_SD_BUS
+        default 11
+
+    config OSYNTH_SD_MISO_GPIO
+        int "SD card MISO GPIO"
+        depends on OSYNTH_SD_BUS
+        default 13
+
+    config OSYNTH_RENDER_IN_IRAM
+        bool "Place the audio render path in IRAM"
+        default y
+        help
+            Marks the per-block render code (engines, voice manager, FX
+            bus, looper, audio-task conversion) IRAM_ATTR so flash-cache
+            misses from BLE/Wi-Fi or filesystem traffic cannot add jitter
+            to the audio deadline. Costs roughly 20-30 KB of IRAM. Turn
+            off if the image stops linking with "region iram0 overflowed".
+
+    config OSYNTH_VOICES
+        int "Polyphony (number of voices)"
+        range 1 16
+        default 8
+
+    config OSYNTH_BLOCK_SIZE
+        int "Audio block size (samples)"
+        range 32 256
+        default 64
+
+    config OSYNTH_SAMPLE_RATE
+        int "Sample rate (Hz)"
+        default 48000
+        help
+            48000 matches the USB Audio (UAC2) streaming format.
+
+    config OSYNTH_HEARTBEAT_MS
+        int "Heartbeat log interval (ms, 0 = off)"
+        range 0 600000
+        default 5000
+        help
+            Period of the "alive | ..." status line. Set to 0 to silence
+            it entirely.
+
+            This is a diagnostic knob, not just cosmetics: the heartbeat
+            is the only periodic event in the firmware slower than 500 ms,
+            so if you hear a click at the same period as this log line,
+            the logging path is the suspect and not the synthesis. Each
+            line is a ~250-byte console write, and with the secondary
+            USB-Serial-JTAG console enabled it also pokes a USB peripheral
+            that shares the S3's USB PHY with the TinyUSB audio device.
+            Change this to 30000 (or 0) and listen: if the clicks follow
+            the new period, that is the cause; if they keep their old
+            rhythm, look elsewhere.
+
+endmenu

@@ -1,0 +1,479 @@
+#include "bluetoothmanager.h"
+
+#include <QBluetoothPermission>
+#include <QDebug>
+#include <QGuiApplication>
+#include <QLocationPermission>
+#include <QTimer>
+
+#include "src/ble/synthprotocol.h"
+#include "src/business/database.h"
+#include "src/business/settings.h"
+
+/*
+ * On Windows this backend is not built (SimpleBLE is used instead). On Windows
+ * with the WinRT Qt backend, subscribing can be broken — set
+ * BLUETOOTH_FORCE_DBUS_LE_VERSION=1. See QTBUG-89723.
+ */
+
+// osynth GATT service + characteristics (see docs/BLE_PROTOCOL.md).
+static const QBluetoothUuid serviceUuid{QString(SynthProto::kServiceUuid)};
+static const QBluetoothUuid ctrlUuid{QString(SynthProto::kCtrlUuid)};   // Write / Write-no-response
+static const QBluetoothUuid evtUuid{QString(SynthProto::kEvtUuid)};     // Notify
+static const QBluetoothUuid infoUuid{QString(SynthProto::kInfoUuid)};   // Read
+
+BluetoothManager& BluetoothManager::instance() {
+  static BluetoothManager myInstance;
+  return myInstance;
+}
+
+BluetoothManager::BluetoothManager(QObject* parent)
+  : IBluetoothManager{parent},
+    localDevice{new QBluetoothLocalDevice{}},
+    discoveryAgent{nullptr},
+    bleController{nullptr},
+    service{nullptr},
+    t_deviceAddress{},
+    t_remoteDeviceInfo{},
+    m_isConnected{false},
+    deviceQueue{},
+    m_scanning{false},
+    addressToDeviceMap{} {
+  if (Settings::instance().setting("bluetooth_enabled") != "false") {
+    initializeBt();
+  }
+}
+
+void BluetoothManager::initializeBt() {
+  bool btAllowed = hasAllBluetoothPermissions();
+  if (btAllowed) {
+    if (localDevice != nullptr) localDevice->deleteLater();
+    localDevice = new QBluetoothLocalDevice{};
+  }
+  qDebug() << "bt | Bt available: " << localDevice->isValid()
+           << " allowed: " << btAllowed;
+  if (localDevice->isValid() and hasAllBluetoothPermissions()) {
+    // Create the discovery agent once. initializeBt() is re-entrant (ctor,
+    // onBluetoothAvailable(), setBluetoothEnabled(true)); recreating the agent
+    // here would leak the previous one and could leave two scanning at once.
+    if (discoveryAgent == nullptr) {
+      discoveryAgent = new QBluetoothDeviceDiscoveryAgent();
+
+      const int scanTime = Settings::instance().setting("bluetooth_scan_time").toInt();
+      discoveryAgent->setLowEnergyDiscoveryTimeout(scanTime * 1000);
+
+      connect(discoveryAgent, &QBluetoothDeviceDiscoveryAgent::deviceDiscovered, this,
+              &BluetoothManager::onDeviceDiscovered);
+      connect(discoveryAgent, &QBluetoothDeviceDiscoveryAgent::errorOccurred, this,
+              &BluetoothManager::onErrorOccurred);
+      connect(discoveryAgent, &QBluetoothDeviceDiscoveryAgent::finished, this,
+              &BluetoothManager::onScanFinished);
+      connect(discoveryAgent, &QBluetoothDeviceDiscoveryAgent::canceled, this,
+              &BluetoothManager::onScanCanceled);
+    }
+
+    // Seed the queue with previously-connected devices (deduped).
+    for (auto& address : Database::instance().getLastConnectedDevices()) {
+      if (not deviceQueue.contains(address)) deviceQueue.append(address);
+    }
+
+    m_enabled = true;
+    idleAction();
+  } else {
+    qDebug() << "bt | Bt will not initialize now";
+  }
+}
+
+void BluetoothManager::startScanning() {
+  if (not m_enabled or discoveryAgent == nullptr) return;
+  if (m_isConnected) return;
+  if (bleController and bleController->state() != QLowEnergyController::UnconnectedState) {
+    qDebug() << "bt | Connection attempt in progress, will not start scanning.";
+    return;
+  }
+  qDebug() << "bt | Starting scan...";
+  if (not m_selectorOpen) {
+    m_discoveredDevices.clear();
+    emit discoveredDevicesChanged();
+  }
+  const int scanTime = Settings::instance().setting("bluetooth_scan_time").toInt();
+  discoveryAgent->setLowEnergyDiscoveryTimeout(scanTime * 1000);
+  discoveryAgent->start(QBluetoothDeviceDiscoveryAgent::LowEnergyMethod);
+  setScanning(true);
+}
+
+void BluetoothManager::stopScanning() {
+  if (discoveryAgent) discoveryAgent->stop();
+  setScanning(false);
+}
+
+void BluetoothManager::stopScanningAndDiscover() {
+  if (discoveryAgent) discoveryAgent->stop();
+  setScanning(false);
+  QTimer::singleShot(2000, this, &BluetoothManager::startDiscover);
+}
+
+void BluetoothManager::stopScanningAndRescan() {
+  if (discoveryAgent) discoveryAgent->stop();
+  setScanning(false);
+  QTimer::singleShot(2000, this, &BluetoothManager::startScanning);
+}
+
+void BluetoothManager::idleAction() {
+  if (not m_enabled or discoveryAgent == nullptr) return;
+  if (m_isConnected) return;
+
+  if (m_selectorOpen) {
+    // Selector open: stay in scan-to-list mode.
+    stopScanningAndRescan();
+    return;
+  }
+
+  const QString useSelected = Settings::instance().setting("bluetooth_use_selected");
+  if (useSelected == "true") {
+    const QString selectedAddr = Settings::instance().setting("bluetooth_selected_device_address");
+    if (not selectedAddr.isEmpty()) {
+      deviceQueue.clear();
+      deviceQueue.push_front(selectedAddr);
+      stopScanningAndDiscover();
+      return;
+    }
+  }
+
+  if (not deviceQueue.empty()) {
+    stopScanningAndDiscover();
+  } else {
+    stopScanningAndRescan();
+  }
+}
+
+QString BluetoothManager::getDeviceName() { return m_deviceName; }
+
+QString BluetoothManager::getDeviceAddress() { return m_deviceAddress; }
+
+bool BluetoothManager::getConnected() { return m_isConnected; }
+
+bool BluetoothManager::askForBluetoothPermissionIfNotAvailable() {
+  return hasAllBluetoothPermissions();
+}
+
+void BluetoothManager::onBluetoothAvailable() { initializeBt(); }
+
+void BluetoothManager::setBluetoothEnabled(bool enabled) {
+  if (enabled) {
+    onBluetoothAvailable();
+  } else {
+    finish();
+  }
+}
+
+bool BluetoothManager::hasAllBluetoothPermissions() {
+#if QT_CONFIG(permissions)
+  auto checkBt = []() {
+    QBluetoothPermission p;
+    // We are a BLE central: request central-role access only. The default
+    // (Access | Advertise) would also demand BLUETOOTH_ADVERTISE, which the app
+    // neither declares nor needs — making the check fail even when the user has
+    // granted scan/connect.
+    p.setCommunicationModes(QBluetoothPermission::Access);
+    return qApp->checkPermission(p) == Qt::PermissionStatus::Granted;
+  };
+  auto checkLoc = []() {
+    QLocationPermission p;
+    return qApp->checkPermission(p) == Qt::PermissionStatus::Granted;
+  };
+#if defined(Q_OS_MACOS)
+  return checkBt();
+#else
+  // Android: BLUETOOTH_SCAN is declared WITHOUT neverForLocation, so the OS
+  // still needs location granted to return scan results — keep both gates.
+  return checkBt() and checkLoc();
+#endif
+#else
+  return true;
+#endif
+}
+
+void BluetoothManager::onErrorOccurred(QBluetoothDeviceDiscoveryAgent::Error error) {
+  qDebug() << "bt | Scan | Error: " << (int)error;
+  setScanning(false);
+  // A scan error emits neither finished nor canceled; retry the loop.
+  QTimer::singleShot(5000, this, &BluetoothManager::idleAction);
+}
+
+QVariantList BluetoothManager::getDiscoveredDevices() const { return m_discoveredDevices; }
+
+void BluetoothManager::connectToSelectedDevice() {
+  const QString selectedAddr = Settings::instance().setting("bluetooth_selected_device_address");
+  if (selectedAddr.isEmpty()) return;
+
+  m_selectorOpen = false;
+  if (discoveryAgent and discoveryAgent->isActive()) {
+    discoveryAgent->stop();
+    setScanning(false);
+  }
+  deviceQueue.clear();
+  deviceQueue.push_front(selectedAddr);
+  QTimer::singleShot(500, this, &BluetoothManager::startDiscover);
+}
+
+void BluetoothManager::startDeviceScan() {
+  qDebug() << "bt | Selector | Start device scan.";
+  m_selectorOpen = true;
+  m_discoveredDevices.clear();
+  emit discoveredDevicesChanged();
+
+  if (discoveryAgent == nullptr or not m_enabled) {
+    initializeBt();
+    return;
+  }
+
+  if (m_isConnected) setIsConnected(false);
+  teardownConnection();
+  deviceQueue.clear();
+  startScanning();
+}
+
+void BluetoothManager::stopDeviceScan() {
+  qDebug() << "bt | Selector | Stop device scan.";
+  m_selectorOpen = false;
+}
+
+void BluetoothManager::onDeviceDiscovered(const QBluetoothDeviceInfo& device) {
+  if (not(device.coreConfigurations() & QBluetoothDeviceInfo::LowEnergyCoreConfiguration)) return;
+
+  const QString deviceAddress = device.address().toString();
+
+  // Dedupe by address for the selector list.
+  bool alreadyListed = false;
+  for (const auto& listed : m_discoveredDevices) {
+    if (listed.toMap().value("address").toString() == deviceAddress) {
+      alreadyListed = true;
+      break;
+    }
+  }
+  if (not alreadyListed) {
+    m_discoveredDevices.append(QVariantMap{{"name", device.name()}, {"address", deviceAddress}});
+    emit discoveredDevicesChanged();
+  }
+
+  addressToDeviceMap[deviceAddress] = device;
+
+  // While the selector is open we only list devices; never auto-queue.
+  if (m_selectorOpen) return;
+
+  const QString useSelected = Settings::instance().setting("bluetooth_use_selected");
+  const QString selectedAddress = Settings::instance().setting("bluetooth_selected_device_address");
+  if (useSelected == "true" and not selectedAddress.isEmpty()) {
+    if (deviceAddress != selectedAddress) return;
+    if (not deviceQueue.contains(deviceAddress)) deviceQueue.push_front(deviceAddress);
+    return;
+  }
+
+  const QString prefix = Settings::instance().setting("bluetooth_prefix");
+  if (device.name().startsWith(prefix, Qt::CaseInsensitive)) {
+    if (not deviceQueue.contains(deviceAddress)) deviceQueue.push_front(deviceAddress);
+  }
+}
+
+void BluetoothManager::onScanFinished() {
+  setScanning(false);
+  idleAction();
+}
+
+void BluetoothManager::onScanCanceled() {
+  // A deliberate stop()/cancel, NOT a natural timeout. Every caller of stop()
+  // already schedules its own next step, so do NOT re-enter idleAction() here.
+  setScanning(false);
+}
+
+void BluetoothManager::startDiscover() {
+  if (not m_enabled) return;
+  if (not deviceQueue.isEmpty()) {
+    stopScanning();
+    QString address = deviceQueue.front();
+    deviceQueue.pop_front();
+    discover(address);
+  } else {
+    QTimer::singleShot(2000, this, &BluetoothManager::idleAction);
+  }
+}
+
+void BluetoothManager::setIsConnected(bool is) {
+  m_isConnected = is;
+  if (not is) {
+    if (not m_deviceName.isEmpty()) {
+      m_deviceName.clear();
+      emit deviceNameChanged();
+    }
+    if (not m_deviceAddress.isEmpty()) {
+      m_deviceAddress.clear();
+      emit deviceAddressChanged();
+    }
+  }
+  emit connectedChanged(is);
+}
+
+void BluetoothManager::teardownConnection() {
+  if (service) {
+    service->disconnect(this);
+    service->deleteLater();
+    service = nullptr;
+  }
+  if (bleController) {
+    bleController->disconnect(this);
+    if (bleController->state() != QLowEnergyController::UnconnectedState) {
+      bleController->disconnectFromDevice();
+    }
+    bleController->deleteLater();
+    bleController = nullptr;
+  }
+}
+
+void BluetoothManager::discover(QString deviceAddress) {
+  qDebug() << "bt | Discover: " << deviceAddress;
+
+  teardownConnection();
+
+  t_deviceAddress = QBluetoothAddress(deviceAddress);
+  if (addressToDeviceMap.contains(deviceAddress)) {
+    t_remoteDeviceInfo = addressToDeviceMap[deviceAddress];
+  } else {
+    t_remoteDeviceInfo = QBluetoothDeviceInfo(t_deviceAddress, QString{}, 0);
+  }
+
+  m_attemptHandled = false;
+  bleController = QLowEnergyController::createCentral(t_remoteDeviceInfo, this);
+
+  connect(bleController, &QLowEnergyController::connected, this, [this]() {
+    qDebug() << "bt | Connected, discovering services. MTU:"
+             << (bleController ? bleController->mtu() : 0);
+    if (bleController) bleController->discoverServices();
+  });
+
+  connect(bleController, &QLowEnergyController::disconnected, this, [this]() {
+    const bool wasConnected = m_isConnected;
+    setIsConnected(false);
+    if (not wasConnected and m_attemptHandled) return;
+    m_attemptHandled = true;
+    idleAction();
+  });
+
+  connect(bleController, &QLowEnergyController::errorOccurred, this,
+          [this](QLowEnergyController::Error error) {
+            qDebug() << "bt | Controller error:" << error;
+            if (m_isConnected) return;
+            if (m_attemptHandled) return;
+            m_attemptHandled = true;
+            if (deviceQueue.isEmpty()) {
+              idleAction();
+            } else {
+              QTimer::singleShot(1000, this, &BluetoothManager::startDiscover);
+            }
+          });
+
+  connect(bleController, &QLowEnergyController::serviceDiscovered, this,
+          [this](const QBluetoothUuid& discoveredServiceUuid) {
+            if (discoveredServiceUuid != serviceUuid) return;
+            if (not bleController) return;
+
+            if (service) {
+              service->disconnect(this);
+              service->deleteLater();
+              service = nullptr;
+            }
+            service = bleController->createServiceObject(discoveredServiceUuid, this);
+            if (not service) return;
+
+            connect(service, &QLowEnergyService::stateChanged, this,
+                    [this](QLowEnergyService::ServiceState st) {
+                      if (st == QLowEnergyService::RemoteServiceDiscovered) {
+                        onServiceDetailsDiscovered();
+                      }
+                    });
+            connect(service, &QLowEnergyService::characteristicChanged, this,
+                    [this](const QLowEnergyCharacteristic& c, const QByteArray& value) {
+                      if (c.uuid() == evtUuid) emit receivedData(value);
+                    });
+            connect(service, &QLowEnergyService::characteristicRead, this,
+                    [this](const QLowEnergyCharacteristic& c, const QByteArray& value) {
+                      if (c.uuid() == infoUuid) emit infoRead(value);
+                    });
+
+            service->discoverDetails();
+          });
+
+  connect(bleController, &QLowEnergyController::discoveryFinished, this, [this]() {
+    if (service != nullptr) return;  // service found; awaiting characteristic discovery
+    // No osynth service on this device: move to the next candidate, or idle.
+    if (not deviceQueue.isEmpty()) {
+      auto next = deviceQueue.front();
+      deviceQueue.pop_front();
+      discover(next);
+    } else {
+      QTimer::singleShot(5000, this, &BluetoothManager::idleAction);
+    }
+  });
+
+  bleController->connectToDevice();
+}
+
+void BluetoothManager::onServiceDetailsDiscovered() {
+  if (not service) return;
+
+  const QLowEnergyCharacteristic ctrlChar = service->characteristic(ctrlUuid);
+  const QLowEnergyCharacteristic evtChar = service->characteristic(evtUuid);
+  if (not ctrlChar.isValid() or not evtChar.isValid()) {
+    qDebug() << "bt | osynth CTRL/EVT missing; abandoning this device.";
+    teardownConnection();
+    idleAction();
+    return;
+  }
+
+  m_deviceName = t_remoteDeviceInfo.name();
+  m_deviceAddress = t_remoteDeviceInfo.address().toString();
+
+  // Read INFO (async -> characteristicRead -> infoRead signal).
+  const QLowEnergyCharacteristic infoChar = service->characteristic(infoUuid);
+  if (infoChar.isValid()) service->readCharacteristic(infoChar);
+
+  // Enable EVT notifications (the firmware drops outgoing frames while
+  // unsubscribed). The controller waits ~300ms before its first write, so the
+  // CCCD write has landed by then.
+  const QLowEnergyDescriptor cccd =
+      evtChar.descriptor(QBluetoothUuid::DescriptorType::ClientCharacteristicConfiguration);
+  if (cccd.isValid()) service->writeDescriptor(cccd, QByteArray::fromHex("0100"));
+
+  emit deviceNameChanged();
+  emit deviceAddressChanged();
+  emit updateConnectedBluetoothDevice(m_deviceName, m_deviceAddress);
+  setIsConnected(true);
+}
+
+void BluetoothManager::write(const QByteArray& data, bool withResponse) {
+  if (not service) return;
+  const QLowEnergyCharacteristic ctrlChar = service->characteristic(ctrlUuid);
+  if (not ctrlChar.isValid()) return;
+  service->writeCharacteristic(
+      ctrlChar, data,
+      withResponse ? QLowEnergyService::WriteWithResponse
+                   : QLowEnergyService::WriteWithoutResponse);
+}
+
+void BluetoothManager::finish() {
+  qDebug() << "bt | Finish: stop scanning and disconnect.";
+  m_enabled = false;
+  if (discoveryAgent and discoveryAgent->isActive()) discoveryAgent->stop();
+  setScanning(false);
+  teardownConnection();
+  if (m_isConnected) setIsConnected(false);
+  deviceQueue.clear();
+}
+
+bool BluetoothManager::getScanning() const { return m_scanning; }
+
+void BluetoothManager::setScanning(bool newScanning) {
+  if (m_scanning == newScanning) return;
+  m_scanning = newScanning;
+  emit scanningChanged();
+}
