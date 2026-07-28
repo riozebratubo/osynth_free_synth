@@ -28,8 +28,20 @@ inline constexpr const char* kInfoUuid    = "395f2e04-7c4f-4a48-94e7-dafcf25ef34
 inline constexpr const char* kDeviceName = "osynth";
 
 // Preferred ATT MTU. Response payloads size to the live MTU, but PARAM_INFO
-// wants the full frame — request this on connect.
+// wants the full frame. Neither platform backend can *request* an MTU (Qt
+// negotiates it internally; WinRT does it in the OS), so this is what the
+// app assumes when the link cannot tell it what was negotiated — see
+// SynthController::maxPayloadBytes(), which sizes every outgoing frame from
+// the live value where one is available.
 inline constexpr int kPreferredMtu = 247;
+
+// Bytes of ATT payload a write can carry at `mtu` (3 bytes of ATT header),
+// capped at the firmware's 256-byte rx ceiling.
+inline constexpr int attPayloadFor(int mtu) {
+  const int m = mtu > 0 ? mtu : kPreferredMtu;
+  const int payload = (m < 23 ? 23 : m) - 3;
+  return payload > 256 ? 256 : payload;
+}
 
 // --- Opcodes (app -> synth) ---------------------------------------------
 enum Op : quint8 {
@@ -263,8 +275,14 @@ struct Frame {
   bool continuation = false;
   QByteArray payload;  // bytes after the status byte
 
-  bool isEvent() const { return op >= 0xC0; }
-  bool isResponse() const { return (op & RESPONSE_FLAG) && op < 0xC0; }
+  // Events are the two literal opcodes 0xC0/0xC1 — NOT the range above 0xC0.
+  // A response is `request | 0x80`, so OP_PING (0x7F) answers with 0xFF: a
+  // `op >= 0xC0` test swallowed every PING reply as an unknown event and made
+  // the OP_PING response case below dead code. Matching exact opcodes is also
+  // what keeps this honest as the opcode map grows; only commands 0x40/0x41
+  // are unusable, and neither is allocated.
+  bool isEvent() const { return op == EVT_PARAMS || op == EVT_ENGINE; }
+  bool isResponse() const { return (op & RESPONSE_FLAG) && !isEvent(); }
   quint8 requestOp() const { return op & ~RESPONSE_FLAG; }
 };
 

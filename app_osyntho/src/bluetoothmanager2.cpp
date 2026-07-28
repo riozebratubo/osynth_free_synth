@@ -55,6 +55,13 @@ BluetoothManager::BluetoothManager(QObject* parent)
     m_lastConnectedDevices.append(address);
   }
 
+  // Dedicated write thread (see writeBlocking). Started before any connection
+  // can exist, so write() never has to check whether it is up.
+  m_writeCtx = new QObject();
+  m_writeCtx->moveToThread(&m_writeThread);
+  m_writeThread.setObjectName("ble-write");
+  m_writeThread.start();
+
   if (Settings::instance().setting("bluetooth_enabled") != "false") {
     m_rescanTimer.start();
     scanAndConnect();
@@ -280,7 +287,8 @@ bool BluetoothManager::connectAndSubscribe(SimpleBLE::Peripheral& peripheral) {
   setPeripheralHandle(peripheral);
 
   // Read INFO before subscribing so the controller has fw/target ready when it
-  // sees the connection go live.
+  // sees the connection go live. infoRead is delivered to the controller with
+  // an explicit queued connection (see App), so emitting it here is safe.
   try {
     auto info = peripheral.read(serviceUuidStr, infoUuidStr);
     emit infoRead(toQByteArray(info));
@@ -304,12 +312,23 @@ bool BluetoothManager::connectAndSubscribe(SimpleBLE::Peripheral& peripheral) {
     return false;
   }
 
-  // EVT is live — now announce the connection.
-  emit updateConnectedBluetoothDevice(QString::fromStdString(peripheral.identifier()),
-                                      QString::fromStdString(peripheral.address()));
-  emit deviceNameChanged();
-  emit deviceAddressChanged();
-  emit connectedChanged(true);
+  // EVT is live — now announce the connection. Every SimpleBLE read happens
+  // here, on the worker; the GUI thread only ever sees the cached copies.
+  const QString name = QString::fromStdString(peripheral.identifier());
+  const QString address = QString::fromStdString(peripheral.address());
+  int negotiatedMtu = 0;
+  try {
+    negotiatedMtu = int(peripheral.mtu());
+  } catch (...) {
+  }
+  publishConnectionState(true, name, address, negotiatedMtu);
+
+  emit updateConnectedBluetoothDevice(name, address);
+  emitOnGuiThread([this]() {
+    emit deviceNameChanged();
+    emit deviceAddressChanged();
+    emit connectedChanged(true);
+  });
 
   peripheral.set_callback_on_disconnected(
       []() { qDebug() << "Bt | Peripheral disconnected (callback)"; });
@@ -337,9 +356,12 @@ bool BluetoothManager::connectAndSubscribe(SimpleBLE::Peripheral& peripheral) {
       }
       setAdapterHandle(SimpleBLE::Adapter{});
 
-      emit connectedChanged(false);
-      emit deviceNameChanged();
-      emit deviceAddressChanged();
+      publishConnectionState(false, QString(), QString(), 0);
+      emitOnGuiThread([this]() {
+        emit connectedChanged(false);
+        emit deviceNameChanged();
+        emit deviceAddressChanged();
+      });
       return true;
     }
 
@@ -404,32 +426,58 @@ void BluetoothManager::stopDeviceScan() {
   m_selectorOpen = false;
 }
 
+void BluetoothManager::publishConnectionState(bool connected, const QString& name,
+                                              const QString& address, int mtu) {
+  {
+    QMutexLocker lock(&m_handleMutex);
+    m_deviceNameCache = name;
+    m_deviceAddressCache = address;
+  }
+  m_mtu.store(mtu);
+  m_connectedCache.store(connected);
+}
+
 QString BluetoothManager::getDeviceName() {
-  auto peripheral = peripheralHandle();
-  return peripheral.initialized() ? QString::fromStdString(peripheral.identifier()) : "";
+  QMutexLocker lock(&m_handleMutex);
+  return m_deviceNameCache;
 }
 
 QString BluetoothManager::getDeviceAddress() {
-  auto peripheral = peripheralHandle();
-  return peripheral.initialized() ? QString::fromStdString(peripheral.address()) : "";
+  QMutexLocker lock(&m_handleMutex);
+  return m_deviceAddressCache;
 }
 
-bool BluetoothManager::getConnected() {
-  auto peripheral = peripheralHandle();
-  return peripheral.initialized() and peripheral.is_connected();
-}
+bool BluetoothManager::getConnected() { return m_connectedCache.load(); }
+
+int BluetoothManager::mtu() const { return m_mtu.load(); }
 
 bool BluetoothManager::askForBluetoothPermissionIfNotAvailable() { return true; }
 
 bool BluetoothManager::getScanning() const { return m_scanning; }
 
 void BluetoothManager::setScanning(bool newScanning) {
-  if (m_scanning == newScanning) return;
-  m_scanning = newScanning;
-  emit scanningChanged();
+  if (m_scanning.exchange(newScanning) == newScanning) return;
+  // Called from the worker around every scan_for(); `scanning` is bound by the
+  // device selector and the toolbar, so the notify has to reach the GUI thread.
+  emitOnGuiThread([this]() { emit scanningChanged(); });
 }
 
+// Called on the GUI thread (App forwards SynthController::writeToSynth here).
+// It must not touch SimpleBLE itself: write_request blocks until the peer
+// acknowledges — a full ATT round trip, tens of milliseconds at a typical
+// connection interval — and the controller issues these in bursts
+// (refreshSequencer sends five, writeSteps up to eleven). Doing that inline
+// froze the UI for the length of the burst. Hand it to the write thread and
+// return immediately; ordering is preserved because that thread drains its
+// event queue in post order.
 void BluetoothManager::write(const QByteArray& data, bool withResponse) {
+  if (m_writeCtx == nullptr) return;
+  QMetaObject::invokeMethod(
+      m_writeCtx, [this, data, withResponse]() { writeBlocking(data, withResponse); },
+      Qt::QueuedConnection);
+}
+
+void BluetoothManager::writeBlocking(const QByteArray& data, bool withResponse) {
   try {
     auto peripheral = peripheralHandle();
     if (peripheral.initialized() and peripheral.is_connected()) {
@@ -475,6 +523,15 @@ void BluetoothManager::finish() {
   if (m_bluetoothThread.isRunning()) {
     m_bluetoothThread.waitForFinished();
   }
+  // Terminal (called once from main after exec() returns), so the write thread
+  // goes down with it. Drain first: a queued write still holding the last
+  // handle would otherwise be destroyed mid-flight.
+  if (m_writeThread.isRunning()) {
+    m_writeThread.quit();
+    m_writeThread.wait();
+  }
+  delete m_writeCtx;
+  m_writeCtx = nullptr;
 }
 
 SimpleBLE::Adapter BluetoothManager::adapterHandle() const {

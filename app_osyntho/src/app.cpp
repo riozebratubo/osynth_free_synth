@@ -71,7 +71,13 @@ App::App(IDatabase& db, IBluetoothManager& btm, ISettings& st)
           &IBluetoothManager::onBluetoothAvailable);
 
   connect(&bluetoothManager, &IBluetoothManager::connectedChanged, this,
-          [this](bool isConnected) { synth.setConnected(isConnected); });
+          [this](bool isConnected) {
+            synth.setConnected(isConnected);
+            // After setConnected: it resets the controller's link state, so
+            // the MTU has to be pushed on top of the clean slate. The
+            // controller sizes every batched frame from it.
+            if (isConnected) synth.setLinkMtu(bluetoothManager.mtu());
+          });
 
   connect(&bluetoothManager, &IBluetoothManager::receivedData, &synth,
           &SynthController::onReceiveData, Qt::QueuedConnection);

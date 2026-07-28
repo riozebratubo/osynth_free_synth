@@ -60,6 +60,7 @@ static const char* TAG = "ble_ctrl";
 #include "seq_play.h"
 #include "seqarp.h"
 #include "synth_params.h"
+#include "synth_voice.h"
 
 using osynth::ParamDesc;
 using osynth::ParamOrigin;
@@ -71,8 +72,15 @@ constexpr char kDeviceName[] = "osynth";
 constexpr uint8_t kProtoVersion = 1;
 constexpr uint8_t kFwVersion[3] = {0, 1, 0}; /* keep in sync with main.cpp */
 
-/* Opcodes (SynthCtl v1). 0x40-0x5F is reserved event space: events go out
- * as 0xC0.. frames, which cannot collide with a response op|0x80. */
+/* Opcodes (SynthCtl v1).
+ *
+ * A response is `request_op | 0x80`; the two event opcodes are the literal
+ * values 0xC0 and 0xC1. So the only reserved commands are 0x40 and 0x41 —
+ * those, and only those, would produce a response byte a client could not
+ * tell from an event. (An earlier comment here claimed the whole 0x40-0x5F
+ * block was reserved and that responses "cannot collide" with events at all;
+ * neither is true — OP_PING's response really is 0xFF, which is why the app
+ * matches events by exact opcode rather than by `op >= 0xC0`.) */
 enum : uint8_t {
     OP_SET_PARAM = 0x01,
     OP_GET_PARAM = 0x02,
@@ -1136,6 +1144,14 @@ int gap_event(struct ble_gap_event* ev, void*) {
             s_evt_sub.store(false, std::memory_order_relaxed);
             ESP_LOGI(TAG, "app disconnected (reason 0x%02x)",
                      (unsigned)ev->disconnect.reason);
+            /* Release anything the app was holding. OP_NOTE_ON goes into the
+             * MIDI router like a played key, so its note-off has to come back
+             * over the same link — and a link that just dropped will never
+             * deliver it. Without this, walking out of range mid-chord leaves
+             * the synth droning until a CC 123 arrives from somewhere else.
+             * Safe from the host task: the entry point is the same lock-free
+             * ring every other control task pushes through. */
+            voice_manager_all_notes_off();
             start_advertising();
             return 0;
         case BLE_GAP_EVENT_ADV_COMPLETE:

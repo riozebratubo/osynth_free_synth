@@ -37,6 +37,12 @@ class IBluetoothManager : public QObject {
 
   virtual QVariantList getDiscoveredDevices() const = 0;
 
+  // Negotiated ATT MTU of the live link, or 0 when unknown (not connected, or
+  // a backend that cannot report it). The controller sizes its outgoing frames
+  // from this: its batches pack to 244 bytes, which needs MTU >= 247, and a
+  // link that negotiated less would have every batch truncated and rejected.
+  virtual int mtu() const { return 0; }
+
  signals:
   // EVT notification frames, synth -> app.
   void receivedData(const QByteArray& data);

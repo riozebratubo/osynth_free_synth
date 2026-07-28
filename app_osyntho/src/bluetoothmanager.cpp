@@ -203,6 +203,14 @@ void BluetoothManager::onErrorOccurred(QBluetoothDeviceDiscoveryAgent::Error err
 
 QVariantList BluetoothManager::getDiscoveredDevices() const { return m_discoveredDevices; }
 
+// Qt has no API to *request* an MTU — the platform negotiates it (Android's
+// backend asks for 517, BlueZ exchanges on connect) — so this only reports
+// what was agreed. 0 while unconnected, which the controller reads as
+// "assume the documented 247".
+int BluetoothManager::mtu() const {
+  return bleController ? bleController->mtu() : 0;
+}
+
 void BluetoothManager::connectToSelectedDevice() {
   const QString selectedAddr = Settings::instance().setting("bluetooth_selected_device_address");
   if (selectedAddr.isEmpty()) return;

@@ -10,12 +10,20 @@ Item {
     id: screen
 
     property var presetList: []
-    property int engine: Synth.engine
+    // Deliberately not a binding to Synth.engine: the engine-change handler
+    // below has to run in a defined order relative to it (request the new
+    // engine's list, then repaint), and an imperative assignment inside that
+    // handler would have silently broken a binding anyway. One writer, here.
+    property int engine: 0
 
     function refresh() { presetList = Synth.presetsFor(engine) }
     function requestList() { if (Synth.connected) Synth.listPresets(engine) }
 
-    Component.onCompleted: { requestList(); refresh() }
+    Component.onCompleted: {
+        engine = Synth.engine
+        requestList()
+        refresh()
+    }
 
     Connections {
         target: Synth

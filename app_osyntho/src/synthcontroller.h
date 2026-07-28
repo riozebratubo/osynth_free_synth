@@ -264,6 +264,9 @@ class SynthController : public QObject, public DatabaseClient, public SettingsCl
 
  public slots:
   void setConnected(bool connected);
+  // Negotiated ATT MTU of the live link (0 = unknown). Every batched frame is
+  // sized from this; see maxPayloadBytes().
+  void setLinkMtu(int mtu);
   void onReceiveData(const QByteArray& data);
   void onInfoRead(const QByteArray& info);
 
@@ -321,6 +324,16 @@ class SynthController : public QObject, public DatabaseClient, public SettingsCl
   void send(quint8 op, const QByteArray& payload, bool withResponse);
   void sendWithSeq(quint8 op, quint8 seq, const QByteArray& payload, bool withResponse);
 
+  // --- frame sizing ------------------------------------------------------
+  // Payload bytes that fit one command frame on the live link (ATT payload
+  // minus the 4-byte frame header). The batch limits below derive from it, so
+  // a link that negotiated less than the documented 247 packs smaller frames
+  // instead of sending oversized ones the firmware rejects as MALFORMED.
+  int maxPayloadBytes() const;
+  int maxSetPairsPerFrame() const;
+  int maxGetIdsPerFrame() const;
+  int maxStepsPerFrame() const;
+
   void resetState();
   void beginDiscovery();          // PARAM_INFO 0xFFFF
   void onParamListComplete();     // ids known: register, go ready, start info pump
@@ -333,6 +346,16 @@ class SynthController : public QObject, public DatabaseClient, public SettingsCl
   void flushPendingSets();        // coalesced SET_PARAM batch
   void scheduleParamsDiscovered(); // coalesce the paramsDiscovered signal
 
+  // Paced SET_PARAM output. The firmware's command queue is four frames deep
+  // and answers BUSY when it overflows, dropping the frame — so a patch push
+  // (~5 back-to-back full frames) used to apply only part of itself, silently.
+  // Frames go through this queue instead: the first goes out immediately when
+  // the queue is idle (no added latency for a knob or a pad hit), the rest are
+  // spaced, and a BUSY re-queues the exact frame that was dropped.
+  void queueSetFrame(const QByteArray& payload);
+  void drainSetQueue();
+  void onSetBusy(quint8 seq);
+
   void handleFrame(const SynthProto::Frame& f);
   void handleParamInfoList(const QByteArray& payload);
   void handleParamInfoSingle(const QByteArray& payload);
@@ -343,7 +366,7 @@ class SynthController : public QObject, public DatabaseClient, public SettingsCl
   // Sequencer/kit frame handlers, all chunked like the preset list.
   void handleSeqInfo(const QByteArray& payload);
   void handleSeqSteps(const QByteArray& payload, bool more);
-  void handleSeqTrack(const QByteArray& payload);
+  void handleSeqTrack(const QByteArray& payload, quint8 seq);
   void handleSeqPattern(const QByteArray& payload);
   void handleSeqPlock(const QByteArray& payload, bool more);
   void handleSeqSong(const QByteArray& payload, bool more);
@@ -364,6 +387,7 @@ class SynthController : public QObject, public DatabaseClient, public SettingsCl
 
   bool m_connected = false;
   bool m_ready = false;
+  int m_linkMtu = 0;  // 0 = unknown; maxPayloadBytes() then assumes 247
   int m_engine = 0;
   int m_caps = 0;
 
@@ -410,6 +434,16 @@ class SynthController : public QObject, public DatabaseClient, public SettingsCl
   QHash<quint16, float> m_pendingSets;
   QTimer m_setTimer;
 
+  // Paced SET_PARAM output (queueSetFrame). m_setSent keeps the last few sent
+  // frames so a BUSY — the only feedback a write-without-response ever gets —
+  // can put the dropped one back at the head of the queue.
+  QList<QByteArray> m_setQueue;
+  QHash<quint8, QByteArray> m_setSent;
+  QList<quint8> m_setSentOrder;
+  qint64 m_setBackoffUntilMs = 0;
+  qint64 m_setNextSendMs = 0;  // earliest next send; paces a multi-frame burst
+  QTimer m_setDrainTimer;
+
   // A patch load may need to switch engine first; the snapshot waits here.
   QList<QPair<int, double>> m_pendingPatchParams;
   void pushParams(const QList<QPair<int, double>>& params);
@@ -445,7 +479,16 @@ class SynthController : public QObject, public DatabaseClient, public SettingsCl
   QList<SynthProto::SeqStep> m_steps;       // the edited track, index = step
   QList<SynthProto::SeqStep> m_stepsAccum;  // across chunked frames
   int m_stepsAccumFirst = 0;
-  int m_stepsWindowNext = 0;                // next window to request, -1 = done
+  int m_stepsWindowNext = 0;                // next window to request, -1 = idle
+  // The step walk needs the track's length, which only the SEQ_TRACK response
+  // carries — so refreshSequencer() does not start it, it waits for that
+  // response and starts it there. Without this the walk ran twice on every
+  // track switch: once with the *previous* track's length, then again when the
+  // real one arrived. The seq identifies the refresh's own SEQ_TRACK get, so
+  // the echo of a track-field edit does not restart it.
+  quint8 m_trackGetSeq = 0;
+  bool m_awaitingTrackGet = false;
+  QTimer m_trackGetFallbackTimer;  // start the walk anyway if that get is lost
   SynthProto::SeqTrackCfg m_trackCfg;
   int m_patternLength = 64;
   int m_patternScale = 0;

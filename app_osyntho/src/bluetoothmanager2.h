@@ -7,8 +7,10 @@
 #include <QMutex>
 #include <QObject>
 #include <QStringList>
+#include <QThread>
 #include <QTimer>
 #include <atomic>
+#include <utility>
 
 #include "ibluetoothmanager.h"
 
@@ -30,9 +32,14 @@ class BluetoothManager : public IBluetoothManager {
   bool askForBluetoothPermissionIfNotAvailable() override;
 
   void setScanning(bool newScanning) override;
+  // The first three are QML property READ accessors, so they run on every
+  // binding re-evaluation. All four serve cached state rather than calling
+  // into SimpleBLE: every SimpleBLE call is a synchronous hop onto the WinRT
+  // MTA thread, which is not something a paint pass should be doing.
   bool getConnected() override;
   QString getDeviceName() override;
   QString getDeviceAddress() override;
+  int mtu() const override;
   QVariantList getDiscoveredDevices() const override;
 
   Q_INVOKABLE void connectToSelectedDevice();
@@ -53,6 +60,26 @@ class BluetoothManager : public IBluetoothManager {
 
   void scanAndConnect();
   bool connectAndSubscribe(SimpleBLE::Peripheral& peripheral);
+
+  // Every signal this class declares is either a QML NOTIFY (deviceName,
+  // connected, scanning…) or is consumed by App. QML delivers a NOTIFY to its
+  // bindings *synchronously, on the emitting thread* — so emitting one from
+  // the BLE worker would evaluate JS bindings off the GUI thread. Everything
+  // the worker announces therefore goes through this.
+  template <typename Fn>
+  void emitOnGuiThread(Fn&& fn) {
+    QMetaObject::invokeMethod(this, std::forward<Fn>(fn), Qt::QueuedConnection);
+  }
+
+  // The actual SimpleBLE write, run on m_writeThread. write_request blocks
+  // until the peer acknowledges, and even write_command is a synchronous hop
+  // onto the WinRT MTA thread, so neither may run on the GUI thread.
+  void writeBlocking(const QByteArray& data, bool withResponse);
+
+  // Mirrors of the peripheral's state for the QML property accessors, written
+  // by the worker as the connection comes up and goes down.
+  void publishConnectionState(bool connected, const QString& name,
+                              const QString& address, int mtu);
 
   // m_adapter/m_foundPeripheral are SimpleBLE handles (shared_ptr wrappers)
   // shared between the GUI thread and the BLE worker. Always go through these
@@ -77,6 +104,19 @@ class BluetoothManager : public IBluetoothManager {
   mutable QMutex m_handleMutex;
   SimpleBLE::Adapter m_adapter;
   SimpleBLE::Peripheral m_foundPeripheral;
+
+  // Cached connection state, so the QML accessors never call into SimpleBLE.
+  // The strings ride m_handleMutex with the handles they describe.
+  std::atomic<bool> m_connectedCache{false};
+  std::atomic<int> m_mtu{0};
+  QString m_deviceNameCache;
+  QString m_deviceAddressCache;
+
+  // Serialises CTRL writes off the GUI thread. A plain QObject on its own
+  // thread: invokeMethod posts each write to its event queue, so ordering is
+  // preserved and the GUI thread never waits on the radio.
+  QThread m_writeThread;
+  QObject* m_writeCtx = nullptr;
 
   QStringList m_lastConnectedDevices;
   QVariantList m_discoveredDevices;

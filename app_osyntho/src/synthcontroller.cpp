@@ -20,8 +20,19 @@ constexpr int kSetCoalesceMs = 40;         // ~25 Hz knob-write batches
 constexpr int kEngineSwitchSettleMs = 400; // let 0x02xx re-register before a patch push
 constexpr int kPresetLoadSettleMs = 500;   // firmware finishes loading a preset slot
 constexpr int kPresetReadSettleMs = 400;   // GET_PARAM answers land before snapshotting
-constexpr int kMaxSetPairsPerFrame = 40;   // 4B header + 40×6B = 244B < 252
-constexpr int kMaxGetIdsPerFrame = 120;    // 4B header + 120×2B = 244B < 252
+// Ceilings at the documented MTU (247 -> 240 payload bytes): 40×6B of set
+// pairs, 120×2B of get ids, 24 step records. maxPayloadBytes() scales these
+// down on a link that negotiated less.
+constexpr int kMaxSetPairsPerFrame = 40;
+constexpr int kMaxGetIdsPerFrame = 120;
+constexpr int kMaxStepsPerFrame = 24;
+
+// Paced SET_PARAM output. 15 ms between frames keeps a burst well inside what
+// the firmware's 4-deep command queue can drain, while an idle queue still
+// sends immediately — a knob or a pad hit is never delayed by this.
+constexpr int kSetDrainIntervalMs = 15;
+constexpr int kSetBusyBackoffMs = 200;
+constexpr int kSetSentHistory = 8;  // frames kept for a BUSY re-queue
 
 // --- Flow-controlled PARAM_INFO discovery -------------------------------
 // The firmware has a SMALL command queue and returns BUSY (status 5) when
@@ -40,6 +51,9 @@ constexpr int kListRetries = 8;
 constexpr int kDiscoveredCoalesceMs = 150;
 // Settle time before re-reading a pattern the firmware switched to itself.
 constexpr int kFollowPatternMs = 500;
+// If refreshSequencer's SEQ_TRACK get goes unanswered, start the step walk
+// anyway on the cached length rather than leaving the grid empty.
+constexpr int kTrackGetFallbackMs = 1500;
 
 // Well-known ids the controller tracks directly.
 constexpr quint16 ID_PRESET_LOAD = 0x0002;
@@ -56,6 +70,20 @@ SynthController::SynthController(QObject* parent) : QObject(parent) {
   m_setTimer.setSingleShot(true);
   m_setTimer.setInterval(kSetCoalesceMs);
   connect(&m_setTimer, &QTimer::timeout, this, &SynthController::flushPendingSets);
+
+  m_setDrainTimer.setSingleShot(true);
+  m_setDrainTimer.setInterval(kSetDrainIntervalMs);
+  connect(&m_setDrainTimer, &QTimer::timeout, this, &SynthController::drainSetQueue);
+
+  m_trackGetFallbackTimer.setSingleShot(true);
+  m_trackGetFallbackTimer.setInterval(kTrackGetFallbackMs);
+  connect(&m_trackGetFallbackTimer, &QTimer::timeout, this, [this]() {
+    if (!m_awaitingTrackGet) return;
+    m_awaitingTrackGet = false;
+    m_stepsAccum.clear();
+    m_stepsWindowNext = 0;
+    requestSteps();
+  });
 
   m_infoRequestTimer.setSingleShot(false);
   m_infoRequestTimer.setInterval(kInfoPumpIntervalMs);
@@ -112,6 +140,28 @@ void SynthController::send(quint8 op, const QByteArray& payload, bool withRespon
   sendWithSeq(op, nextSeq(), payload, withResponse);
 }
 
+/* ------------------------------------------------------------ frame sizing */
+
+int SynthController::maxPayloadBytes() const {
+  // ATT write payload is MTU-3; the SynthCtl frame header takes 4 more. The
+  // floor keeps the batch helpers from degenerating to zero on a link stuck at
+  // the 23-byte default (they clamp to at least one record anyway).
+  return qMax(1, SynthProto::attPayloadFor(m_linkMtu) - 4);
+}
+
+int SynthController::maxSetPairsPerFrame() const {
+  return qBound(1, maxPayloadBytes() / 6, kMaxSetPairsPerFrame);
+}
+
+int SynthController::maxGetIdsPerFrame() const {
+  return qBound(1, maxPayloadBytes() / 2, kMaxGetIdsPerFrame);
+}
+
+int SynthController::maxStepsPerFrame() const {
+  // A SET_STEPS payload carries a 6-byte prefix ahead of the step records.
+  return qBound(1, (maxPayloadBytes() - 6) / 8, kMaxStepsPerFrame);
+}
+
 QString SynthController::engineNameFor(int engine) {
   switch (engine) {
     case ENG_SUBTRACTIVE: return QStringLiteral("Subtractive");
@@ -142,15 +192,31 @@ void SynthController::setConnected(bool connected) {
   }
 }
 
+void SynthController::setLinkMtu(int mtu) {
+  if (mtu == m_linkMtu) return;
+  m_linkMtu = mtu;
+  qDebug() << "Synth | link MTU" << mtu << "->" << maxPayloadBytes()
+           << "payload bytes per frame";
+}
+
 void SynthController::resetState() {
   m_ready = false;
+  m_linkMtu = 0;
   m_discovering = false;
   m_awaitingInfoList = false;
   m_discoveryTimer.stop();
   m_infoRequestTimer.stop();
   m_discoveredCoalesceTimer.stop();
   m_followPatternTimer.stop();
+  m_trackGetFallbackTimer.stop();
+  m_awaitingTrackGet = false;
   m_setTimer.stop();
+  m_setDrainTimer.stop();
+  m_setQueue.clear();
+  m_setSent.clear();
+  m_setSentOrder.clear();
+  m_setBackoffUntilMs = 0;
+  m_setNextSendMs = 0;
   m_pendingSets.clear();
   m_params.clear();
   m_paramOrder.clear();
@@ -210,6 +276,14 @@ void SynthController::beginDiscovery() {
   m_infoQueue.clear();
   m_infoInflight.clear();
   m_infoSeqToId.clear();
+  // Rebuilt from the id list this pass is about to fetch. Leaving the previous
+  // pass's leftovers in place used to make them permanently un-discoverable:
+  // onParamListComplete() only queues an id it is not already "pending" on, so
+  // anything stranded by an aborted pass (budget spent, or an engine switch
+  // mid-discovery) was never requested again — the pump then span for the full
+  // 40 s budget on an empty queue and those controls stayed missing from the
+  // UI for the rest of the session.
+  m_pendingInfoIds.clear();
   m_infoBackoffUntilMs = 0;
   m_discoveryStartMs = nowMs();
   m_infoRequestTimer.stop();
@@ -282,6 +356,9 @@ void SynthController::sendInfoRequest(quint16 id) {
 // the link/firmware speed without ever flooding it.
 void SynthController::pumpInfoRequests() {
   if (!m_discovering) return;
+  // Nothing to pump — and nothing to conclude from an empty pending set —
+  // until the id list has landed.
+  if (m_awaitingInfoList) return;
 
   if (m_pendingInfoIds.isEmpty()) {
     finishDiscovery();
@@ -339,7 +416,7 @@ void SynthController::onInfoBadArg(quint8 seq) {
   m_infoSeqToId.remove(seq);
   m_infoInflight.remove(id);
   m_pendingInfoIds.remove(id);
-  if (m_discovering && m_pendingInfoIds.isEmpty()) finishDiscovery();
+  if (m_discovering && !m_awaitingInfoList && m_pendingInfoIds.isEmpty()) finishDiscovery();
 }
 
 void SynthController::finishDiscovery() {
@@ -348,6 +425,10 @@ void SynthController::finishDiscovery() {
   m_infoInflight.clear();
   m_infoSeqToId.clear();
   m_infoQueue.clear();
+  // Also on the budget-spent path, where ids are still outstanding: a pass
+  // that gives up must not leave them marked, or the next beginDiscovery()
+  // would skip them (see the note there).
+  m_pendingInfoIds.clear();
   scheduleParamsDiscovered();
   // A second value sweep. onParamListComplete() already fetched them so the UI
   // was never showing defaults; this catches anything the synth changed during
@@ -359,6 +440,7 @@ void SynthController::finishDiscovery() {
   // them; ask once the parameter traffic has been queued.
   refreshSequencer();
   refreshKit();
+  m_songAccum.clear();
   send(OP_SEQ_SONG, payloadSeqSongGet(), true);
   // Capability probe: the firmware ignores velocity 0, so this is silent where
   // the opcode exists and answers UNKNOWN_OP where it does not.
@@ -371,15 +453,67 @@ void SynthController::scheduleParamsDiscovered() {
 }
 
 void SynthController::requestAllParamValues() {
+  const int perFrame = maxGetIdsPerFrame();
   QList<quint16> chunk;
   for (quint16 id : std::as_const(m_paramOrder)) {
     chunk.append(id);
-    if (chunk.size() >= kMaxGetIdsPerFrame) {
+    if (chunk.size() >= perFrame) {
       send(OP_GET_PARAM, payloadGetParam(chunk), false);
       chunk.clear();
     }
   }
   if (!chunk.isEmpty()) send(OP_GET_PARAM, payloadGetParam(chunk), false);
+}
+
+/* ------------------------------------------------- paced SET_PARAM output */
+
+void SynthController::queueSetFrame(const QByteArray& payload) {
+  if (payload.isEmpty() || !m_connected) return;
+  m_setQueue.append(payload);
+  drainSetQueue();
+}
+
+void SynthController::drainSetQueue() {
+  if (m_setQueue.isEmpty()) {
+    m_setDrainTimer.stop();
+    return;
+  }
+  // The gate is a timestamp, not "is the timer running": queueSetFrame() calls
+  // in here once per appended frame, so a five-frame patch push would
+  // otherwise still leave as five back-to-back writes.
+  const qint64 now = nowMs();
+  const qint64 earliest = qMax(m_setNextSendMs, m_setBackoffUntilMs);
+  if (now < earliest) {
+    m_setDrainTimer.start(int(qMin<qint64>(earliest - now, kSetBusyBackoffMs)));
+    return;
+  }
+
+  const QByteArray payload = m_setQueue.takeFirst();
+  const quint8 seq = nextSeq();
+  m_setSent.insert(seq, payload);
+  m_setSentOrder.append(seq);
+  while (m_setSentOrder.size() > kSetSentHistory) {
+    m_setSent.remove(m_setSentOrder.takeFirst());
+  }
+  sendWithSeq(OP_SET_PARAM, seq, payload, /*withResponse=*/false);
+  m_setNextSendMs = now + kSetDrainIntervalMs;
+
+  if (!m_setQueue.isEmpty()) m_setDrainTimer.start(kSetDrainIntervalMs);
+}
+
+void SynthController::onSetBusy(quint8 seq) {
+  m_setBackoffUntilMs = nowMs() + kSetBusyBackoffMs;
+  const auto it = m_setSent.constFind(seq);
+  if (it != m_setSent.constEnd()) {
+    const QByteArray dropped = it.value();  // copy out before erasing the node
+    m_setSent.remove(seq);
+    m_setSentOrder.removeAll(seq);
+    m_setQueue.prepend(dropped);  // at the head: parameter order matters
+  }
+  // Otherwise it has aged out of the history and the frame is simply lost —
+  // all that is left to do is slow down. Eight frames of history covers any
+  // burst this app produces, so that is a theoretical branch.
+  m_setDrainTimer.start(kSetDrainIntervalMs);
 }
 
 /* ---------------------------------------------------------- frame decode */
@@ -412,6 +546,13 @@ void SynthController::handleFrame(const Frame& f) {
       m_drumTrigOpcode = false;
       return;
     }
+    if (f.requestOp() == OP_SET_PARAM && f.status == ST_BUSY) {
+      // The firmware's command queue overflowed and dropped this frame. It is
+      // the only feedback a write-without-response ever gets, and ignoring it
+      // meant a patch push silently applied only part of itself.
+      onSetBusy(f.seq);
+      return;
+    }
     if (f.requestOp() == OP_PARAM_INFO) {
       // Flow control for the discovery pump: BUSY = firmware queue full (back off
       // and retry that id); BAD_ARG = id not registered (stop chasing it). Both
@@ -431,13 +572,20 @@ void SynthController::handleFrame(const Frame& f) {
 
   switch (f.requestOp()) {
     case OP_PARAM_INFO:
-      // Route to the list handler only while the list response is actually
-      // pending; once it completes, later PARAM_INFO frames are per-id metadata
-      // (even if a seq value happens to collide with the old list seq).
+      // Route by the seq the request went out with. The list response is the
+      // one matching m_infoListSeq; per-id metadata is anything m_infoSeqToId
+      // knows about. Anything else is stale and must be DROPPED, not guessed
+      // at — most importantly the superseded list response after the watchdog
+      // resent the request, which the old `else` branch fed to the single-id
+      // parser. That parsed an id list as one parameter (registering a garbage
+      // entry) and, because no per-id requests were outstanding yet, concluded
+      // discovery was complete and tore it down before it had started: the app
+      // ended up with ids and values but no metadata at all, i.e. every
+      // parameter page blank.
       if (m_awaitingInfoList && f.seq == m_infoListSeq) {
         handleParamInfoList(f.payload);
         if (!f.continuation) onParamListComplete();
-      } else {
+      } else if (m_infoSeqToId.contains(f.seq)) {
         m_infoSeqToId.remove(f.seq);  // this request is resolved
         handleParamInfoSingle(f.payload);
       }
@@ -458,7 +606,7 @@ void SynthController::handleFrame(const Frame& f) {
       handleSeqSteps(f.payload, f.continuation);
       break;
     case OP_SEQ_TRACK:
-      handleSeqTrack(f.payload);
+      handleSeqTrack(f.payload, f.seq);
       break;
     case OP_SEQ_PATTERN:
       handleSeqPattern(f.payload);
@@ -500,7 +648,7 @@ void SynthController::handleParamInfoSingle(const QByteArray& payload) {
   m_infoInflight.remove(pi.id);  // free its flow-control slot
   // Progressive fill: refresh the page groups as newly-known metadata arrives.
   if (wasUnknown) scheduleParamsDiscovered();
-  if (m_discovering) {
+  if (m_discovering && !m_awaitingInfoList) {
     if (m_pendingInfoIds.isEmpty()) {
       finishDiscovery();
     } else if (wasPending) {
@@ -706,17 +854,18 @@ void SynthController::setParam(int id, double value) {
 
 void SynthController::flushPendingSets() {
   if (m_pendingSets.isEmpty()) return;
+  const int perFrame = maxSetPairsPerFrame();
   QByteArray payload;
   int pairs = 0;
   for (auto it = m_pendingSets.constBegin(); it != m_pendingSets.constEnd(); ++it) {
     appendSetParam(payload, it.key(), it.value());
-    if (++pairs >= kMaxSetPairsPerFrame) {
-      send(OP_SET_PARAM, payload, /*withResponse=*/false);
+    if (++pairs >= perFrame) {
+      queueSetFrame(payload);
       payload.clear();
       pairs = 0;
     }
   }
-  if (pairs > 0) send(OP_SET_PARAM, payload, /*withResponse=*/false);
+  if (pairs > 0) queueSetFrame(payload);
   m_pendingSets.clear();
 }
 
@@ -740,6 +889,10 @@ void SynthController::savePreset(int engine, int slot, const QString& name) {
 
 void SynthController::listPresets(int engine) {
   if (!m_connected) return;
+  // 80 slots x 26 B is ~9 frames, so this one is always chunked; a listing
+  // that lost its final frame would leave the accumulator populated and the
+  // next Refresh would show every preset twice.
+  m_presetsAccum.remove(engine);
   send(OP_LIST_PRESETS, payloadListPresets(quint8(engine)), false);
 }
 
@@ -827,7 +980,12 @@ int SynthController::saveCurrentAsPatch(const QString& name) {
   return id;
 }
 
+// A whole patch is ~180 parameters, i.e. ~5 full frames. Blasting them
+// back-to-back overran the firmware's 4-deep command queue and lost whole
+// frames to BUSY, so a loaded patch applied only partly — the exact failure
+// the discovery pump was rewritten to avoid. They go through the paced queue.
 void SynthController::pushParams(const QList<QPair<int, double>>& params) {
+  const int perFrame = maxSetPairsPerFrame();
   QByteArray payload;
   int pairs = 0;
   for (const auto& pv : params) {
@@ -838,13 +996,13 @@ void SynthController::pushParams(const QList<QPair<int, double>>& params) {
     if (isNotPatchMaterial(paramName(pv.first))) continue;
     appendSetParam(payload, quint16(pv.first), float(pv.second));
     applyValue(quint16(pv.first), float(pv.second), /*echo=*/true);
-    if (++pairs >= kMaxSetPairsPerFrame) {
-      send(OP_SET_PARAM, payload, false);
+    if (++pairs >= perFrame) {
+      queueSetFrame(payload);
       payload.clear();
       pairs = 0;
     }
   }
-  if (pairs > 0) send(OP_SET_PARAM, payload, false);
+  if (pairs > 0) queueSetFrame(payload);
 }
 
 void SynthController::loadPatch(int patchId) {
@@ -1122,12 +1280,10 @@ QVariantMap SynthController::importPatchJson(const QString& text) {
 /*  grid never lags a tap, and the write goes out right after.               */
 /* ======================================================================== */
 
-namespace {
-// A steps response repeats a 4-byte prefix per frame and carries 8 bytes per
-// step, so a 247-byte MTU fits ~29. Ask for a round 24 at a time and let the
-// chunker split further if the negotiated MTU is smaller.
-constexpr int kStepWindow = 24;
-}  // namespace
+// Step windows (read and write) are sized by maxStepsPerFrame(), which
+// derives from the negotiated MTU — a steps payload carries 8 bytes per step
+// behind a 6-byte prefix, so the documented 247 fits the 24 this used to
+// hard-code, and a smaller link packs fewer instead of overrunning the frame.
 
 void SynthController::setEditPattern(int pattern) {
   if (pattern < 0 || (m_seqInfo.valid && pattern >= m_seqInfo.patterns)) return;
@@ -1154,12 +1310,29 @@ void SynthController::setEditTrack(int track) {
 
 void SynthController::refreshSequencer() {
   if (!m_connected) return;
+  // Drop whatever a superseded response left behind. Both of these
+  // accumulators are abandoned mid-stream when their staleness check fires
+  // (a pattern or track switch while frames are in flight), and appending the
+  // next listing onto the remains showed up as duplicated p-locks — and locks
+  // from the previous pattern — on the grid.
+  m_stepsAccum.clear();
+  m_stepsAccumFirst = 0;
+  m_plocksAccum.clear();
+
   send(OP_SEQ_INFO, QByteArray(), true);
   send(OP_SEQ_PATTERN, payloadSeqGetPattern(m_editPattern), true);
-  send(OP_SEQ_TRACK, payloadSeqGetTrack(m_editPattern, m_editTrack), true);
   send(OP_SEQ_PLOCK, payloadSeqPlockListPattern(m_editPattern), true);
-  m_stepsWindowNext = 0;
-  requestSteps();
+
+  // The step walk needs this track's length, and only this response carries
+  // it — so it starts in handleSeqTrack(), not here. Starting it here meant
+  // walking the whole track once on the *previous* track's length and then
+  // again when the real one arrived: up to 22 wasted round trips per switch.
+  m_stepsWindowNext = -1;
+  m_trackGetSeq = nextSeq();
+  m_awaitingTrackGet = true;
+  m_trackGetFallbackTimer.start();
+  sendWithSeq(OP_SEQ_TRACK, m_trackGetSeq,
+              payloadSeqGetTrack(m_editPattern, m_editTrack), true);
 }
 
 void SynthController::requestSteps() {
@@ -1169,7 +1342,8 @@ void SynthController::requestSteps() {
     m_stepsWindowNext = -1;
     return;
   }
-  const int count = qMin(kStepWindow, len - m_stepsWindowNext);
+  m_stepsAccum.clear();  // each window is answered on its own
+  const int count = qMin(maxStepsPerFrame(), len - m_stepsWindowNext);
   send(OP_SEQ_STEPS,
        payloadSeqGetSteps(m_editPattern, m_editTrack, m_stepsWindowNext, count),
        true);
@@ -1209,11 +1383,15 @@ QVariantMap SynthController::step(int index) const {
 int SynthController::noteForSlot(int slot) const {
   for (const QVariant& v : m_kitSlots) {
     const QVariantMap m = v.toMap();
-    if (m.value(QStringLiteral("slot")).toInt() == slot) {
-      return m.value(QStringLiteral("note")).toInt();
-    }
+    if (m.value(QStringLiteral("slot")).toInt() != slot) continue;
+    // KIT_INFO has no "no note" encoding — the firmware sends 0 for a slot the
+    // kit leaves empty — so an empty name is what identifies one. Returning
+    // that 0 made noteForNewStep() stamp note 0 onto a lane bound to an empty
+    // slot, and made drumNameForNote(0) answer with the first empty slot.
+    if (m.value(QStringLiteral("name")).toString().isEmpty()) return -1;
+    return m.value(QStringLiteral("note")).toInt();
   }
-  return -1;  // kit list not in yet, or the slot is empty
+  return -1;  // kit list not in yet, or no such slot
 }
 
 int SynthController::defaultDrumNote() const {
@@ -1231,9 +1409,11 @@ int SynthController::defaultDrumNote() const {
 QString SynthController::drumNameForNote(int note) const {
   for (const QVariant& v : m_kitSlots) {
     const QVariantMap m = v.toMap();
-    if (m.value(QStringLiteral("note")).toInt() == note) {
-      return m.value(QStringLiteral("name")).toString();
-    }
+    const QString name = m.value(QStringLiteral("name")).toString();
+    // Empty slots all report note 0 (see noteForSlot), so they must not be
+    // allowed to claim it.
+    if (name.isEmpty()) continue;
+    if (m.value(QStringLiteral("note")).toInt() == note) return name;
   }
   return QString();
 }
@@ -1251,11 +1431,9 @@ int SynthController::noteForNewStep(int pickedNote) const {
 }
 
 void SynthController::writeSteps(int first, int count) {
-  // The frame cap allows ~30 step records; 24 keeps a margin for the header
-  // and the prefix at any negotiated MTU.
-  constexpr int kPerFrame = 24;
-  for (int at = first; at < first + count; at += kPerFrame) {
-    const int n = qMin(kPerFrame, first + count - at);
+  const int perFrame = maxStepsPerFrame();
+  for (int at = first; at < first + count; at += perFrame) {
+    const int n = qMin(perFrame, first + count - at);
     QList<SeqStep> batch;
     batch.reserve(n);
     for (int i = 0; i < n; ++i) {
@@ -1592,6 +1770,11 @@ void SynthController::setSong(const QVariantList& chain) {
 
 void SynthController::refreshKit() {
   if (!m_connected) return;
+  // Same rule as the sequencer listings: a chunked response that never
+  // finished (a dropped final frame) would otherwise have the next one
+  // appended to it, duplicating every kit and slot in the pickers.
+  m_kitsAccum.clear();
+  m_kitSlotsAccum.clear();
   send(OP_KIT_INFO, payloadKitInfo(0), true);  // selectable kits
   send(OP_KIT_INFO, payloadKitInfo(1), true);  // the current kit's slots
 }
@@ -1617,11 +1800,15 @@ void SynthController::triggerDrum(int slot, int velocity) {
   // coalescing — two hits on the same pad inside one 40 ms batch would
   // collapse into a single write. A repeated write of the same value is fine:
   // ParamStore::set() notifies its listeners whether or not the value moved.
+  //
+  // Through the paced queue, which is empty while playing, so the hit still
+  // goes out on the spot — but a hit landing during a patch push is retried
+  // instead of dropped.
   const int pid = paramIdForName(QStringLiteral("drums.trig"));
   if (pid <= 0) return;
   QByteArray p;
   appendSetParam(p, quint16(pid), float(slot));
-  send(OP_SET_PARAM, p, false);
+  queueSetFrame(p);
 }
 
 QStringList SynthController::scaleNames() const {
@@ -1666,7 +1853,13 @@ void SynthController::handleSeqSteps(const QByteArray& payload, bool more) {
   const int first = r.u16();
   if (!r.ok) return;
   // A response for a target the user has since navigated away from is stale.
-  if (pattern != m_editPattern || track != m_editTrack) return;
+  // Drop what it already contributed with it: leaving a half-accumulated
+  // window behind would make the next response resume from *its* first index
+  // and scatter the new track's steps across the wrong slots.
+  if (pattern != m_editPattern || track != m_editTrack) {
+    m_stepsAccum.clear();
+    return;
+  }
 
   if (m_stepsAccum.isEmpty()) m_stepsAccumFirst = first;
   while (r.remaining >= 8) m_stepsAccum.append(readStep(r));
@@ -1689,7 +1882,7 @@ void SynthController::handleSeqSteps(const QByteArray& payload, bool more) {
   }
 }
 
-void SynthController::handleSeqTrack(const QByteArray& payload) {
+void SynthController::handleSeqTrack(const QByteArray& payload, quint8 seq) {
   Reader r(payload);
   const int pattern = r.u8();
   const int track = r.u8();
@@ -1701,9 +1894,24 @@ void SynthController::handleSeqTrack(const QByteArray& payload) {
   emit trackConfigChanged();
   if (lengthChanged) {
     m_steps.resize(cfg.length);
+    emit stepsChanged();
+  }
+
+  // This response is the answer to refreshSequencer's own SEQ_TRACK get: it
+  // has just delivered the length the walk is sized by, so the walk starts
+  // here. Every other SEQ_TRACK response is the echo of a track-field write —
+  // restarting a full walk on each of those would re-read the whole track
+  // while the user drags a swing slider.
+  if (m_awaitingTrackGet && seq == m_trackGetSeq) {
+    m_awaitingTrackGet = false;
+    m_trackGetFallbackTimer.stop();
+    m_stepsAccum.clear();
     m_stepsWindowNext = 0;
     requestSteps();
-    emit stepsChanged();
+  } else if (lengthChanged) {
+    m_stepsAccum.clear();
+    m_stepsWindowNext = 0;
+    requestSteps();
   }
 }
 
@@ -1751,7 +1959,10 @@ void SynthController::handleSeqPlock(const QByteArray& payload, bool more) {
   }
 
   const int pattern = r.u8();
-  if (!r.ok || pattern != m_editPattern) return;
+  if (!r.ok || pattern != m_editPattern) {
+    m_plocksAccum.clear();  // abandoned mid-listing; do not carry it forward
+    return;
+  }
   while (r.remaining >= 9) {
     const int track = r.u8();
     const int step = r.u16();

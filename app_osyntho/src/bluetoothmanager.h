@@ -32,6 +32,7 @@ class BluetoothManager : public IBluetoothManager {
   QString getDeviceAddress() override;
   bool getConnected() override;
   QVariantList getDiscoveredDevices() const override;
+  int mtu() const override;
 
   Q_INVOKABLE void connectToSelectedDevice();
   // Device-selector screen entry/exit. startDeviceScan() disconnects any
