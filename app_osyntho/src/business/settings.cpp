@@ -90,6 +90,10 @@ void Settings::fillSettingsCacheDefaultValues() {
   settingsCache["keyboard_height"] = "118";     // px height of the on-screen key area
   settingsCache["keyboard_resize_mode"] = "divider";  // "divider" (drag handle) | "slider"
   settingsCache["keyboard_divider_thickness"] = "5";  // px height of the drag divider
+  // Computer keys play the synth (desktop). Off hands every key back to the
+  // app, which is what you want while driving it from a MIDI/BLE controller
+  // or when a stray Z is not meant to sound a note.
+  settingsCache["keyboard_computer_keys"] = "true";
   // Top letter/number rows fire the 4x4 drum pads instead of a second
   // octave of keys. On by default: one octave covers most parts, and
   // playing drums and a part together is the point of the pads.

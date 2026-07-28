@@ -251,8 +251,22 @@ Pane {
                             onToggled: App.saveSetting("keyboard_show_note_names", checked ? "true" : "false")
                         }
 
+                        // Both also live in the on-screen keyboard's control
+                        // strip, next to the octave buttons, since they are
+                        // rewired mid-take.
                         SettingsSwitch {
+                            id: computerKeysSwitch
+                            text: t.t("Computer keys play the synth")
+                            checked: App.settingIsTrue("keyboard_computer_keys")
+                            onToggled: App.saveSetting("keyboard_computer_keys", checked ? "true" : "false")
+                        }
+
+                        SettingsSwitch {
+                            // Nothing reaches the drum mapping with the keys
+                            // released to the app; follows the switch above
+                            // rather than the setting, which is not reactive.
                             text: t.t("Top rows play drum pads")
+                            enabled: computerKeysSwitch.checked
                             checked: App.settingIsTrue("keyboard_top_row_drums")
                             onToggled: App.saveSetting("keyboard_top_row_drums", checked ? "true" : "false")
                         }
@@ -264,7 +278,8 @@ Pane {
                             color: Material.foreground
                             text: t.t("Computer keyboard: Q…I fire the lower eight pads and "
                                       + "1…8 the upper eight. Off, those keys play a second "
-                                      + "octave instead. The Z…M row always plays notes.")
+                                      + "octave instead. The Z…M row plays notes either way. "
+                                      + "Both switches are also in the keyboard's own toolbar.")
                         }
 
                         Text { text: t.t("Resize control"); font.bold: true; color: Material.foreground }

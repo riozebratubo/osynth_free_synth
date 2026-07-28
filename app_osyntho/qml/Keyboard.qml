@@ -37,12 +37,20 @@ Rectangle {
     property string resizeMode: App.setting("keyboard_resize_mode") === "slider" ? "slider" : "divider"
     property int dividerThickness: Math.max(2, parseInt(App.setting("keyboard_divider_thickness")) || 5)
     property bool showNoteNames: App.settingIsTrue("keyboard_show_note_names")
+    // Computer-keyboard wiring, both toggleable from the control strip (and
+    // from Settings ▸ Keyboard). computerKeys gates the whole key capture;
+    // topRowDrums decides whether the top two rows fire drum pads or play a
+    // second octave. Desktop-only concerns — the buttons are hidden elsewhere.
+    property bool computerKeys: App.settingIsTrue("keyboard_computer_keys")
+    property bool topRowDrums: App.settingIsTrue("keyboard_top_row_drums")
     // App.setting() isn't reactive; re-read when the keyboard is reshown so a
     // Settings change applies without an app restart.
     onVisibleChanged: if (visible) {
         resizeMode = App.setting("keyboard_resize_mode") === "slider" ? "slider" : "divider"
         dividerThickness = Math.max(2, parseInt(App.setting("keyboard_divider_thickness")) || 5)
         showNoteNames = App.settingIsTrue("keyboard_show_note_names")
+        computerKeys = App.settingIsTrue("keyboard_computer_keys")
+        topRowDrums = App.settingIsTrue("keyboard_top_row_drums")
     }
     readonly property int minKeyHeight: 70
     readonly property int maxKeyHeight: 340
@@ -101,11 +109,37 @@ Rectangle {
         else { setHeld(n, true); noteOn(n) }
     }
 
+    // A sounding note is ended by the matching key-up / touch-release. Rewiring
+    // the computer keys under a held key eats that release (capture stops, or
+    // the key becomes a drum pad), which would strand the note — so drop what
+    // is sounding on every wiring change. Latched notes are left alone: outliving
+    // the key that started them is the whole point of latch.
+    function releaseSounding() {
+        for (var n in activeNotes) noteOff(parseInt(n))
+        activeNotes = ({})
+    }
+
+    function setComputerKeys(on) {
+        if (computerKeys === on) return
+        releaseSounding()
+        computerKeys = on
+        App.saveSetting("keyboard_computer_keys", on ? "true" : "false")
+    }
+
+    // Read back by App's key filter on every keystroke, so the switch is live.
+    function setTopRowDrums(on) {
+        if (topRowDrums === on) return
+        releaseSounding()
+        topRowDrums = on
+        App.saveSetting("keyboard_top_row_drums", on ? "true" : "false")
+    }
+
     // Computer-keyboard piano (desktop): App's global key filter emits semitone
     // offsets; apply the base octave + velocity here. Capture is enabled only
-    // while this keyboard is visible on a desktop platform.
+    // while this keyboard is visible on a desktop platform, and only while the
+    // user leaves the computer-keys toggle on.
     Component.onCompleted: App.keyboardCaptureEnabled = Qt.binding(function() {
-        return root.visible && App.isDesktop()
+        return root.visible && App.isDesktop() && root.computerKeys
     })
     Component.onDestruction: App.keyboardCaptureEnabled = false
 
@@ -264,6 +298,57 @@ Rectangle {
                 width: 34
                 onClicked: if (root.baseOctave < 8) { root.baseOctave++; App.saveSetting("keyboard_octave", root.baseOctave) }
             }
+
+            // Computer-keyboard wiring, next to the octave controls because it
+            // is the other thing you rewire mid-take. Desktop only — the key
+            // capture itself is desktop-gated, so on a phone these would be two
+            // buttons that do nothing.
+            //
+            // Deliberately not `checkable`: a Button assigning its own `checked`
+            // would break the binding to the root property, and the setting is
+            // also editable from Settings ▸ Keyboard. The property stays the one
+            // source of truth and the buttons only render it.
+            Rectangle {
+                visible: App.isDesktop()
+                width: 1
+                height: 18
+                anchors.verticalCenter: parent.verticalCenter
+                color: Material.foreground
+                opacity: 0.2
+            }
+            ToolButton {
+                visible: App.isDesktop()
+                width: 34
+                text: "\uf11c"  // keyboard
+                font.family: App.fontAwesomeName
+                font.weight: Font.Black  // solid face
+                font.pointSize: UI.fontSize * 0.95
+                highlighted: root.computerKeys
+                opacity: root.computerKeys ? 1.0 : 0.45
+                onClicked: root.setComputerKeys(!root.computerKeys)
+                ToolTip.visible: hovered
+                ToolTip.text: root.computerKeys
+                              ? t.t("Computer keys play the synth. Click to release them to the app.")
+                              : t.t("Computer keys are off. Click to play the synth from them.")
+            }
+            ToolButton {
+                visible: App.isDesktop()
+                width: 34
+                text: "\uf569"  // drum
+                font.family: App.fontAwesomeName
+                font.weight: Font.Black  // solid face
+                font.pointSize: UI.fontSize * 0.95
+                // Nothing reaches the drum mapping while capture is off.
+                enabled: root.computerKeys  // the style dims a disabled button
+                highlighted: root.topRowDrums && root.computerKeys
+                opacity: root.topRowDrums ? 1.0 : 0.45
+                onClicked: root.setTopRowDrums(!root.topRowDrums)
+                ToolTip.visible: hovered
+                ToolTip.text: root.topRowDrums
+                              ? t.t("Q…I and 1…8 fire the drum pads. Click to play a second octave instead.")
+                              : t.t("Q…I and 1…8 play a second octave. Click to fire the drum pads instead.")
+            }
+
             Label {
                 text: root.hold ? "· " + t.t("hold") : ""
                 anchors.verticalCenter: parent.verticalCenter

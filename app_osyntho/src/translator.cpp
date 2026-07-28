@@ -107,6 +107,8 @@ Translator::Translator()
   pt["Velocity"] = "Velocidade";
   pt["Latch notes (hold)"] = "Sustentar notas (segurar)";
   pt["Show note names on keys"] = "Mostrar nomes das notas nas teclas";
+  pt["Computer keys play the synth"] = "Teclas do computador tocam o sintetizador";
+  pt["Top rows play drum pads"] = "Linhas de cima tocam os pads de bateria";
   pt["Resize control"] = "Controle de redimensionamento";
   pt["Divider (drag handle)"] = "Divisória (alça de arraste)";
   pt["Slider"] = "Controle deslizante";
@@ -227,4 +229,14 @@ Translator::Translator()
   pt["Octave"] = "Oitava";
   pt["hold"] = "segurar";
   pt["size"] = "tamanho";
+  pt["Computer keys play the synth. Click to release them to the app."] =
+      "As teclas do computador tocam o sintetizador. Clique para liberá-las para o "
+      "aplicativo.";
+  pt["Computer keys are off. Click to play the synth from them."] =
+      "As teclas do computador estão desligadas. Clique para tocar o sintetizador com "
+      "elas.";
+  pt["Q…I and 1…8 fire the drum pads. Click to play a second octave instead."] =
+      "Q…I e 1…8 tocam os pads de bateria. Clique para tocarem uma segunda oitava.";
+  pt["Q…I and 1…8 play a second octave. Click to fire the drum pads instead."] =
+      "Q…I e 1…8 tocam uma segunda oitava. Clique para tocarem os pads de bateria.";
 }
