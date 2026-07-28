@@ -65,6 +65,12 @@ constexpr int kFollowPatternMs = 500;
 // If refreshSequencer's SEQ_TRACK get goes unanswered, start the step walk
 // anyway on the cached length rather than leaving the grid empty.
 constexpr int kTrackGetFallbackMs = 1500;
+// Watchdog on each step window of that walk. The next window is requested only
+// by the previous one's response, so one lost notification stalls the rest of
+// the pattern; re-ask rather than leave the grid half drawn. Generous, because
+// a window is up to 24 step records and the link may be busy with a value sweep.
+constexpr int kStepsWindowTimeoutMs = 1500;
+constexpr int kStepsWindowRetries = 3;
 
 // Well-known ids the controller tracks directly.
 constexpr quint16 ID_PRESET_LOAD = 0x0002;
@@ -101,8 +107,22 @@ SynthController::SynthController(QObject* parent) : QObject(parent) {
   connect(&m_trackGetFallbackTimer, &QTimer::timeout, this, [this]() {
     if (!m_awaitingTrackGet) return;
     m_awaitingTrackGet = false;
-    m_stepsAccum.clear();
-    m_stepsWindowNext = 0;
+    beginStepWalk();
+  });
+
+  m_stepsRetryTimer.setSingleShot(true);
+  m_stepsRetryTimer.setInterval(kStepsWindowTimeoutMs);
+  connect(&m_stepsRetryTimer, &QTimer::timeout, this, [this]() {
+    if (!m_connected || m_stepsWindowNext < 0) return;
+    if (m_stepsWindowRetries <= 0) {
+      qWarning() << "Synth | step window" << m_stepsWindowNext
+                 << "unanswered after" << kStepsWindowRetries
+                 << "tries; stopping the walk";
+      m_stepsWindowNext = -1;
+      return;
+    }
+    m_stepsWindowRetries--;
+    m_stepsAccum.clear();  // a half-arrived window must not be resumed
     requestSteps();
   });
 
@@ -306,6 +326,8 @@ void SynthController::resetState() {
   m_discoveredCoalesceTimer.stop();
   m_followPatternTimer.stop();
   m_trackGetFallbackTimer.stop();
+  m_stepsRetryTimer.stop();
+  m_stepsWindowRetries = 0;
   m_awaitingTrackGet = false;
   m_setTimer.stop();
   m_setDrainTimer.stop();
@@ -484,6 +506,20 @@ void SynthController::pumpInfoRequests() {
     if (now - it.value() > kInfoTimeoutMs) {
       const quint16 id = it.key();
       it = m_infoInflight.erase(it);
+      // Retire the seq that request went out with as well. nextSeq() cycles
+      // through 255 values, and a discovery pass sends about as many requests
+      // as there are parameters — so a mapping left behind by a timed-out
+      // request can still be there when its seq comes round again, and would
+      // then attribute the new request's BUSY or BAD_ARG to an unrelated id
+      // (re-queueing one already answered, or striking one off for good).
+      // A late answer to the retired request is dropped rather than misfiled;
+      // the id is back on the queue below, so it is asked again either way.
+      for (auto sit = m_infoSeqToId.begin(); sit != m_infoSeqToId.end();) {
+        if (sit.value() == id)
+          sit = m_infoSeqToId.erase(sit);
+        else
+          ++sit;
+      }
       if (m_pendingInfoIds.contains(id) && !m_infoQueue.contains(id)) m_infoQueue.append(id);
     } else {
       ++it;
@@ -1048,6 +1084,26 @@ void SynthController::flushPendingSets() {
   }
   if (pairs > 0) queueSetFrame(payload);
   m_pendingSets.clear();
+}
+
+// Momentary gesture, outside the coalescing batch — see the header note. The
+// press and the release of a Fill button are two values of one id a few
+// milliseconds apart, and m_pendingSets keeps only the last one written inside
+// its window: a quick tap therefore sent the release and nothing else, so the
+// firmware never saw the gesture at all. This is the same reasoning that has
+// always kept triggerDrum() out of the batch.
+void SynthController::setParamNow(int id, double value) {
+  const quint16 pid = quint16(id);
+  // Drop any batched write for this id: it holds an older value and would land
+  // *after* this one.
+  m_pendingSets.remove(pid);
+  applyValue(pid, conformValue(pid, float(value)), /*echo=*/true);
+  QByteArray p;
+  appendSetParam(p, pid, float(value));
+  // Through the paced queue, which is idle while playing — so the write still
+  // goes out on the spot — but a gesture landing during a patch push is spaced
+  // out instead of dropped by the firmware's 4-deep command queue.
+  queueSetFrame(p);
 }
 
 void SynthController::refreshParam(int id) {
@@ -1697,6 +1753,7 @@ void SynthController::refreshSequencer() {
   // walking the whole track once on the *previous* track's length and then
   // again when the real one arrived: up to 22 wasted round trips per switch.
   m_stepsWindowNext = -1;
+  m_stepsRetryTimer.stop();  // any walk still in flight is abandoned here
   m_trackGetSeq = nextSeq();
   m_awaitingTrackGet = true;
   m_trackGetFallbackTimer.start();
@@ -1705,10 +1762,14 @@ void SynthController::refreshSequencer() {
 }
 
 void SynthController::requestSteps() {
-  if (m_stepsWindowNext < 0) return;
+  if (m_stepsWindowNext < 0) {
+    m_stepsRetryTimer.stop();
+    return;
+  }
   const int len = m_trackCfg.length > 0 ? int(m_trackCfg.length) : 64;
-  if (m_stepsWindowNext >= len) {
+  if (m_stepsWindowNext >= len) {  // the whole track is in
     m_stepsWindowNext = -1;
+    m_stepsRetryTimer.stop();
     return;
   }
   m_stepsAccum.clear();  // each window is answered on its own
@@ -1716,6 +1777,14 @@ void SynthController::requestSteps() {
   send(OP_SEQ_STEPS,
        payloadSeqGetSteps(m_editPattern, m_editTrack, m_stepsWindowNext, count),
        true);
+  m_stepsRetryTimer.start();  // watchdog on this window
+}
+
+void SynthController::beginStepWalk() {
+  m_stepsAccum.clear();
+  m_stepsWindowNext = 0;
+  m_stepsWindowRetries = kStepsWindowRetries;
+  requestSteps();
 }
 
 QVariantList SynthController::steps() const {
@@ -1990,8 +2059,7 @@ void SynthController::setTrackField(const QString& field, double value) {
   // A length change moves the grid's extent: re-read from the top.
   if (field == QLatin1String("length")) {
     m_steps.resize(c.length);
-    m_stepsWindowNext = 0;
-    requestSteps();
+    beginStepWalk();
   }
 }
 
@@ -2232,6 +2300,10 @@ void SynthController::handleSeqSteps(const QByteArray& payload, bool more) {
     m_stepsAccum.clear();
     return;
   }
+  // The window answered, so its watchdog is re-armed rather than left to fire:
+  // a window chunked across several frames takes longer than one round trip,
+  // and each frame is proof the walk is still moving.
+  if (m_stepsWindowNext >= 0) m_stepsRetryTimer.start();
 
   if (m_stepsAccum.isEmpty()) m_stepsAccumFirst = first;
   while (r.remaining >= 8) m_stepsAccum.append(readStep(r));
@@ -2249,7 +2321,21 @@ void SynthController::handleSeqSteps(const QByteArray& payload, bool more) {
 
   // Walk to the next window until the whole track is in.
   if (m_stepsWindowNext >= 0) {
+    if (next <= m_stepsWindowNext) {
+      // A window that carried no step records at all: `next` is the index we
+      // just asked for, so advancing to it would re-send the same request, be
+      // answered the same way, and do that for as long as the link stayed up.
+      // This firmware cannot produce it (handle_seq_steps clamps the count and
+      // rejects an out-of-range start with BAD_ARG), but nothing in the walk
+      // required it not to.
+      qWarning() << "Synth | step window" << m_stepsWindowNext
+                 << "carried no steps; stopping the walk";
+      m_stepsWindowNext = -1;
+      m_stepsRetryTimer.stop();
+      return;
+    }
     m_stepsWindowNext = next;
+    m_stepsWindowRetries = kStepsWindowRetries;  // fresh budget per window
     requestSteps();
   }
 }
@@ -2277,13 +2363,9 @@ void SynthController::handleSeqTrack(const QByteArray& payload, quint8 seq) {
   if (m_awaitingTrackGet && seq == m_trackGetSeq) {
     m_awaitingTrackGet = false;
     m_trackGetFallbackTimer.stop();
-    m_stepsAccum.clear();
-    m_stepsWindowNext = 0;
-    requestSteps();
+    beginStepWalk();
   } else if (lengthChanged) {
-    m_stepsAccum.clear();
-    m_stepsWindowNext = 0;
-    requestSteps();
+    beginStepWalk();
   }
 }
 
@@ -2355,6 +2437,13 @@ void SynthController::handleSeqPlock(const QByteArray& payload, bool more) {
 void SynthController::handleSeqSong(const QByteArray& payload, bool more) {
   Reader r(payload);
   r.u8();  // chain-length prefix; the records below are authoritative
+  // A *set* is answered with a bare status frame — no payload at all — and
+  // without this guard that landed here as "the chain is now empty": the
+  // accumulator is empty between listings, so `m_song = m_songAccum` wiped the
+  // chain the app had just written and announced it with songChanged(). Every
+  // sibling handler already refuses a payload it could not read; this one was
+  // the hole.
+  if (!r.ok) return;
   while (r.remaining >= 2) {
     QVariantMap m;
     m["pattern"] = r.u8();

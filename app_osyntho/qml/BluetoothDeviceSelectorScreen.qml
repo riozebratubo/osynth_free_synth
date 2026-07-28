@@ -47,35 +47,47 @@ Pane {
             }
         }
 
-        Item { Layout.fillWidth: true; height: 10 }
+        // Spacers and blocks inside a Layout size themselves through
+        // Layout.preferredHeight, never through `height`. A plain `height` is
+        // only honoured by Qt's last-resort fallback, which samples the item
+        // ONCE — before the layout has handed out any width — and caches that
+        // number for the item's whole life (qquicklayout.cpp,
+        // effectiveSizeHints_helper). qmllint calls it undefined behaviour for
+        // exactly that reason. The saved-device block was the one that paid:
+        // its wrapping Text was measured against a not-yet-assigned width, and
+        // the wrong height that produced was then frozen — it never followed
+        // the block afterwards, so hiding "Clear selection" or resizing the
+        // window left a stale gap or clipped the text. Same fix the toolbar's
+        // prev-button spacer already carries.
+        Item { Layout.fillWidth: true; Layout.preferredHeight: 10 }
 
-        Item {
+        // No wrapper Item: as a direct child the Column's own implicitHeight is
+        // the size hint, so the block is measured from its contents and
+        // re-measured whenever they change.
+        Column {
+            id: savedDeviceCol
             Layout.fillWidth: true
-            height: savedDeviceCol.height
-            Column {
-                id: savedDeviceCol
-                width: parent.width - 20
-                x: 10
-                spacing: 4
+            Layout.leftMargin: 10
+            Layout.rightMargin: 10
+            spacing: 4
 
-                Text { font.bold: true; color: Material.foreground; text: t.t("Saved device") }
-                Text {
-                    width: parent.width
-                    wrapMode: Text.WordWrap
-                    color: Material.foreground
-                    text: App.bluetoothSelectedDeviceName !== ""
-                        ? (App.bluetoothSelectedDeviceName + " (" + App.bluetoothSelectedDeviceAddress + ")")
-                        : t.t("None")
-                }
-                Button {
-                    visible: App.bluetoothSelectedDeviceAddress !== ""
-                    text: t.t("Clear selection")
-                    onClicked: App.setBluetoothSelectedDevice("", "")
-                }
+            Text { font.bold: true; color: Material.foreground; text: t.t("Saved device") }
+            Text {
+                width: parent.width
+                wrapMode: Text.WordWrap
+                color: Material.foreground
+                text: App.bluetoothSelectedDeviceName !== ""
+                    ? (App.bluetoothSelectedDeviceName + " (" + App.bluetoothSelectedDeviceAddress + ")")
+                    : t.t("None")
+            }
+            Button {
+                visible: App.bluetoothSelectedDeviceAddress !== ""
+                text: t.t("Clear selection")
+                onClicked: App.setBluetoothSelectedDevice("", "")
             }
         }
 
-        Item { Layout.fillWidth: true; height: 10 }
+        Item { Layout.fillWidth: true; Layout.preferredHeight: 10 }
 
         Row {
             id: scanStatusRow
@@ -99,7 +111,7 @@ Pane {
             }
         }
 
-        Item { Layout.fillWidth: true; height: 6 }
+        Item { Layout.fillWidth: true; Layout.preferredHeight: 6 }
 
         Text {
             Layout.leftMargin: 10
@@ -108,7 +120,7 @@ Pane {
             text: t.t("Discovered devices")
         }
 
-        Item { Layout.fillWidth: true; height: 4 }
+        Item { Layout.fillWidth: true; Layout.preferredHeight: 4 }
 
         ListView {
             id: deviceList

@@ -65,9 +65,11 @@ App::App() : App(Database::instance(), BluetoothManager::instance(), Settings::i
 
 App::App(IDatabase& db, IBluetoothManager& btm, ISettings& st)
   : database{db}, bluetoothManager{btm}, settings{st} {
-  // Route the controller's persistence + settings through the injected deps.
+  // Route the controller's persistence through the injected dependency. Only
+  // the database: the controller reads no setting, and wiring one in anyway
+  // (as this used to) gave it a dependency nothing ever asked a question
+  // through.
   synth.setDatabase(&database);
-  synth.setSettings(&settings);
 
   connect(this, &App::bluetoothAvailable, &bluetoothManager,
           &IBluetoothManager::onBluetoothAvailable);

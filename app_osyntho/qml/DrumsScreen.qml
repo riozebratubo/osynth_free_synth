@@ -27,6 +27,11 @@ Item {
     property int pidSend: -1
     property int pidChoke: -1
     property int pidMidiCh: -1
+    // Metronome level. It belongs on the drum bus because that is what plays
+    // it (drums_click), and it had no control anywhere — so turning Count-in
+    // on, in the Looper or on the Sequencer page, gave you a click you could
+    // not turn down or, if the kit had left it at zero, hear at all.
+    property int pidClick: -1
     ParamValue { id: chokeVal; paramId: root.pidChoke }
 
     // KIT_INFO reports every slot the build compiles in, empty ones included —
@@ -49,6 +54,7 @@ Item {
         pidSend = Synth.paramIdForName("drums.send")
         pidChoke = Synth.paramIdForName("drums.choke")
         pidMidiCh = Synth.paramIdForName("drums.midich")
+        pidClick = Synth.paramIdForName("drums.click")
     }
 
     Connections {
@@ -121,6 +127,10 @@ Item {
                         ParamControl {
                             visible: root.pidSend > 0
                             paramId: root.pidSend
+                        }
+                        ParamControl {
+                            visible: root.pidClick > 0
+                            paramId: root.pidClick
                         }
                         ParamControl {
                             visible: root.pidMidiCh > 0

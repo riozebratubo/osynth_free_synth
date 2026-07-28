@@ -204,8 +204,13 @@ Item {
 
             Button {
                 text: t.t("Fill")
-                // Momentary: fill is a gesture, not a mode.
-                onPressedChanged: if (root.pidFill > 0) Synth.setParam(root.pidFill, pressed ? 1 : 0)
+                // Momentary: fill is a gesture, not a mode — so setParamNow,
+                // not setParam. The batched write keeps only the last value an
+                // id was given inside its ~40 ms window, and a press and its
+                // release are two values of this one id: a tap quicker than
+                // that window sent the release alone and the synth never saw
+                // the fill at all.
+                onPressedChanged: if (root.pidFill > 0) Synth.setParamNow(root.pidFill, pressed ? 1 : 0)
             }
             Button {
                 text: t.t("Song")

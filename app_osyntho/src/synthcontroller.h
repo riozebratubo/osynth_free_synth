@@ -17,7 +17,6 @@
 
 #include "src/ble/synthprotocol.h"
 #include "src/business/databaseclient.h"
-#include "src/business/settingsclient.h"
 
 // Drives one connected osynth over SynthCtl v1.
 //
@@ -32,7 +31,11 @@
 // Wiring (in App): manager.receivedData -> onReceiveData, manager.infoRead ->
 // onInfoRead, writeToSynth -> manager.write, manager.connectedChanged ->
 // setConnected.
-class SynthController : public QObject, public DatabaseClient, public SettingsClient {
+// (No SettingsClient: this class reads no setting. It used to inherit the mixin
+// and App wired it up, which cost a dependency nothing ever asked a question
+// through — and made it look, to anyone reading, as though some behaviour here
+// were user-configurable.)
+class SynthController : public QObject, public DatabaseClient {
   Q_OBJECT
 
   Q_PROPERTY(bool connected READ connected NOTIFY connectedChanged)
@@ -125,6 +128,16 @@ class SynthController : public QObject, public DatabaseClient, public SettingsCl
   // Knob edit: updates the local value, echoes paramChanged, and queues a
   // coalesced write-without-response batch (~20 Hz).
   Q_INVOKABLE void setParam(int id, double value);
+  // Momentary gesture: writes `id` straight away, outside the coalescing batch.
+  //
+  // setParam() keeps only the LAST value written to an id inside its ~40 ms
+  // window, which is what a knob wants and the opposite of what a press/release
+  // pair wants — those are two values of the same id milliseconds apart, and a
+  // tap shorter than the window collapsed to the release alone. The synth then
+  // never saw the press: the sequencer's Fill did nothing, intermittently, with
+  // nothing on screen saying so. Still paced, so a burst cannot overrun the
+  // firmware's command queue.
+  Q_INVOKABLE void setParamNow(int id, double value);
   // Immediate reliable refresh of a single id.
   Q_INVOKABLE void refreshParam(int id);
 
@@ -408,6 +421,8 @@ class SynthController : public QObject, public DatabaseClient, public SettingsCl
   // Requests the edited track's steps; the firmware caps one response at the
   // MTU, so this walks the track in windows.
   void requestSteps();
+  // Starts that walk at step 0, with a fresh retry budget for its first window.
+  void beginStepWalk();
   void writeStep(int index);
   // Writes a run of cached steps back, batched to the frame cap.
   void writeSteps(int first, int count);
@@ -535,6 +550,14 @@ class SynthController : public QObject, public DatabaseClient, public SettingsCl
   QList<SynthProto::SeqStep> m_stepsAccum;  // across chunked frames
   int m_stepsAccumFirst = 0;
   int m_stepsWindowNext = 0;                // next window to request, -1 = idle
+  // Watchdog for the window in flight. Each window is asked for only by the
+  // *previous* window's response, so a single lost notification used to park
+  // the walk for good — the grid then showed the first 24 steps of the pattern
+  // and nothing after them, until the user happened to switch track or pattern.
+  // Only the SEQ_TRACK get that starts the walk had a fallback; this covers the
+  // rest of it.
+  QTimer m_stepsRetryTimer;
+  int m_stepsWindowRetries = 0;
   // The step walk needs the track's length, which only the SEQ_TRACK response
   // carries — so refreshSequencer() does not start it, it waits for that
   // response and starts it there. Without this the walk ran twice on every

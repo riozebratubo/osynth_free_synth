@@ -82,17 +82,49 @@ Dialog {
                     SyncedComboBox {
                         id: slotBox
                         // Index 0 is the "note picks it" entry; the rest are
-                        // the current kit's slots, labelled with their names.
-                        model: {
-                            var out = [t.t("from step note")]
+                        // the current kit's POPULATED slots. KIT_INFO reports
+                        // every slot the build compiles in, empty ones
+                        // included — and an empty one is a lane that makes no
+                        // sound, listed here as a bare number with nothing
+                        // after it. DrumsScreen drops those from its cards for
+                        // the same reason; the two now agree on what a kit is.
+                        readonly property var slotList: {
+                            var out = []
                             var slots = Synth.kitSlots
                             for (var i = 0; i < slots.length; ++i)
-                                out.push((i + 1) + "  " + slots[i].name)
+                                if (slots[i].name !== "") out.push(slots[i])
                             return out
                         }
-                        modelIndex: root.cfg.noteToSlot ? 0
-                                    : ((root.cfg.slot !== undefined ? root.cfg.slot : 0) + 1)
-                        onActivated: Synth.setTrackField("slot", currentIndex === 0 ? 255 : currentIndex - 1)
+                        model: {
+                            var out = [t.t("from step note")]
+                            for (var i = 0; i < slotBox.slotList.length; ++i)
+                                out.push((slotBox.slotList[i].slot + 1) + "  "
+                                         + slotBox.slotList[i].name)
+                            return out
+                        }
+                        // A lane stores a firmware slot NUMBER, which is only
+                        // the same thing as a position in the list above while
+                        // the list holds every slot. Resolve it instead of
+                        // offsetting by one. -1 (nothing selected) when the
+                        // lane points at a slot this kit leaves empty, or
+                        // before the kit has arrived: showing "from step note"
+                        // there would misreport what the lane actually does.
+                        modelIndex: {
+                            if (root.cfg.noteToSlot) return 0
+                            const s = root.cfg.slot !== undefined ? root.cfg.slot : 0
+                            for (var i = 0; i < slotBox.slotList.length; ++i)
+                                if (slotBox.slotList[i].slot === s) return i + 1
+                            return -1
+                        }
+                        onActivated: {
+                            if (currentIndex === 0) {
+                                Synth.setTrackField("slot", 255)
+                            } else if (currentIndex > 0
+                                       && currentIndex <= slotBox.slotList.length) {
+                                Synth.setTrackField(
+                                    "slot", slotBox.slotList[currentIndex - 1].slot)
+                            }
+                        }
                     }
                 }
             }
