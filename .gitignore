@@ -6,3 +6,7 @@ sdkconfig.old
 dependencies.lock
 .vscode/
 __pycache__/
+
+# author's private stuff
+/20*.txt
+/private*
