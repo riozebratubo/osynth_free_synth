@@ -212,10 +212,12 @@ Item {
                 // the fill at all.
                 onPressedChanged: if (root.pidFill > 0) Synth.setParamNow(root.pidFill, pressed ? 1 : 0)
             }
-            Button {
+            // The firmware owns these two as well — a loaded set carries
+            // seq.song and seq.countin — so they follow the parameter rather
+            // than the last press. See SyncedButton.qml.
+            SyncedButton {
                 text: t.t("Song")
-                checkable: true
-                checked: songVal.on
+                modelChecked: songVal.on
                 onToggled: if (root.pidSong > 0) Synth.setParam(root.pidSong, checked ? 1 : 0)
             }
             Button {
@@ -238,11 +240,10 @@ Item {
             // time. The firmware owns the timing — it counts on the same clock
             // that runs the sequencer, which the app could not do accurately
             // over BLE.
-            Button {
+            SyncedButton {
                 text: t.t("Count-in")
                 visible: root.pidCountIn > 0
-                checkable: true
-                checked: countInVal.on
+                modelChecked: countInVal.on
                 onToggled: Synth.setParam(root.pidCountIn, checked ? 1 : 0)
             }
 
@@ -649,23 +650,26 @@ Item {
                     spacing: 6
                     visible: root.sel.filled === true
 
-                    Button {
+                    // SyncedButton, not Button: these three are the same three
+                    // controls for every step, so a plain `checked` binding —
+                    // which the first press replaces — left them showing the
+                    // *previous* step's flags after the selection moved, and
+                    // the next press then wrote the inverse of that stale value
+                    // to the newly selected step. See SyncedButton.qml.
+                    SyncedButton {
                         text: t.t("Accent")
-                        checkable: true
-                        checked: root.sel.accent === true
+                        modelChecked: root.sel.accent === true
                         onToggled: Synth.setStepField(root.selectedStep, "accent", checked ? 1 : 0)
                     }
-                    Button {
+                    SyncedButton {
                         text: t.t("Slide")
-                        checkable: true
                         visible: !root.isDrumTrack
-                        checked: root.sel.slide === true
+                        modelChecked: root.sel.slide === true
                         onToggled: Synth.setStepField(root.selectedStep, "slide", checked ? 1 : 0)
                     }
-                    Button {
+                    SyncedButton {
                         text: t.t("Mute step")
-                        checkable: true
-                        checked: root.sel.muted === true
+                        modelChecked: root.sel.muted === true
                         onToggled: Synth.setStepField(root.selectedStep, "mute", checked ? 1 : 0)
                     }
                 }

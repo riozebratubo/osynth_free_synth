@@ -33,8 +33,16 @@ Rectangle {
     // as well as on the +/- buttons, so a value stored by an older build
     // cannot reintroduce them.
     readonly property int maxOctave: 7
-    property int baseOctave: Math.max(0, Math.min(maxOctave,
-                                                  parseInt(App.setting("keyboard_octave")) || 4))
+    // `parseInt(...) || 4` cannot be used here, unlike the settings below:
+    // octave 0 is a legal value and parses to 0, which is falsy — so saving it
+    // read straight back as 4. The setting is re-read on every write, so
+    // pressing "−" at octave 1 stored "0" and jumped the keyboard to 4 in the
+    // same frame, three octaves the wrong way. NaN is the only "not set".
+    function octaveSetting() {
+        const v = parseInt(App.setting("keyboard_octave"))
+        return Math.max(0, Math.min(maxOctave, isNaN(v) ? 4 : v))
+    }
+    property int baseOctave: octaveSetting()
     property int velocity: Math.max(1, Math.min(127, parseInt(App.setting("keyboard_velocity")) || 100))
     property bool hold: App.settingIsTrue("keyboard_hold")
     // Height of the playable key area (not counting the control strip). Persisted.
@@ -56,8 +64,7 @@ Rectangle {
     // three rows of Settings ▸ Keyboard do nothing until the app was restarted,
     // with nothing on screen saying so.
     function reloadSettings() {
-        baseOctave = Math.max(0, Math.min(maxOctave,
-                                          parseInt(App.setting("keyboard_octave")) || 4))
+        baseOctave = octaveSetting()
         velocity = Math.max(1, Math.min(127, parseInt(App.setting("keyboard_velocity")) || 100))
         hold = App.settingIsTrue("keyboard_hold")
         resizeMode = App.setting("keyboard_resize_mode") === "slider" ? "slider" : "divider"

@@ -424,11 +424,14 @@ Item {
                         spacing: 8
                         visible: root.idSync >= 0 || root.idCountIn >= 0
 
-                        Button {
+                        // SyncedButton for the same reason the two switches
+                        // above are re-asserted by hand: a press replaces a
+                        // plain `checked` binding, and a loaded set adopting
+                        // the stored format moves these from the firmware side.
+                        SyncedButton {
                             text: t.t("Sync to sequencer")
                             visible: root.idSync >= 0
-                            checkable: true
-                            checked: root.syncOn
+                            modelChecked: root.syncOn
                             onToggled: Synth.setParam(root.idSync, checked ? 1 : 0)
                             // The clock free-runs, so this works whether or not
                             // the sequencer is playing.
@@ -436,11 +439,10 @@ Item {
                             ToolTip.text: t.t("Recording starts on the next "
                                               + "downbeat of the sequencer clock.")
                         }
-                        Button {
+                        SyncedButton {
                             text: t.t("Count-in")
                             visible: root.idCountIn >= 0
-                            checkable: true
-                            checked: root.countInOn
+                            modelChecked: root.countInOn
                             onToggled: Synth.setParam(root.idCountIn, checked ? 1 : 0)
                             ToolTip.visible: hovered
                             ToolTip.text: t.t("Four clicked beats before "
@@ -459,7 +461,11 @@ Item {
                         spacing: 8
                         Button {
                             text: t.t("Clear track")
-                            enabled: Synth.connected
+                            // The track guard is not decoration: JS shifts by
+                            // (count & 31), so a curTrack of 0 would make
+                            // `1 << -1` the sign bit and light this button over
+                            // a track that has nothing in it.
+                            enabled: Synth.connected && root.curTrack >= 1
                                      && (root.filledMask & (1 << (root.curTrack - 1))) !== 0
                             onClicked: Synth.setParam(root.idClear, 1)
                         }

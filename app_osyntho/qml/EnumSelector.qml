@@ -19,6 +19,13 @@ Item {
     implicitWidth: 128
     implicitHeight: col.implicitHeight
 
+    // A paramId that resolves after this selector was built (ModMatrixSlot
+    // resolves its ids on paramsDiscovered, and a child completes before its
+    // parent). Deferred so the `meta` binding — and therefore the model — has
+    // re-evaluated before the value is pushed into it.
+    function resync() { combo.resync() }
+    onParamIdChanged: Qt.callLater(resync)
+
     Column {
         id: col
         anchors.left: parent.left
@@ -56,7 +63,18 @@ Item {
                 combo.syncing = false
             }
 
-            Component.onCompleted: syncFrom(Synth.paramValue(root.paramId))
+            function resync() { syncFrom(Synth.paramValue(root.paramId)) }
+
+            Component.onCompleted: resync()
+            // A ComboBox resets its own currentIndex when the model is
+            // replaced, and this model only fills in once the parameter's
+            // metadata has arrived — so a selector built before discovery
+            // (ModMatrixSlot's source, whose paramId resolves later still) sat
+            // on entry 0 whatever the synth had, until the value happened to
+            // change. Both moments re-read it; `count` settling is the reliable
+            // signal that the new list is in place.
+            onCountChanged: resync()
+
             Connections {
                 target: Synth
                 function onParamChanged(id, value) {

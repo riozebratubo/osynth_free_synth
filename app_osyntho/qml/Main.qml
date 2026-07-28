@@ -241,6 +241,11 @@ ApplicationWindow {
         id: backupSaveDialog
         fileMode: FileDialog.SaveFile
         options: FileDialog.DontUseNativeDialog
+        // As on jsonSaveDialog, and for the same reason the native save route
+        // passes a suffix to App.saveFileDialog: a name typed without ".db"
+        // lands on disk extension-less, where the restore picker's own "*.db"
+        // filter then hides it.
+        defaultSuffix: "db"
         currentFolder: mainWindow.downloadsFolder
         nameFilters: [t.t("Database (*.db)"), t.t("All files (*)")]
         onAccepted: writeBackupTo(selectedFile)

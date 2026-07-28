@@ -136,10 +136,12 @@ Item {
                             visible: root.pidMidiCh > 0
                             paramId: root.pidMidiCh
                         }
-                        Button {
+                        // SyncedButton: a press replaces a plain `checked`
+                        // binding, after which a preset load moving drums.choke
+                        // no longer moves the button. See SyncedButton.qml.
+                        SyncedButton {
                             text: t.t("Choke groups")
-                            checkable: true
-                            checked: chokeVal.on
+                            modelChecked: chokeVal.on
                             onToggled: if (root.pidChoke > 0) Synth.setParam(root.pidChoke, checked ? 1 : 0)
                         }
                     }

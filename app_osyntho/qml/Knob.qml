@@ -89,10 +89,22 @@ Item {
         }
     }
 
-    Component.onCompleted: {
+    function refresh() {
         actualValue = meta.exists ? Synth.paramValue(paramId) : 0
         syncDial()
     }
+
+    Component.onCompleted: refresh()
+
+    // A paramId that resolves *after* this Knob was built — ModMatrixSlot
+    // resolves its ids on paramsDiscovered, and a child's Component.onCompleted
+    // runs before its parent's, so its knobs are always created on -1 — used to
+    // leave the dial and the readout on the value they were built with.
+    // Component.onCompleted's assignment above replaces the `actualValue`
+    // binding, and syncDial() was called nowhere else, so nothing but a later
+    // paramChanged could correct it. Deferred so the `meta` binding has
+    // certainly re-evaluated by the time valueToPos() reads it.
+    onParamIdChanged: Qt.callLater(refresh)
 
     Connections {
         target: Synth
