@@ -83,6 +83,23 @@ class SynthController : public QObject, public DatabaseClient {
   // default (60) answers to no slot at all. -1 before a kit arrives.
   Q_PROPERTY(int defaultDrumNote READ defaultDrumNote NOTIFY kitChanged)
 
+  // ---- modular patch graph (S28) ----
+  // graphAvailable stays false until GRAPH_INFO answers OK, so the patch page
+  // hides itself on firmware built without the modular engine rather than
+  // offering controls that would all fail.
+  Q_PROPERTY(bool graphAvailable READ graphAvailable NOTIFY graphInfoChanged)
+  Q_PROPERTY(int graphMaxNodes READ graphMaxNodes NOTIFY graphInfoChanged)
+  Q_PROPERTY(int graphMaxInputs READ graphMaxInputs NOTIFY graphInfoChanged)
+  Q_PROPERTY(int graphOutSlot READ graphOutSlot NOTIFY graphInfoChanged)
+  Q_PROPERTY(int graphEngineIndex READ graphEngineIndex NOTIFY graphInfoChanged)
+  Q_PROPERTY(int graphCost READ graphCost NOTIFY graphCostChanged)
+  Q_PROPERTY(int graphCostBudget READ graphCostBudget NOTIFY graphInfoChanged)
+  // [{kind,name,rate,cost,inputs:[..],params:[..]}], indexed by kind
+  Q_PROPERTY(QVariantList graphKinds READ graphKinds NOTIFY graphKindsChanged)
+  // [{slot,kind,in:[..],x,y}] — one entry per slot, empty slots included
+  Q_PROPERTY(QVariantList graphNodes READ graphNodes NOTIFY graphChanged)
+  Q_PROPERTY(QString graphError READ graphError NOTIFY graphErrorChanged)
+
  public:
   explicit SynthController(QObject* parent = nullptr);
   ~SynthController() override;
@@ -250,6 +267,38 @@ class SynthController : public QObject, public DatabaseClient {
   // parameter and can only carry the slot number.
   Q_INVOKABLE void triggerDrum(int slot, int velocity = 100);
 
+  // --- modular patch graph (S28) -----------------------------------------
+  bool graphAvailable() const { return m_graphAvailable; }
+  int graphMaxNodes() const { return m_graphMaxNodes; }
+  int graphMaxInputs() const { return m_graphMaxInputs; }
+  int graphOutSlot() const { return m_graphOutSlot; }
+  int graphEngineIndex() const { return m_graphEngineIndex; }
+  int graphCost() const { return m_graphCost; }
+  int graphCostBudget() const { return m_graphCostBudget; }
+  QVariantList graphKinds() const { return m_graphKinds; }
+  QVariantList graphNodes() const { return m_graphNodes; }
+  QString graphError() const { return m_graphError; }
+
+  // Probes GRAPH_INFO, then the kind table (once per connection — it is
+  // build-constant), then the model.
+  Q_INVOKABLE void refreshGraph();
+  // Just the model + cost, for after an edit or a preset load.
+  Q_INVOKABLE void refreshGraphModel();
+
+  Q_INVOKABLE void graphSetKind(int slot, int kind);
+  Q_INVOKABLE void graphConnect(int dst, int port, int src);  // src < 0 unpatches
+  Q_INVOKABLE void graphSetNodePos(int slot, int x, int y);
+
+  // Parameter id of node `slot`'s parameter `index` — the positional scheme
+  // (0x0200 + 16*slot + index). Exposed rather than recomputed in QML so the
+  // layout constant lives in exactly one place on this side too.
+  Q_INVOKABLE int graphNodeParamId(int slot, int index) const;
+  // Kind descriptor by index, or an empty map. Convenience for the canvas.
+  Q_INVOKABLE QVariantMap graphKind(int kind) const;
+  // Lowest empty slot, or -1 when the graph is full — what "add node" uses.
+  Q_INVOKABLE int graphFreeSlot() const;
+  Q_INVOKABLE void clearGraphError();
+
   // --- local patch library ----------------------------------------------
   Q_INVOKABLE int saveCurrentAsPatch(const QString& name);  // snapshot live params
   Q_INVOKABLE void loadPatch(int patchId);                  // push snapshot to synth
@@ -321,6 +370,11 @@ class SynthController : public QObject, public DatabaseClient {
   void plocksChanged();
   void songChanged();
   void kitChanged();
+  void graphInfoChanged();
+  void graphKindsChanged();
+  void graphChanged();
+  void graphCostChanged();
+  void graphErrorChanged();
   // Emitted when switching a drum lane to "from step note": the lane's old
   // fixed slot becomes the sensible note to keep placing, so QML seeds
   // UI.paintNote from it rather than leaving the melodic default (60), which
@@ -418,6 +472,11 @@ class SynthController : public QObject, public DatabaseClient {
   void handleSeqPlock(const QByteArray& payload, bool more);
   void handleSeqSong(const QByteArray& payload, bool more);
   void handleKitInfo(const QByteArray& payload, bool more);
+  void handleGraphInfo(const QByteArray& payload);
+  void handleGraphKind(const QByteArray& payload);
+  void handleGraphNodes(const QByteArray& payload);
+  void handleGraphEdit(const QByteArray& payload, quint8 status);
+  void rebuildGraphNodes(const SynthProto::GraphModel& m);
   // Requests the edited track's steps; the firmware caps one response at the
   // MTU, so this walks the track in windows.
   void requestSteps();
@@ -588,6 +647,21 @@ class SynthController : public QObject, public DatabaseClient {
   QVariantList m_kits;
   QVariantList m_kitsAccum;
   int m_currentKit = 0;
+
+  // --- modular patch graph (S28) ---
+  bool m_graphAvailable = false;
+  int m_graphMaxNodes = 0;
+  int m_graphParamsPerNode = 16;
+  int m_graphMaxInputs = 4;
+  int m_graphOutSlot = 0;
+  int m_graphEngineIndex = -1;
+  int m_graphCost = 0;
+  int m_graphCostBudget = 0;
+  int m_graphRevision = -1;
+  int m_graphKindCount = 0;
+  QVariantList m_graphKinds;
+  QVariantList m_graphNodes;
+  QString m_graphError;
   // DRUM_TRIG (0x38) is newer than the rest of the drum bus, so a device may
   // be running firmware that has the kit but not the opcode. Assume it works,
   // probe once at discovery, and fall back to the drums.trig parameter if the

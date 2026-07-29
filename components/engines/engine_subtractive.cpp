@@ -332,4 +332,8 @@ extern "C" const synth_engine_t g_engine_subtractive = {
     sub_render,
     sub_busy,
     sub_level,
+    /* render_block (S28): the batched contract exists for the modular graph,
+     * whose per-voice loop is the wrong nesting. A fixed engine has nothing
+     * to amortize — this whole chain is already one fused loop. */
+    nullptr,
 };

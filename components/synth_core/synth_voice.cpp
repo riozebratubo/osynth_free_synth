@@ -383,6 +383,10 @@ extern "C" void voice_manager_set_pitch_bend(float bend_norm) {
     s_bend_norm.store(bend_norm, std::memory_order_relaxed);
 }
 
+extern "C" float voice_manager_pitch_bend(void) {
+    return s_bend_norm.load(std::memory_order_relaxed);
+}
+
 extern "C" size_t voice_manager_active_voices(void) {
     return s_active.load(std::memory_order_relaxed);
 }
@@ -466,7 +470,14 @@ extern "C" void SYNTH_RENDER_IRAM voice_manager_render(float* out_l,
     }
     eng->begin_block(frames);
 
-    uint32_t active = 0;
+    /* Per-voice pitch/gain is computed the same way for both render
+     * contracts; what differs is only whether the engine is entered once per
+     * voice or once per block (synth_engine.h render_block, S28). */
+    void* batch_states[SYNTH_VOICES];
+    synth_voice_frame_t batch_frames[SYNTH_VOICES];
+    size_t nbatch = 0;
+    const bool batched = (eng->render_block != nullptr);
+
     for (auto& v : s_voices) {
         if (!v.active) continue;
         v.cur_semis += (v.target_semis - v.cur_semis) * kblk;
@@ -478,7 +489,26 @@ extern "C" void SYNTH_RENDER_IRAM voice_manager_render(float* out_l,
         f.gain_l = kVoiceGain * (v.pan > 0.0f ? 1.0f - v.pan : 1.0f);
         f.gain_r = kVoiceGain * (v.pan < 0.0f ? 1.0f + v.pan : 1.0f);
 
-        eng->render(v.estate, &f, out_l, out_r, frames);
+        if (batched) {
+            batch_states[nbatch] = v.estate;
+            batch_frames[nbatch] = f;
+            ++nbatch;
+        } else {
+            eng->render(v.estate, &f, out_l, out_r, frames);
+        }
+    }
+    /* Called even with no sounding voice: a batched engine keeps per-block
+     * bookkeeping in here (the graph's plan-swap handshake), and skipping it
+     * on idle blocks would stall an edit until its timeout — the same reason
+     * begin_block() runs unconditionally. */
+    if (batched) {
+        eng->render_block(batch_states, batch_frames, nbatch, out_l, out_r,
+                          frames);
+    }
+
+    uint32_t active = 0;
+    for (auto& v : s_voices) {
+        if (!v.active) continue;
         if (eng->busy(v.estate)) {
             ++active;
         } else {

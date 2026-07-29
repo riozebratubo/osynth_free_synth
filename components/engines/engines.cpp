@@ -28,8 +28,13 @@
 #include "engine_fm.h"
 #include "engine_subtractive.h"
 #include "engine_wavetable.h"
+#include "synth_config.h"
 #include "synth_params.h"
 #include "synth_voice.h"
+
+#if SYNTH_ENABLE_MODULAR
+#include "graph_engine.h"
+#endif
 
 static const char* TAG = "engines";
 
@@ -44,6 +49,9 @@ const synth_engine_t* const s_engines[SYNTH_ENGINE_COUNT] = {
     &g_engine_additive,    /* SYNTH_ENGINE_ADDITIVE */
     &g_engine_fm,          /* SYNTH_ENGINE_FM */
     &g_engine_wavetable,   /* SYNTH_ENGINE_WAVETABLE */
+#if SYNTH_ENABLE_MODULAR
+    &g_engine_modular,     /* SYNTH_ENGINE_MODULAR (S28) */
+#endif
 };
 
 std::atomic<int> s_active_type{-1};

@@ -49,6 +49,15 @@
 #define SYNTH_ENABLE_SERIAL_MIDI 0
 #endif
 
+/* Modular patch graph (S28): a fifth engine whose signal path is a node
+ * graph the app patches, rather than a fixed chain. Costs an internal-RAM
+ * buffer pool and IRAM for its kernels — see the Kconfig help. */
+#ifdef CONFIG_OSYNTH_ENABLE_MODULAR
+#define SYNTH_ENABLE_MODULAR 1
+#else
+#define SYNTH_ENABLE_MODULAR 0
+#endif
+
 /* Looper persistence (S16): save/load the S15 track set to flash or SD.
  * Gated on the S3 + PSRAM like the looper itself. */
 #ifdef CONFIG_OSYNTH_LOOP_PERSIST

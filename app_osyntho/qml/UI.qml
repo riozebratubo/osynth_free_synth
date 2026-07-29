@@ -34,6 +34,7 @@ QtObject {
         { label: "Drum", name: "Drums",              icon: "\uf569" },  // drum
         { label: "Arp",  name: "Arpeggiator",        icon: "\uf550" },  // bars-staggered
         { label: "Loop", name: "Looper",             icon: "\uf363" },  // repeat
+        { label: "Patch", name: "Modular patch",     icon: "\uf542" },  // project-diagram
         { label: "Pre",  name: "Presets",            icon: "\uf0c7" },  // floppy-disk
         { label: "Lib",  name: "Patch library",      icon: "\uf02d" }   // book
     ]

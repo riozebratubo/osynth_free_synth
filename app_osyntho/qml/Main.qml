@@ -407,6 +407,7 @@ ApplicationWindow {
                 DrumsScreen {}
                 ArpSeqScreen {}
                 LooperScreen {}
+                GraphScreen {}
                 PresetsScreen {}
                 PatchLibraryScreen {}
             }

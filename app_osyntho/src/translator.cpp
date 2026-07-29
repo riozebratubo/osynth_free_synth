@@ -182,7 +182,7 @@ Translator::Translator() {
   // ── Home (HomeScreen.qml) ──────────────────────────────────────────────
   pt["%1 engine"] = "Motor %1";
   pt["Discovering…"] = "Descobrindo…";
-  pt["Subtractive"] = "Subtrativo";  // engine name; FM / Wavetable read the same
+  pt["Subtractive"] = "Subtrativo";  // engine name; FM / Wavetable / Modular read the same
   pt["Additive"] = "Aditivo";
   pt["Voice"] = "Voz";
   pt["factory"] = "fábrica";  // also reused for the "(factory)" preset tag

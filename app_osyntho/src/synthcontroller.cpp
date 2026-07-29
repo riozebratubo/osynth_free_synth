@@ -79,6 +79,11 @@ constexpr quint16 ID_PRESET_LOAD = 0x0002;
 // costs no extra traffic.
 constexpr quint16 ID_SEQ_POS = 0x040B;
 constexpr quint16 ID_SEQ_CURPAT = 0x040C;
+// Modular graph telemetry (S28). graph.rev is how the app learns the patch
+// changed without a dedicated event opcode — including changes it did not
+// cause, such as a preset load replacing the whole graph.
+constexpr quint16 ID_GRAPH_COST = 0x02C0;
+constexpr quint16 ID_GRAPH_REV = 0x02C1;
 
 qint64 nowMs() { return QDateTime::currentMSecsSinceEpoch(); }
 }  // namespace
@@ -285,6 +290,7 @@ QString SynthController::engineNameFor(int engine) {
     case ENG_ADDITIVE:    return QStringLiteral("Additive");
     case ENG_FM:          return QStringLiteral("FM");
     case ENG_WAVETABLE:   return QStringLiteral("Wavetable");
+    case ENG_MODULAR:     return QStringLiteral("Modular");
     default:              return QStringLiteral("?");
   }
 }
@@ -582,6 +588,11 @@ void SynthController::finishDiscovery() {
   // them; ask once the parameter traffic has been queued.
   refreshSequencer();
   refreshKit();
+  // Same reasoning: the patch graph's structure is not parameter space, so
+  // discovery never sees it. This doubles as the capability probe — a
+  // firmware without the modular engine refuses GRAPH_INFO and the patch
+  // page stays hidden.
+  refreshGraph();
   m_songAccum.clear();
   send(OP_SEQ_SONG, payloadSeqSongGet(), true);
   // Capability probe: the firmware ignores velocity 0, so this is silent where
@@ -777,6 +788,21 @@ void SynthController::handleFrame(const Frame& f) {
     case OP_KIT_INFO:
       handleKitInfo(f.payload, f.continuation);
       break;
+    case OP_GRAPH_INFO:
+      // A refusal here is the normal answer from firmware without the
+      // modular engine, not an error: leave graphAvailable false and the
+      // patch page stays hidden.
+      if (f.status == 0) handleGraphInfo(f.payload);
+      break;
+    case OP_GRAPH_KIND:
+      if (f.status == 0) handleGraphKind(f.payload);
+      break;
+    case OP_GRAPH_NODES:
+      if (f.status == 0) handleGraphNodes(f.payload);
+      break;
+    case OP_GRAPH_EDIT:
+      handleGraphEdit(f.payload, f.status);
+      break;
     case OP_SEQ_EDIT:
       // Status-only (or the toggle's one result byte); the optimistic local
       // edit already repainted the grid.
@@ -848,6 +874,19 @@ void SynthController::applyValue(quint16 id, float value, bool echo) {
       m_presetSlot = slot;
       updatePresetFromSlot();
       emit presetChanged();
+    }
+  } else if (id == ID_GRAPH_REV) {
+    // Only re-read when it actually moved, and never on the value that
+    // arrives from our own discovery sweep before the first model read.
+    const int rev = int(std::lround(value));
+    if (m_graphAvailable && m_graphRevision >= 0 && rev != m_graphRevision) {
+      refreshGraphModel();
+    }
+  } else if (id == ID_GRAPH_COST) {
+    const int c = int(std::lround(value));
+    if (c != m_graphCost) {
+      m_graphCost = c;
+      emit graphCostChanged();
     }
   } else if (id == ID_SEQ_POS) {
     const int pos = int(std::lround(value));
@@ -1636,7 +1675,7 @@ QVariantMap SynthController::importPatchesToLibrary(const QString& text) {
     // Unlike a push, which is gone once it lands, a row stays — and Load sends
     // its engine number straight to the synth. A number this build has no
     // engine for is refused rather than stored.
-    if (engine < ENG_SUBTRACTIVE || engine > ENG_WAVETABLE) {
+    if (engine < ENG_SUBTRACTIVE || engine > ENG_MODULAR) {
       ++skipped;
       continue;
     }
@@ -2217,6 +2256,176 @@ void SynthController::refreshKit() {
   m_kitSlotsAccum.clear();
   send(OP_KIT_INFO, payloadKitInfo(0), true);  // selectable kits
   send(OP_KIT_INFO, payloadKitInfo(1), true);  // the current kit's slots
+}
+
+// ---- modular patch graph (S28) --------------------------------------------
+
+void SynthController::refreshGraph() {
+  if (!m_connected) return;
+  // GRAPH_INFO first and alone: it carries the sizing everything else is read
+  // against, and its failure (ST_UNSUPPORTED on a firmware without the
+  // modular engine) is what decides whether to ask for anything more at all.
+  send(OP_GRAPH_INFO, QByteArray(), true);
+}
+
+void SynthController::refreshGraphModel() {
+  if (!m_connected || !m_graphAvailable) return;
+  send(OP_GRAPH_NODES, payloadGraphNodesGet(), true);
+}
+
+void SynthController::handleGraphInfo(const QByteArray& payload) {
+  const GraphInfo g = parseGraphInfo(payload);
+  if (!g.valid) return;
+  const bool wasAvailable = m_graphAvailable;
+  m_graphAvailable = true;
+  m_graphMaxNodes = g.maxNodes;
+  m_graphParamsPerNode = g.paramsPerNode;
+  m_graphMaxInputs = g.maxInputs;
+  m_graphOutSlot = g.outSlot;
+  m_graphEngineIndex = g.engineIndex;
+  m_graphCostBudget = g.costBudget;
+  m_graphCost = g.liveCost;
+  emit graphInfoChanged();
+  emit graphCostChanged();
+
+  // The kind table is build-constant, so fetch it once per connection. Doing
+  // it on every refresh would put kindCount round trips in front of every
+  // model read for data that cannot have changed.
+  if (!wasAvailable || m_graphKinds.size() != g.kindCount) {
+    m_graphKinds.clear();
+    m_graphKindCount = g.kindCount;
+    for (int k = 0; k < g.kindCount; ++k) {
+      send(OP_GRAPH_KIND, payloadGraphKind(k), true);
+    }
+  }
+  refreshGraphModel();
+}
+
+void SynthController::handleGraphKind(const QByteArray& payload) {
+  const GraphKind k = parseGraphKind(payload);
+  if (!k.valid) return;
+  QVariantMap m;
+  m["kind"] = k.kind;
+  m["name"] = k.name;
+  m["rate"] = k.rate;
+  m["cost"] = k.cost;
+  m["inputs"] = QVariant(k.inputs);
+  m["params"] = QVariant(k.params);
+  // Responses can arrive out of order; index by kind rather than appending,
+  // so the list is always addressable as graphKinds[kind].
+  while (m_graphKinds.size() <= k.kind) m_graphKinds.append(QVariantMap());
+  m_graphKinds[k.kind] = m;
+  emit graphKindsChanged();
+}
+
+void SynthController::rebuildGraphNodes(const GraphModel& gm) {
+  m_graphNodes.clear();
+  for (int i = 0; i < gm.nodes.size(); ++i) {
+    const GraphNode& n = gm.nodes[i];
+    QVariantMap m;
+    m["slot"] = i;
+    m["kind"] = n.kind;
+    QVariantList ins;
+    for (int v : n.in) ins.append(v);
+    m["in"] = ins;
+    m["x"] = n.x;
+    m["y"] = n.y;
+    m_graphNodes.append(m);
+  }
+  m_graphRevision = gm.revision;
+  emit graphChanged();
+}
+
+void SynthController::handleGraphNodes(const QByteArray& payload) {
+  const GraphModel gm = parseGraphModel(payload);
+  if (!gm.valid) return;
+  rebuildGraphNodes(gm);
+}
+
+void SynthController::handleGraphEdit(const QByteArray& payload, quint8 status) {
+  const GraphEditReply e = parseGraphEditReply(payload);
+  if (m_graphCost != e.cost) {
+    m_graphCost = e.cost;
+    emit graphCostChanged();
+  }
+  if (status != 0) {
+    // The three refusals are different problems and deserve different words —
+    // "too expensive" is a budget the user can see and work within, a cycle is
+    // a shape mistake, and a bad argument is a bug in this app.
+    switch (status & 0x7F) {
+      case 4:
+        m_graphError = tr("Patch too expensive: %1 of %2 CPU units")
+                           .arg(e.cost)
+                           .arg(m_graphCostBudget);
+        break;
+      case 5:
+        m_graphError = tr("That cable would make a loop");
+        break;
+      default:
+        m_graphError = tr("Edit refused");
+        break;
+    }
+    emit graphErrorChanged();
+    // The firmware did not change the model, so the canvas has to go back to
+    // what is actually bound rather than keep the edit it drew optimistically.
+    refreshGraphModel();
+    return;
+  }
+  if (e.revision != m_graphRevision) refreshGraphModel();
+}
+
+int SynthController::graphNodeParamId(int slot, int index) const {
+  if (slot < 0 || slot >= m_graphMaxNodes) return -1;
+  if (index < 0 || index >= m_graphParamsPerNode) return -1;
+  return 0x0200 + slot * m_graphParamsPerNode + index;
+}
+
+QVariantMap SynthController::graphKind(int kind) const {
+  if (kind < 0 || kind >= m_graphKinds.size()) return QVariantMap();
+  return m_graphKinds[kind].toMap();
+}
+
+int SynthController::graphFreeSlot() const {
+  for (int i = 0; i < m_graphNodes.size(); ++i) {
+    const QVariantMap m = m_graphNodes[i].toMap();
+    if (i == m_graphOutSlot) continue;  // pinned to the output node
+    if (m.value("kind").toInt() == 0) return i;
+  }
+  return -1;
+}
+
+void SynthController::graphSetKind(int slot, int kind) {
+  if (!m_graphAvailable) return;
+  send(OP_GRAPH_EDIT, payloadGraphSetKind(slot, kind), true);
+}
+
+void SynthController::graphConnect(int dst, int port, int src) {
+  if (!m_graphAvailable) return;
+  send(OP_GRAPH_EDIT, payloadGraphConnect(dst, port, src), true);
+}
+
+void SynthController::graphSetNodePos(int slot, int x, int y) {
+  if (!m_graphAvailable) return;
+  if (slot < 0 || slot >= m_graphNodes.size()) return;
+  // Canvas-only on the firmware side: no recompile, no audio duck. Sent
+  // without response so dragging a node never queues acks.
+  send(OP_GRAPH_EDIT, payloadGraphSetPos(slot, x, y), false);
+  // ...and applied locally, because a position edit deliberately does not
+  // bump the graph revision, so nothing would ever push it back to us. The
+  // app is the authority on layout; the firmware only stores it. Without
+  // this the cable painter keeps reading the old coordinates and every wire
+  // stays where the node used to be.
+  QVariantMap m = m_graphNodes[slot].toMap();
+  m["x"] = x;
+  m["y"] = y;
+  m_graphNodes[slot] = m;
+  emit graphChanged();
+}
+
+void SynthController::clearGraphError() {
+  if (m_graphError.isEmpty()) return;
+  m_graphError.clear();
+  emit graphErrorChanged();
 }
 
 void SynthController::selectKit(int index) {

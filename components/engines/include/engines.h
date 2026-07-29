@@ -9,18 +9,25 @@
 
 #include "esp_err.h"
 
+#include "synth_config.h"
 #include "synth_engine.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Values match the engine.type enum parameter (PID_ENGINE_TYPE). */
+/* Values match the engine.type enum parameter (PID_ENGINE_TYPE), and the
+ * name table in main.cpp must stay in step. The modular engine (S28) is
+ * Kconfig-gated and therefore last: a build without it simply has a shorter
+ * enum, and no stored value can point at an engine that is not there. */
 typedef enum {
     SYNTH_ENGINE_SUBTRACTIVE = 0,
     SYNTH_ENGINE_ADDITIVE = 1,
     SYNTH_ENGINE_FM = 2,
     SYNTH_ENGINE_WAVETABLE = 3,
+#if SYNTH_ENABLE_MODULAR
+    SYNTH_ENGINE_MODULAR = 4,
+#endif
     SYNTH_ENGINE_COUNT
 } synth_engine_type_t;
 

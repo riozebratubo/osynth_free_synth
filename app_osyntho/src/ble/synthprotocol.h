@@ -70,6 +70,14 @@ enum Op : quint8 {
   // Velocity-carrying drum hit for the on-screen pads. `drums.trig` can only
   // say which slot (a parameter is one float), so velocity needs its own op.
   OP_DRUM_TRIG     = 0x38,
+  // Modular patch graph (S28). Node *values* are ordinary parameters
+  // (positional: slot k owns 0x0200 + 16k); the graph's structure travels
+  // here. A firmware without the modular engine answers all four with
+  // ST_UNSUPPORTED, which is how the app decides whether to offer the page.
+  OP_GRAPH_INFO    = 0x39,
+  OP_GRAPH_KIND    = 0x3A,
+  OP_GRAPH_NODES   = 0x3B,
+  OP_GRAPH_EDIT    = 0x3C,
   OP_PING          = 0x7F,
 };
 
@@ -96,6 +104,11 @@ enum Engine : quint8 {
   ENG_ADDITIVE    = 1,
   ENG_FM          = 2,
   ENG_WAVETABLE   = 3,
+  // Kconfig-gated in firmware and therefore last, so a build without it just
+  // has a shorter enum. Never assume it exists from this constant alone —
+  // SynthController::graphEngineIndex (GRAPH_INFO) is what says whether the
+  // connected firmware actually has it, and is the index to select.
+  ENG_MODULAR     = 4,
 };
 
 // PARAM_INFO caps mask — which optional modules the active engine exposes, so
@@ -767,6 +780,138 @@ struct KitSlot {
   int note = 0;
   QString name;
 };
+
+// ---- modular patch graph (S28) --------------------------------------------
+
+inline QByteArray payloadGraphKind(int kind) {
+  QByteArray p; appendU8(p, quint8(kind)); return p;
+}
+inline QByteArray payloadGraphNodesGet() {
+  QByteArray p; appendU8(p, 0); return p;
+}
+inline QByteArray payloadGraphSetKind(int slot, int kind) {
+  QByteArray p;
+  appendU8(p, 0);  // cmd: set kind
+  appendU8(p, quint8(slot));
+  appendU8(p, quint8(kind));
+  return p;
+}
+// src < 0 disconnects — the firmware reads 0xFF as "unpatched".
+inline QByteArray payloadGraphConnect(int dst, int port, int src) {
+  QByteArray p;
+  appendU8(p, 1);  // cmd: connect
+  appendU8(p, quint8(dst));
+  appendU8(p, quint8(port));
+  appendU8(p, quint8(src < 0 ? 0xFF : src));
+  return p;
+}
+inline QByteArray payloadGraphSetPos(int slot, int x, int y) {
+  QByteArray p;
+  appendU8(p, 2);  // cmd: canvas position
+  appendU8(p, quint8(slot));
+  appendU16(p, quint16(qint16(x)));
+  appendU16(p, quint16(qint16(y)));
+  return p;
+}
+
+struct GraphInfo {
+  bool valid = false;
+  int maxNodes = 0;
+  int paramsPerNode = 0;
+  int maxInputs = 0;
+  int outSlot = 0;
+  int kindCount = 0;
+  int costBudget = 0;
+  int liveCost = 0;
+  int revision = 0;
+  int engineIndex = -1;
+};
+inline GraphInfo parseGraphInfo(const QByteArray& payload) {
+  Reader r(payload);
+  GraphInfo g;
+  g.maxNodes = r.u8();
+  g.paramsPerNode = r.u8();
+  g.maxInputs = r.u8();
+  g.outSlot = r.u8();
+  g.kindCount = r.u8();
+  g.costBudget = r.u16();
+  g.liveCost = r.u16();
+  g.revision = r.u16();
+  g.engineIndex = r.u8();
+  g.valid = r.ok && g.maxNodes > 0 && g.kindCount > 0;
+  return g;
+}
+
+struct GraphKind {
+  bool valid = false;
+  int kind = 0;
+  int rate = 0;  // 0 = control, 1 = audio
+  int cost = 0;
+  QString name;
+  QStringList inputs;   // port names, in port order
+  QStringList params;   // parameter name suffixes, in id order
+};
+inline GraphKind parseGraphKind(const QByteArray& payload) {
+  Reader r(payload);
+  GraphKind k;
+  k.kind = r.u8();
+  k.rate = r.u8();
+  const int nIn = r.u8();
+  const int nParam = r.u8();
+  k.cost = r.u16();
+  k.name = r.cstr();
+  for (int i = 0; i < nIn && r.ok; ++i) k.inputs.append(r.cstr());
+  for (int i = 0; i < nParam && r.ok; ++i) k.params.append(r.cstr());
+  k.valid = r.ok && !k.name.isEmpty();
+  return k;
+}
+
+struct GraphNode {
+  int kind = 0;
+  QList<int> in;  // source slot per port, -1 = unpatched
+  int x = 0;
+  int y = 0;
+};
+struct GraphModel {
+  bool valid = false;
+  int revision = 0;
+  QList<GraphNode> nodes;
+};
+// Matches graph_model.cpp's v1 blob exactly — the same bytes a version-2
+// preset file stores, which is what keeps the wire and the file from
+// drifting apart.
+inline GraphModel parseGraphModel(const QByteArray& payload) {
+  Reader r(payload);
+  GraphModel m;
+  if (r.u32() != 0x3152474Fu) return m;  // 'OGR1'
+  if (r.u8() != 1) return m;             // blob version
+  const int count = r.u8();
+  m.revision = int(r.u32());
+  for (int i = 0; i < count && r.ok; ++i) {
+    GraphNode n;
+    n.kind = r.u8();
+    for (int k = 0; k < 4; ++k) n.in.append(qint8(r.u8()));
+    n.x = qint16(r.u16());
+    n.y = qint16(r.u16());
+    m.nodes.append(n);
+  }
+  m.valid = r.ok && !m.nodes.isEmpty();
+  return m;
+}
+
+// GRAPH_EDIT response: { u16 revision, u16 cost } — sent on failure too, so
+// a rejected edit still tells the app exactly where it stands.
+struct GraphEditReply {
+  int revision = 0;
+  int cost = 0;
+};
+inline GraphEditReply parseGraphEditReply(const QByteArray& payload) {
+  Reader r(payload);
+  GraphEditReply e;
+  e.revision = r.u16();
+  e.cost = r.u16();
+  return e;
+}
 
 // EVT_ENGINE payload: { u8 engine, u8 caps }.
 struct EngineEvent {

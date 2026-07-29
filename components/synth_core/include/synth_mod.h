@@ -77,6 +77,11 @@ esp_err_t synth_mod_init(void);
 /* Mod wheel (CC 1) feed, 0..1 — any control task. */
 void synth_mod_set_wheel(float wheel01);
 
+/* The current wheel value. The matrix folds it into its own slot offsets;
+ * this getter exists for consumers that treat it as a plain modulation
+ * source, such as the S28 graph's MidiSrc node. Any task. */
+float synth_mod_wheel(void);
+
 /* Audio task, once per block before the engine's begin_block(): snapshots
  * slot configs, resolves destinations, folds bend/wheel into per-slot
  * offsets. bend_norm is the raw [-1, 1] pitch bend. */

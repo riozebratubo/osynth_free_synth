@@ -22,6 +22,7 @@
 #include "engine_wavetable.h"
 #include "fx.h"
 #include "seqarp.h"
+#include "synth_config.h" /* SYNTH_ENABLE_MODULAR gates the fifth bank */
 #include "synth_mod.h"
 #include "synth_params_c.h"
 
@@ -875,4 +876,33 @@ const factory_preset_t
             F("arp cascade", kWtArpCascade),
             F("glassy keys", kWtGlassyKeys),
         },
+#if SYNTH_ENABLE_MODULAR
+        /* modular (S28) — deliberately all "init".
+         *
+         * A factory preset is a table of {id, value} pairs, and for the
+         * modular engine those ids only mean something *given a graph*: node
+         * slot 3's parameter 1 is a cutoff or a decay time depending on what
+         * is patched there. A factory bank in this format could therefore
+         * only ever describe values for a patch it cannot itself carry, and
+         * loading one onto a different graph would scatter plausible numbers
+         * across the wrong controls.
+         *
+         * The engine's own factory patch (graph_engine.cpp) is what a fresh
+         * modular voice starts from, and user slots store the graph properly
+         * as version-2 preset files. Filling this bank means writing the
+         * graph blobs into flash as const data — worth doing, and a session
+         * of its own rather than a half-answer here.
+         *
+         * Every entry still needs a valid name: fetch_snapshot() copies it
+         * unconditionally, so a zero-filled row would be a null dereference
+         * the moment someone selected a factory slot on this engine. */
+        {
+            {"init", nullptr, 0},  {"init", nullptr, 0}, {"init", nullptr, 0},
+            {"init", nullptr, 0},  {"init", nullptr, 0}, {"init", nullptr, 0},
+            {"init", nullptr, 0},  {"init", nullptr, 0}, {"init", nullptr, 0},
+            {"init", nullptr, 0},  {"init", nullptr, 0}, {"init", nullptr, 0},
+            {"init", nullptr, 0},  {"init", nullptr, 0}, {"init", nullptr, 0},
+            {"init", nullptr, 0},
+        },
+#endif
 };

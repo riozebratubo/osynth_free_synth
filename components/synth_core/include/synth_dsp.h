@@ -110,30 +110,34 @@ inline float polyblep(float t, float dt) {
     return 0.0f;
 }
 
+/* The waveform at an explicit phase, without advancing anything. Split out
+ * of osc_next() (S28) so the modular graph's phase-modulation path can read
+ * at a modulated phase while the ordinary path stays exactly what it was:
+ * osc_next() is this plus the advance, so nothing about the fixed engines'
+ * output changed. `p` must be in [0, 1). */
+inline float osc_at(OscWave w, float p, float step, float pw) {
+    switch (w) {
+        case OscWave::Sine:
+            return sine01(p);
+        case OscWave::Triangle:
+            return 2.0f * fabsf(2.0f * p - 1.0f) - 1.0f;
+        case OscWave::Saw:
+            return 2.0f * p - 1.0f - polyblep(p, step);
+        default: { /* Pulse */
+            float t2 = p - pw;
+            if (t2 < 0.0f) t2 += 1.0f;
+            return (p < pw ? 1.0f : -1.0f) + polyblep(p, step) -
+                   polyblep(t2, step);
+        }
+    }
+}
+
 /* One sample, phase advances by `step` (must stay < 0.5). `pw` is used by
  * Pulse only. Triangle is naive: its harmonics fall at 12 dB/oct, so the
  * aliasing is negligible without band-limiting. */
 inline float osc_next(Osc& o, OscWave w, float step, float pw) {
-    const float p = o.phase;
-    float out;
-    switch (w) {
-        case OscWave::Sine:
-            out = sine01(p);
-            break;
-        case OscWave::Triangle:
-            out = 2.0f * fabsf(2.0f * p - 1.0f) - 1.0f;
-            break;
-        case OscWave::Saw:
-            out = 2.0f * p - 1.0f - polyblep(p, step);
-            break;
-        default: { /* Pulse */
-            float t2 = p - pw;
-            if (t2 < 0.0f) t2 += 1.0f;
-            out = (p < pw ? 1.0f : -1.0f) + polyblep(p, step) - polyblep(t2, step);
-            break;
-        }
-    }
-    float next = p + step;
+    const float out = osc_at(w, o.phase, step, pw);
+    float next = o.phase + step;
     if (next >= 1.0f) next -= 1.0f;
     o.phase = next;
     return out;

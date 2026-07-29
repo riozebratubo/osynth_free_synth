@@ -169,6 +169,11 @@ static bool cc_route(uint8_t cc, uint8_t value) {
         case SYNTH_ENGINE_WAVETABLE:
             return cc_apply(CC_TABLE(k_cc_wavetable), cc, value);
         default:
+            /* The modular engine (S28) deliberately has no CC table: its
+             * parameter ids are positional, so "CC 74 is the cutoff" has no
+             * meaning when slot 3 may hold a filter today and an envelope
+             * tomorrow. NRPN reaches every node parameter by id, which is
+             * the addressing a graph can actually honour. */
             return false;
     }
 }

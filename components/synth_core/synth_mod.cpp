@@ -103,6 +103,10 @@ extern "C" void synth_mod_set_wheel(float wheel01) {
     s_wheel.store(wheel01, std::memory_order_relaxed);
 }
 
+extern "C" float synth_mod_wheel(void) {
+    return s_wheel.load(std::memory_order_relaxed);
+}
+
 extern "C" void SYNTH_RENDER_IRAM synth_mod_begin_block(float bend_norm) {
     const float wheel = s_wheel.load(std::memory_order_relaxed);
     int n = 0;

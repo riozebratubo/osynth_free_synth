@@ -10,7 +10,7 @@ Item {
     id: screen
 
     property var patchList: []
-    readonly property var engineNames: ["Subtractive", "Additive", "FM", "Wavetable"]
+    readonly property var engineNames: ["Subtractive", "Additive", "FM", "Wavetable", "Modular"]
 
     function refresh() { patchList = Synth.patches(-1) }
     Component.onCompleted: refresh()

@@ -54,6 +54,10 @@ static const char* TAG = "ble_ctrl";
 #include "drum_kit_fmt.h"
 #include "drums.h"
 #include "engines.h"
+#if SYNTH_ENABLE_MODULAR
+#include "graph_model.h"
+#include "graph_render.h" /* live_cost() for the app's budget meter */
+#endif
 #include "midi.h"
 #include "presets.h"
 #include "seq_model.h"
@@ -112,6 +116,21 @@ enum : uint8_t {
      * needs its own opcode; it also avoids depending on drums.midich being
      * set, which a NOTE_ON-with-channel scheme would. */
     OP_DRUM_TRIG = 0x38,
+    /* Modular patch graph (S28). Same reasoning as the sequencer block: a
+     * graph's *structure* is not parameter space, so it travels here while
+     * its node values stay ordinary parameters. GRAPH_KIND is separate from
+     * GRAPH_INFO because the kind table is the one part the app cannot
+     * guess — it needs each kind's port names and parameter layout to draw
+     * a node at all, and that is far too much for one frame.
+     *
+     * There is deliberately no graph event opcode: `graph.rev` is a
+     * read-only parameter, so the existing ~20 Hz parameter batch already
+     * tells the app the model changed, including when a preset load was
+     * what changed it. */
+    OP_GRAPH_INFO = 0x39,
+    OP_GRAPH_KIND = 0x3A,
+    OP_GRAPH_NODES = 0x3B,
+    OP_GRAPH_EDIT = 0x3C,
     OP_PING = 0x7F,
     EVT_PARAMS = 0xC0,
     EVT_ENGINE = 0xC1,
@@ -862,6 +881,171 @@ void handle_kit_info(uint8_t seq, const uint8_t* p, uint16_t plen) {
     s_chunker.finish();
 }
 
+/* ---- modular patch graph (S28) ---------------------------------------- */
+
+#if SYNTH_ENABLE_MODULAR
+
+namespace gr = osynth::graph;
+
+/* Sizing and budget, so the app never assumes a capacity this build does
+ * not have — the same contract SEQ_INFO provides for the sequencer. */
+void handle_graph_info(uint8_t seq) {
+    size_t n = 5;
+    s_tx[n++] = gr::kMaxNodes;
+    s_tx[n++] = gr::kNodeParams;
+    s_tx[n++] = gr::kMaxInputs;
+    s_tx[n++] = gr::kOutSlot;
+    s_tx[n++] = (uint8_t)gr::Kind::Count;
+    wr16(s_tx + n, gr::kCostBudget);
+    n += 2;
+    wr16(s_tx + n, gr::live_cost());
+    n += 2;
+    wr16(s_tx + n, (uint16_t)(gr::model().revision & 0xFFFF));
+    n += 2;
+    /* Which engine index the app must select to reach the graph. Sending it
+     * rather than letting the app hardcode 4 keeps the two in step if the
+     * engine list ever changes again. */
+    s_tx[n++] = (uint8_t)SYNTH_ENGINE_MODULAR;
+    s_tx[0] = OP_GRAPH_INFO | 0x80;
+    s_tx[1] = seq;
+    wr16(s_tx + 2, (uint16_t)(n - 4));
+    s_tx[4] = ST_OK;
+    send_frame(s_tx, n);
+}
+
+/* One node kind's descriptor: everything the app needs to draw that node
+ * and label its jacks. Payload: {kind, rate, n_inputs, n_params, cost16,
+ * name, NUL, input names each NUL-terminated, parameter name suffixes each
+ * NUL-terminated}. Strings rather than indices because the app has no table
+ * of its own to look them up in — the firmware is the only definition. */
+void handle_graph_kind(uint8_t seq, const uint8_t* p, uint16_t plen) {
+    if (plen < 1) {
+        send_status(OP_GRAPH_KIND, seq, ST_MALFORMED);
+        return;
+    }
+    const int k = p[0];
+    if (k < 0 || k >= (int)gr::Kind::Count) {
+        send_status(OP_GRAPH_KIND, seq, ST_BAD_ARG);
+        return;
+    }
+    const gr::KindDesc& d = gr::kind_desc((gr::Kind)k);
+    size_t n = 5;
+    s_tx[n++] = (uint8_t)k;
+    s_tx[n++] = (uint8_t)d.rate;
+    s_tx[n++] = d.n_inputs;
+    s_tx[n++] = d.n_params;
+    wr16(s_tx + n, d.cost);
+    n += 2;
+    auto put_str = [&](const char* s) {
+        const size_t len = strlen(s);
+        if (n + len + 1 > kMaxFrame) return false;
+        memcpy(s_tx + n, s, len);
+        n += len;
+        s_tx[n++] = 0;
+        return true;
+    };
+    bool ok = put_str(d.name);
+    for (int i = 0; ok && i < d.n_inputs; ++i) ok = put_str(d.input_names[i]);
+    for (int i = 0; ok && i < d.n_params; ++i) ok = put_str(d.params[i].suffix);
+    if (!ok) {
+        /* Cannot happen with the current table — the widest kind is well
+         * under the frame ceiling — but a kind added later must fail loudly
+         * rather than send a truncated descriptor the app would misparse. */
+        send_status(OP_GRAPH_KIND, seq, ST_UNSUPPORTED);
+        return;
+    }
+    s_tx[0] = OP_GRAPH_KIND | 0x80;
+    s_tx[1] = seq;
+    wr16(s_tx + 2, (uint16_t)(n - 4));
+    s_tx[4] = ST_OK;
+    send_frame(s_tx, n);
+}
+
+/* The whole model, in the same v1 byte format presets store — one shape for
+ * the wire and the file means the two cannot drift. dir 0 = get, 1 = set. */
+void handle_graph_nodes(uint8_t seq, const uint8_t* p, uint16_t plen) {
+    if (plen < 1) {
+        send_status(OP_GRAPH_NODES, seq, ST_MALFORMED);
+        return;
+    }
+    if (p[0] == 0) { /* get */
+        uint8_t blob[gr::kSerialMaxBytes];
+        const size_t len = gr::serialize(gr::model(), blob, sizeof(blob));
+        if (len == 0 || 5 + len > kMaxFrame) {
+            send_status(OP_GRAPH_NODES, seq, ST_UNSUPPORTED);
+            return;
+        }
+        memcpy(s_tx + 5, blob, len);
+        s_tx[0] = OP_GRAPH_NODES | 0x80;
+        s_tx[1] = seq;
+        wr16(s_tx + 2, (uint16_t)(len + 1));
+        s_tx[4] = ST_OK;
+        send_frame(s_tx, 5 + len);
+        return;
+    }
+    gr::Model m;
+    if (!gr::deserialize(p + 1, plen - 1, m)) {
+        send_status(OP_GRAPH_NODES, seq, ST_MALFORMED);
+        return;
+    }
+    const esp_err_t rc = gr::load_model(m);
+    send_status(OP_GRAPH_NODES, seq,
+                rc == ESP_OK ? ST_OK
+                             : (rc == ESP_ERR_NOT_SUPPORTED ? ST_UNSUPPORTED
+                                                            : ST_BAD_ARG));
+}
+
+/* A single edit: {cmd, a, b, c…}. The reply carries the resulting revision
+ * and cost even on failure, because a rejected edit is exactly when the app
+ * most needs to know where it actually stands — the model is unchanged, and
+ * the app can redraw from the values here instead of guessing. */
+void handle_graph_edit(uint8_t seq, const uint8_t* p, uint16_t plen) {
+    if (plen < 2) {
+        send_status(OP_GRAPH_EDIT, seq, ST_MALFORMED);
+        return;
+    }
+    esp_err_t rc = ESP_ERR_INVALID_ARG;
+    switch (p[0]) {
+        case 0: /* set kind: {slot, kind} */
+            if (plen >= 3) rc = gr::set_kind(p[1], (gr::Kind)p[2]);
+            break;
+        case 1: /* connect: {dst, port, src} — src 0xFF disconnects */
+            if (plen >= 4) {
+                rc = gr::connect(p[1], p[2], (p[3] == 0xFF) ? -1 : (int)p[3]);
+            }
+            break;
+        case 2: /* canvas position: {slot, x16, y16} */
+            if (plen >= 6) {
+                rc = gr::set_ui_pos(p[1], (int16_t)rd16(p + 2),
+                                    (int16_t)rd16(p + 4));
+            }
+            break;
+        default:
+            rc = ESP_ERR_INVALID_ARG;
+            break;
+    }
+    uint8_t st = ST_OK;
+    if (rc == ESP_ERR_NOT_SUPPORTED) {
+        st = ST_UNSUPPORTED; /* over the CPU budget */
+    } else if (rc == ESP_ERR_INVALID_STATE) {
+        st = ST_BUSY; /* cycle: the one rejection that is about shape */
+    } else if (rc != ESP_OK) {
+        st = ST_BAD_ARG;
+    }
+    size_t n = 5;
+    wr16(s_tx + n, (uint16_t)(gr::model().revision & 0xFFFF));
+    n += 2;
+    wr16(s_tx + n, gr::live_cost());
+    n += 2;
+    s_tx[0] = OP_GRAPH_EDIT | 0x80;
+    s_tx[1] = seq;
+    wr16(s_tx + 2, (uint16_t)(n - 4));
+    s_tx[4] = st;
+    send_frame(s_tx, n);
+}
+
+#endif /* SYNTH_ENABLE_MODULAR */
+
 void handle_frame(const uint8_t* d, size_t n) {
     if (n < 4) return; /* not even a header — nothing to respond to */
     const uint8_t op = d[0];
@@ -973,6 +1157,31 @@ void handle_frame(const uint8_t* d, size_t n) {
         case OP_KIT_INFO:
             handle_kit_info(seq, p, plen);
             break;
+#if SYNTH_ENABLE_MODULAR
+        case OP_GRAPH_INFO:
+            handle_graph_info(seq);
+            break;
+        case OP_GRAPH_KIND:
+            handle_graph_kind(seq, p, plen);
+            break;
+        case OP_GRAPH_NODES:
+            handle_graph_nodes(seq, p, plen);
+            break;
+        case OP_GRAPH_EDIT:
+            handle_graph_edit(seq, p, plen);
+            break;
+#else
+        case OP_GRAPH_INFO:
+        case OP_GRAPH_KIND:
+        case OP_GRAPH_NODES:
+        case OP_GRAPH_EDIT:
+            /* Answered rather than left to fall through to UNKNOWN_OP: the
+             * app probes GRAPH_INFO to decide whether to offer the patch
+             * page at all, and UNSUPPORTED is the honest "this build has no
+             * graph" — same shape as the looper probes on a classic ESP32. */
+            send_status(op, seq, ST_UNSUPPORTED);
+            break;
+#endif
         case OP_DRUM_TRIG: /* pads: {slot, velocity}, no response on success */
             if (plen != 2) {
                 send_status(op, seq, ST_MALFORMED);

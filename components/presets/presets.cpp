@@ -56,7 +56,12 @@
 #include "engines.h"
 #include "seq_model.h"
 #include "seqarp.h"
+#include "synth_config.h"
 #include "synth_params.h"
+
+#if SYNTH_ENABLE_MODULAR
+#include "graph_model.h"
+#endif
 
 #include "presets_priv.h"
 
@@ -83,14 +88,29 @@ constexpr int kTaskPrio = 4; /* control plane, below eng_switch (5) */
 constexpr int kTaskStack = 6144;
 constexpr int kSwitchWaitMs = 2000;
 
+/* version 1: header + `count` {id, value} pairs.
+ * version 2 (S28): the same, then a modular graph blob — the node kinds and
+ * cables that give the 0x02xx ids in the pairs their meaning. Written only
+ * for the modular engine, so every other bank's files stay byte-identical
+ * v1 and nothing already on the device is rewritten or invalidated. */
 struct __attribute__((packed)) PresetHdr {
     uint32_t magic;
-    uint8_t version; /* 1 */
+    uint8_t version; /* 1, or 2 when a graph blob follows the pairs */
     uint8_t engine;
     uint16_t count;
     char name[PRESETS_NAME_MAX]; /* NUL-padded */
 };
 static_assert(sizeof(PresetHdr) == 32, "on-disk layout");
+constexpr uint8_t kPresetVersion = 1;
+constexpr uint8_t kPresetVersionGraph = 2;
+
+#if SYNTH_ENABLE_MODULAR
+/* Staging for the graph blob between fetch_snapshot() and do_load(). Both
+ * run on the `preset` task, so a static is safe and saves ~130 bytes of
+ * stack on a task that already carries the pairs array. */
+uint8_t s_graph_blob[osynth::graph::kSerialMaxBytes];
+#endif
+size_t s_graph_len = 0;
 
 /* A set file: this header, then `params` pairs, then `song_len` chain
  * entries, then `patterns` pattern blobs each prefixed by its u32 length.
@@ -299,8 +319,20 @@ bool skip_id(uint16_t id) {
         case SEQ_PID_EDIT_STEP:
             return true;
         default:
-            return false;
+            break;
     }
+#if SYNTH_ENABLE_MODULAR
+    /* Graph telemetry (S28): both are firmware-written and derived from the
+     * blob this file already stores. Saving them would be harmless; loading
+     * them would not — a stale cost or revision written over the live ones
+     * would make the app's budget meter and its "re-read the graph" trigger
+     * disagree with the graph that is actually bound. */
+    if (id == osynth::graph::PID_GRAPH_COST ||
+        id == osynth::graph::PID_GRAPH_REV) {
+        return true;
+    }
+#endif
+    return false;
 }
 
 /* Bookkeeping write; origin Preset keeps the listener from re-queuing. */
@@ -311,6 +343,11 @@ void reflect(uint16_t pid, int value) {
 /* Fills s_pairs from the factory table or the slot's file; returns the
  * pair count with the name copied out, or -1 (already logged). */
 int fetch_snapshot(int engine, int slot, char name[PRESETS_NAME_MAX]) {
+    /* Cleared for *every* path, not just the one that can fill it: a
+     * factory slot loaded straight after a version-2 user slot would
+     * otherwise inherit the previous file's graph and re-patch the synth
+     * with a patch nobody selected. */
+    s_graph_len = 0;
     if (slot < kUserFirst) {
         const factory_preset_t* f = &g_factory_presets[engine][slot];
         strlcpy(name, f->name, PRESETS_NAME_MAX);
@@ -332,7 +369,8 @@ int fetch_snapshot(int engine, int slot, char name[PRESETS_NAME_MAX]) {
     }
     PresetHdr h;
     if (fread(&h, sizeof(h), 1, fp) != 1 || h.magic != kPresetMagic ||
-        h.version != 1 || h.engine != engine) {
+        (h.version != kPresetVersion && h.version != kPresetVersionGraph) ||
+        h.engine != engine) {
         fclose(fp);
         ESP_LOGW(TAG, "load %s/%d: bad file header, ignoring",
                  engine_name(engine), slot);
@@ -340,6 +378,16 @@ int fetch_snapshot(int engine, int slot, char name[PRESETS_NAME_MAX]) {
     }
     int n = h.count < kMaxPairs ? h.count : kMaxPairs;
     n = (int)fread(s_pairs, sizeof(preset_pair_t), (size_t)n, fp);
+    /* A v2 file carries the graph after the pairs. Read it here rather than
+     * in do_load so the file is opened once and closed once; do_load decides
+     * what to do with it, because that is where the ordering against the
+     * parameter snapshot is enforced. */
+    s_graph_len = 0;
+#if SYNTH_ENABLE_MODULAR
+    if (h.version == kPresetVersionGraph) {
+        s_graph_len = fread(s_graph_blob, 1, sizeof(s_graph_blob), fp);
+    }
+#endif
     fclose(fp);
     h.name[PRESETS_NAME_MAX - 1] = '\0';
     strlcpy(name, h.name, PRESETS_NAME_MAX);
@@ -398,6 +446,32 @@ void do_load(int linear) {
         }
     }
 
+#if SYNTH_ENABLE_MODULAR
+    /* The graph goes in *before* the values, and the ordering is the whole
+     * subtlety of loading a modular preset. A node parameter id only exists
+     * while its slot holds a kind that defines it: apply the pairs first and
+     * every id belonging to a slot the stored patch fills differently would
+     * be dropped as unregistered — the patch would come back wired correctly
+     * and set to defaults. Same shape as S27's rule that `seq.pattern` is
+     * applied before the rest of a set. */
+    if (engine == SYNTH_ENGINE_MODULAR && s_graph_len > 0) {
+        osynth::graph::Model m;
+        if (osynth::graph::deserialize(s_graph_blob, s_graph_len, m)) {
+            const esp_err_t rc = osynth::graph::load_model(m);
+            if (rc != ESP_OK) {
+                /* Keep loading: the values still land on whatever graph is
+                 * bound, which is a closer result than abandoning the load,
+                 * and the log says exactly what was refused. */
+                ESP_LOGW(TAG, "load %s/%d: graph rejected (%s), values only",
+                         engine_name(engine), slot, esp_err_to_name(rc));
+            }
+        } else {
+            ESP_LOGW(TAG, "load %s/%d: graph blob malformed, values only",
+                     engine_name(engine), slot);
+        }
+    }
+#endif
+
     apply_snapshot(count);
     s_cur_load = linear;
     reflect(PRESET_PID_LOAD, linear);
@@ -407,7 +481,8 @@ void do_load(int linear) {
 
 /* Temp-file + rename so an interrupted save never clobbers the old file. */
 bool write_file(const char* tmp, const char* path, const void* hdr,
-                size_t hdr_len, const void* body, size_t body_len) {
+                size_t hdr_len, const void* body, size_t body_len,
+                const void* tail = nullptr, size_t tail_len = 0) {
     FILE* fp = fopen(tmp, "wb");
     if (fp == nullptr) {
         ESP_LOGW(TAG, "cannot create %s", tmp);
@@ -415,6 +490,11 @@ bool write_file(const char* tmp, const char* path, const void* hdr,
     }
     bool ok = fwrite(hdr, hdr_len, 1, fp) == 1;
     if (ok && body_len > 0) ok = fwrite(body, body_len, 1, fp) == 1;
+    /* Optional third section, used by version-2 presets for the modular
+     * graph blob (S28). Kept as a separate buffer rather than concatenated
+     * by the caller because the pairs array is a fixed static and the blob
+     * has nothing to do with it. */
+    if (ok && tail_len > 0) ok = fwrite(tail, tail_len, 1, fp) == 1;
     fclose(fp);
     if (!ok || rename(tmp, path) != 0) {
         ESP_LOGW(TAG, "write to %s failed (filesystem full?)", path);
@@ -462,9 +542,22 @@ void do_save(int linear, const char* name_in) {
             ++count;
         }
 
+        /* The graph is captured *before* the header is stamped, because
+         * whether a blob exists is what decides the version. */
+        size_t graph_len = 0;
+#if SYNTH_ENABLE_MODULAR
+        uint8_t graph_blob[osynth::graph::kSerialMaxBytes];
+        if (engine == SYNTH_ENGINE_MODULAR) {
+            graph_len = osynth::graph::serialize(osynth::graph::model(),
+                                                 graph_blob, sizeof(graph_blob));
+        }
+#else
+        const uint8_t* graph_blob = nullptr;
+#endif
+
         PresetHdr h = {};
         h.magic = kPresetMagic;
-        h.version = 1;
+        h.version = (graph_len > 0) ? kPresetVersionGraph : kPresetVersion;
         h.engine = (uint8_t)engine;
         h.count = (uint16_t)count;
         if (name_in != nullptr && name_in[0] != '\0') {
@@ -477,7 +570,8 @@ void do_save(int linear, const char* name_in) {
         snprintf(tmp, sizeof(tmp), "%s/tmp.osp", kBasePath);
         preset_path(path, sizeof(path), engine, slot);
         if (!write_file(tmp, path, &h, sizeof(h), s_pairs,
-                        (size_t)count * sizeof(preset_pair_t))) {
+                        (size_t)count * sizeof(preset_pair_t), graph_blob,
+                        graph_len)) {
             break;
         }
         cache_store(engine, slot, h.name); /* the listing is served from RAM */

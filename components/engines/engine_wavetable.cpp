@@ -390,4 +390,5 @@ extern "C" const synth_engine_t g_engine_wavetable = {
     wt_render,
     wt_busy,
     wt_level,
+    nullptr, /* render_block (S28): fixed engines render per voice */
 };

@@ -143,6 +143,23 @@ menu "osynth Synthesizer"
             to the audio deadline. Costs roughly 20-30 KB of IRAM. Turn
             off if the image stops linking with "region iram0 overflowed".
 
+    config OSYNTH_ENABLE_MODULAR
+        bool "Enable the modular patch graph engine (S28)"
+        default y if IDF_TARGET_ESP32S3
+        default n
+        help
+            Adds a fifth engine whose signal path is a node graph the app
+            patches with cables, instead of a fixed chain. Costs an audio
+            buffer pool in internal RAM (kMaxBufs x voices x block size x
+            4 B — about 12 KB at the defaults) plus the render kernels in
+            IRAM.
+
+            Off by default on the classic ESP32: the buffer pool and the
+            extra IRAM are affordable there, but a freely patched graph
+            cannot be fused the way the four fixed engines are, and the
+            headroom left after the FX bus does not reliably fit one. The
+            fixed engines are unaffected either way.
+
     config OSYNTH_VOICES
         int "Polyphony (number of voices)"
         range 1 16

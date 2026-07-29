@@ -56,8 +56,15 @@ static const char* TAG = "osynth";
 using namespace osynth;
 
 static void register_global_params() {
+    /* Order and count must track synth_engine_type_t — the modular engine
+     * (S28) is Kconfig-gated, so on a build without it the enum stops at
+     * wavetable and the app never offers a slot that cannot be bound. */
     static const char* kEngineNames[] = {"subtractive", "additive", "fm",
-                                         "wavetable"};
+                                         "wavetable",
+#if SYNTH_ENABLE_MODULAR
+                                         "modular",
+#endif
+    };
     static const ParamDesc kGlobals[] = {
         {PID_MASTER_VOLUME, "master.volume", ParamType::Float,
          ParamCurve::Linear, 0.0f, 1.0f, 0.8f, nullptr, 0},

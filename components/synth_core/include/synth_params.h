@@ -75,7 +75,16 @@ using ParamListener = void (*)(uint16_t id, float value, ParamOrigin origin, voi
 
 class ParamStore {
 public:
-    static constexpr size_t kMaxParams = 320;
+    /* Peak *concurrent* registration, not the size of the id space. The
+     * 0x02xx range holds one engine at a time, so the bound engine's set is
+     * what counts — and since S28 that peak is the modular graph rather than
+     * a fixed engine: 12 slots x up to 6 parameters is 73 ids where the
+     * widest fixed engine registers 30. With the drum bus (71), the
+     * sequencer, the FX bus, the matrix and the looper all resident, a full
+     * graph lands near 270. 384 keeps a real margin, because overflow is
+     * per-parameter and partial — a patch would come up with some of a
+     * node's controls missing rather than failing outright. */
+    static constexpr size_t kMaxParams = 384;
     /* One per subscribing component: engines, presets, looper, drums,
      * ble_ctrl, persist — 6 as of S25. Raised from 8 to leave headroom,
      * because overflowing it is silent at the call site (addListener returns

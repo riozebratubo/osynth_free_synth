@@ -217,6 +217,7 @@ qt_add_qml_module(
     QML_FILES qml/TransportStrip.qml
     QML_FILES qml/ParamValue.qml
     QML_FILES qml/LooperScreen.qml
+    QML_FILES qml/GraphScreen.qml
     QML_FILES qml/PresetsScreen.qml
     QML_FILES qml/PatchLibraryScreen.qml
 

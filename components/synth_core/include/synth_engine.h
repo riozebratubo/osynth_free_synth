@@ -72,6 +72,30 @@ typedef struct synth_engine {
 
     bool (*busy)(const void* v);   /* still audible (or gate held) */
     float (*level)(const void* v); /* amp-env level — voice-steal ranking */
+
+    /* Optional batched render (S28), placed last so adding it did not
+     * renumber the existing positional initializers. Every vtable must
+     * still list it explicitly — the build runs with
+     * -Werror=missing-field-initializers, so an omitted trailing member is
+     * an error rather than an implicit null.
+     *
+     * When non-null the voice manager calls this ONCE with every active
+     * voice instead of calling render() per voice, and render() is not
+     * called at all.
+     *
+     * It exists for the modular graph, where the per-voice loop is the wrong
+     * nesting: a graph's topology is identical for every voice, so entering
+     * each node once and looping voices inside it pays the dispatch, the
+     * parameter reads and the block coefficient math once rather than once
+     * per voice. A fixed engine has nothing to amortize — its whole chain is
+     * already fused into a single loop — which is why this is an option and
+     * not the contract.
+     *
+     * `states` and `frames` are parallel arrays of length n_voices, holding
+     * only the voices that are actually sounding. */
+    void (*render_block)(void* const* states, const synth_voice_frame_t* frames,
+                         size_t n_voices, float* out_l, float* out_r,
+                         size_t frames_n);
 } synth_engine_t;
 
 #ifdef __cplusplus

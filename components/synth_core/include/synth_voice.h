@@ -62,6 +62,11 @@ void voice_manager_set_sustain(bool down);
  * parameter (semitones) at block rate. */
 void voice_manager_set_pitch_bend(float bend_norm);
 
+/* The raw normalized bend, for consumers that want it as a modulation
+ * source rather than as pitch (the S9 matrix's `bend`, the S28 graph's
+ * MidiSrc node). Any task. */
+float voice_manager_pitch_bend(void);
+
 /* Currently sounding voices — for the heartbeat log. */
 size_t voice_manager_active_voices(void);
 

@@ -7,7 +7,7 @@ idf_component_register(
          "engine_fm.cpp" "engine_wavetable.cpp"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "${CMAKE_CURRENT_BINARY_DIR}/gen"
-    REQUIRES synth_core
+    REQUIRES synth_core graph
 )
 
 # factory_wavetables.h is generated at build time by the host-side script
