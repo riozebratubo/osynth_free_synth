@@ -77,6 +77,7 @@ bool ParamStore::add(const ParamDesc& desc) {
                  (unsigned)kMaxParams, desc.id, desc.name);
         return false;
     }
+    generation_.fetch_add(1, std::memory_order_release);
     return true;
 }
 
@@ -102,7 +103,12 @@ size_t ParamStore::removeRange(uint16_t first, uint16_t last_exclusive) {
         }
     }
     portEXIT_CRITICAL(&s_mux);
+    if (removed > 0) generation_.fetch_add(1, std::memory_order_release);
     return removed;
+}
+
+uint32_t ParamStore::generation() const {
+    return generation_.load(std::memory_order_acquire);
 }
 
 bool ParamStore::set(uint16_t id, float value, ParamOrigin origin) {

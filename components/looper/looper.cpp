@@ -354,14 +354,40 @@ int s_ctl_mode = MODE_STOP; /* last transport we commanded */
 uint32_t s_ctl_len = 0;     /* last loop length we saw (for the close log) */
 
 /* Two looper_process boundaries: no in-flight block still holds pointers
- * loaded before a swap/detach (the S6 protocol). */
-void ctl_handshake() {
+ * loaded before a swap/detach (the S6 protocol). Returns false when the audio
+ * task never got there — every caller frees something afterwards, so they
+ * must leak instead. A few MB of PSRAM is recoverable by clearing the set (or
+ * a reboot); decoding ADPCM out of a freed buffer in the render loop is not.
+ *
+ * The unsigned difference is deliberate. Comparing against `seq0 + 2`
+ * returned immediately for one 500 ms window every ~66 days, when the block
+ * counter wraps past UINT32_MAX and `seq0 + 2` becomes a small number that
+ * the current, still-large value compares greater than. */
+bool ctl_handshake() {
     const uint32_t seq0 = s_render_seq.load(std::memory_order_acquire);
     for (int i = 0; i < 250; ++i) { /* 500 ms cap */
-        if (s_render_seq.load(std::memory_order_acquire) >= seq0 + 2) return;
+        if (s_render_seq.load(std::memory_order_acquire) - seq0 >= 2) {
+            return true;
+        }
         vTaskDelay(pdMS_TO_TICKS(2));
     }
     ESP_LOGE(TAG, "render handshake timed out");
+    return false;
+}
+
+/* Drops every track buffer, freeing only what the audio task has provably let
+ * go of. Used by the two paths that replace the whole set (clear-all, load). */
+void ctl_release_all(bool settled) {
+    for (int t = 0; t < LOOP_TRACKS; ++t) {
+        uint8_t* p = s_buf[t].load(std::memory_order_relaxed);
+        s_buf[t].store(nullptr, std::memory_order_release);
+        s_cap_bytes[t] = 0;
+        if (p != nullptr && settled) heap_caps_free(p);
+    }
+    if (!settled) {
+        ESP_LOGE(TAG, "track buffers leaked rather than freed under a render "
+                      "that would not yield");
+    }
 }
 
 bool ctl_alloc(int trk, uint32_t frames, bool mono) {
@@ -379,8 +405,11 @@ bool ctl_alloc(int trk, uint32_t frames, bool mono) {
     if (old != nullptr) {
         /* only reachable if a track ever needs to grow — clear-all frees
          * buffers detached, so this is a safety net; handshake anyway */
-        ctl_handshake();
-        heap_caps_free(old);
+        if (ctl_handshake()) {
+            heap_caps_free(old);
+        } else {
+            ESP_LOGE(TAG, "track %d: old buffer leaked (handshake)", trk + 1);
+        }
     }
     return true;
 }
@@ -464,7 +493,13 @@ void ctl_compact() {
         memcpy(p, old, need);
         s_buf[t].store(p, std::memory_order_release);
         s_cap_bytes[t] = need;
-        ctl_handshake();
+        if (!ctl_handshake()) {
+            /* The point of compacting is to give PSRAM back; leaking the old
+             * buffer here gives none back at all, but it is still the only
+             * safe answer while the audio task may hold the pointer. */
+            ESP_LOGE(TAG, "track %d: compaction leaked the old buffer", t + 1);
+            continue;
+        }
         heap_caps_free(old);
         ESP_LOGI(TAG, "track %d compacted to %.2f s (%u KB freed)", t + 1,
                  (float)L / SYNTH_SAMPLE_RATE,
@@ -479,29 +514,53 @@ void ctl_compact() {
  *
  * The countdown lives on loop_ctl, not in the callback: the callback runs on
  * the clock task and must stay short, and starting a take allocates. */
-int s_arm_beats = 0;   /* beats still to wait; 0 = not armed */
-bool s_arm_click = false;
-int s_arm_track = 0;
+/* Atomic because two tasks share them: the countdown is decremented by
+ * beat_cb() on the seq_clk task, and armed or cancelled by loop_ctl. As plain
+ * ints, a stop pressed on the very beat the countdown expired could race the
+ * decrement and either start a take the user had just cancelled or leave
+ * loop.armed showing a countdown that no longer exists. */
+std::atomic<int> s_arm_beats{0};   /* beats still to wait; 0 = not armed */
+std::atomic<bool> s_arm_fire{false}; /* countdown done, take not started yet */
+std::atomic<bool> s_arm_click{false};
+std::atomic<int> s_arm_track{0};
 
 void ctl_arm_cancel() {
-    if (s_arm_beats == 0) return;
-    s_arm_beats = 0;
+    const bool was_armed =
+        s_arm_beats.exchange(0, std::memory_order_acq_rel) != 0;
+    /* Clearing the fire flag is what makes cancelling win a race with the
+     * last beat: kFlagArmFire may already be latched in s_flags, and the
+     * handler only starts a take if this flag is still set. */
+    const bool was_firing = s_arm_fire.exchange(false, std::memory_order_acq_rel);
+    if (!was_armed && !was_firing) return;
     ParamStore::instance().set(LOOP_PID_ARMED, 0.0f, ParamOrigin::Internal);
 }
 
 /* Clock task. Short by construction: click, decrement, and hand the start
  * over to loop_ctl. */
 void beat_cb(int beat_in_bar, void*) {
-    if (s_arm_beats <= 0) return;
-    if (--s_arm_beats <= 0) {
-        s_arm_beats = 0;
+    /* Compare-exchange rather than a plain decrement: if loop_ctl zeroed the
+     * countdown between the load and here, the arm is gone and this beat must
+     * not resurrect it. */
+    int left = s_arm_beats.load(std::memory_order_acquire);
+    for (;;) {
+        if (left <= 0) return;
+        if (s_arm_beats.compare_exchange_weak(left, left - 1,
+                                              std::memory_order_acq_rel,
+                                              std::memory_order_acquire)) {
+            break;
+        }
+    }
+    if (left - 1 <= 0) {
         /* Deliberately no click on this beat. It is the downbeat the take
          * opens on, and the four counts have already been given on the four
          * beats before it — clicking here would be counting to five, and it
          * put the last tick at sample zero of the loop. */
+        s_arm_fire.store(true, std::memory_order_release);
         s_flags.fetch_or(kFlagArmFire, std::memory_order_release);
     } else {
-        if (s_arm_click) drums_click(beat_in_bar == 0);
+        if (s_arm_click.load(std::memory_order_relaxed)) {
+            drums_click(beat_in_bar == 0);
+        }
         s_flags.fetch_or(kFlagArmTick, std::memory_order_release);
     }
     if (s_ctl_task != nullptr) xTaskNotifyGive(s_ctl_task);
@@ -587,8 +646,8 @@ void ctl_handle_mode() {
             const bool want_count = ps.get(LOOP_PID_COUNTIN) > 0.5f;
             const bool want_sync = ps.get(LOOP_PID_SYNC) > 0.5f;
             if (want_count || want_sync) {
-                s_arm_track = trk;
-                s_arm_click = want_count;
+                s_arm_track.store(trk, std::memory_order_relaxed);
+                s_arm_click.store(want_count, std::memory_order_relaxed);
                 /* Count-in is four clicks and the take opens on the fifth
                  * beat, so the last tick has a whole beat to decay and the
                  * loop starts on the "1" rather than on the "4".
@@ -599,11 +658,13 @@ void ctl_handle_mode() {
                  * bar — hence the modulo rather than a plain subtraction,
                  * which used to fire on beat 3 of 4. */
                 const int bib = seqarp_beat_in_bar();
-                s_arm_beats = want_count ? 5 : (((4 - bib) % 4) + 1);
+                const int beats = want_count ? 5 : (((4 - bib) % 4) + 1);
+                s_arm_fire.store(false, std::memory_order_relaxed);
+                s_arm_beats.store(beats, std::memory_order_release);
                 s_ctl_mode = MODE_REC;
-                ps.set(LOOP_PID_ARMED, (float)s_arm_beats, ParamOrigin::Internal);
-                ESP_LOGI(TAG, "track %d armed: %d beat(s)%s", trk + 1,
-                         s_arm_beats, want_count ? " (count-in)" : " (sync)");
+                ps.set(LOOP_PID_ARMED, (float)beats, ParamOrigin::Internal);
+                ESP_LOGI(TAG, "track %d armed: %d beat(s)%s", trk + 1, beats,
+                         want_count ? " (count-in)" : " (sync)");
                 break;
             }
             if (!ctl_start_rec(trk)) return;
@@ -633,13 +694,7 @@ void ctl_handle_clear() {
         ctl_mirror_state();
     } else if (what == CLR_ALL) {
         s_cmd.store(kCmdDetach, std::memory_order_release);
-        ctl_handshake();
-        for (int t = 0; t < LOOP_TRACKS; ++t) {
-            uint8_t* p = s_buf[t].load(std::memory_order_relaxed);
-            s_buf[t].store(nullptr, std::memory_order_release);
-            s_cap_bytes[t] = 0;
-            if (p != nullptr) heap_caps_free(p);
-        }
+        ctl_release_all(ctl_handshake());
         s_filled.store(0, std::memory_order_release);
         s_loop_frames.store(0, std::memory_order_release);
         s_ctl_len = 0;
@@ -732,13 +787,7 @@ void ctl_handle_load() {
     }
     /* replace the live set: detach audio, free, then fill from storage */
     s_cmd.store(kCmdDetach, std::memory_order_release);
-    ctl_handshake();
-    for (int t = 0; t < LOOP_TRACKS; ++t) {
-        uint8_t* p = s_buf[t].load(std::memory_order_relaxed);
-        s_buf[t].store(nullptr, std::memory_order_release);
-        s_cap_bytes[t] = 0;
-        if (p != nullptr) heap_caps_free(p);
-    }
+    ctl_release_all(ctl_handshake());
     s_filled.store(0, std::memory_order_release);
     s_loop_frames.store(0, std::memory_order_release);
     s_mono.store(mono, std::memory_order_release); /* set format = the blob's */
@@ -822,21 +871,30 @@ void ctl_task(void* arg) {
             ctl_compact();
         }
         const uint32_t flags = s_flags.exchange(0, std::memory_order_acquire);
+        /* Transport first. A stop and the last count-in beat can land in the
+         * same wake, and the user's stop has to win: ctl_handle_mode() ->
+         * ctl_arm_cancel() clears s_arm_fire, so the armed-take branch below
+         * finds nothing to start. Handled the other way round (as it was),
+         * the take opened and was stopped again a moment later — audible as a
+         * blip on a track the user had just cancelled. */
+        if (flags & kFlagMode) ctl_handle_mode();
+        if (flags & kFlagClear) ctl_handle_clear();
         if (flags & kFlagArmTick) {
-            ParamStore::instance().set(LOOP_PID_ARMED, (float)s_arm_beats,
-                                       ParamOrigin::Internal);
+            ParamStore::instance().set(
+                LOOP_PID_ARMED,
+                (float)s_arm_beats.load(std::memory_order_acquire),
+                ParamOrigin::Internal);
         }
-        if (flags & kFlagArmFire) {
+        if ((flags & kFlagArmFire) &&
+            s_arm_fire.exchange(false, std::memory_order_acq_rel)) {
             ParamStore::instance().set(LOOP_PID_ARMED, 0.0f,
                                        ParamOrigin::Internal);
             /* The countdown ran on the clock task; the take starts here,
              * where allocating is allowed. */
-            if (!ctl_start_rec(s_arm_track)) {
+            if (!ctl_start_rec(s_arm_track.load(std::memory_order_acquire))) {
                 ESP_LOGW(TAG, "armed take could not start");
             }
         }
-        if (flags & kFlagMode) ctl_handle_mode();
-        if (flags & kFlagClear) ctl_handle_clear();
         if (flags & kFlagMono) ctl_mirror_maxlen();
 #if SYNTH_ENABLE_LOOP_PERSIST
         if (flags & kFlagSave) ctl_handle_save();

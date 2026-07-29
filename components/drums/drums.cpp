@@ -598,6 +598,9 @@ esp_err_t drums_kit_select(int index) {
 
     /* Silence first, then publish, then reclaim — see the file header. */
     s_kill_voices.store(true, std::memory_order_release);
+    /* A timeout here is survivable: publishing is one atomic store, and a
+     * voice mid-render still holds its own copy of the old kit's pointers,
+     * which stay valid until the free below. */
     wait_render_boundaries(2, 500);
 
     drum_kit_t* old = s_kit.load(std::memory_order_acquire);
@@ -606,8 +609,24 @@ esp_err_t drums_kit_select(int index) {
     s_kit_back ^= 1;
     s_kit_current = index;
 
-    wait_render_boundaries(2, 500);
-    if (old != nullptr) drum_kit_free(old);
+    /* This one is not survivable, and its answer used to be discarded. False
+     * means the audio task never reached a render boundary, so it may still
+     * be reading sample data out of the old kit — freeing it here is a
+     * use-after-free in the render loop. Leaking the block instead costs at
+     * most a few hundred KB of PSRAM (the ROM kit owns nothing at all) and
+     * only happens when the audio task has already stalled for half a
+     * second, which is its own, louder problem. */
+    const bool settled = wait_render_boundaries(2, 500);
+    if (old != nullptr) {
+        if (settled) {
+            drum_kit_free(old);
+        } else {
+            ESP_LOGE(TAG,
+                     "kit swap: render handshake timed out — leaking %u KB "
+                     "rather than freeing a kit that may still be playing",
+                     (unsigned)(old->owned_bytes / 1024));
+        }
+    }
 
     for (int i = 0; i < DRUM_SLOTS; ++i) s_slot[i].primed = false;
     ESP_LOGI(TAG, "kit %d selected: '%s' (%d slots)", index, fresh.name,

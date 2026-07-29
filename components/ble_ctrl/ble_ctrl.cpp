@@ -348,6 +348,20 @@ void handle_param_info(uint8_t seq, const uint8_t* p, uint16_t plen) {
     }
     /* [id u16][type u8][curve u8][enum_count u8][min f32][max f32][def f32]
      * [name NUL][enum_count × NUL-terminated names] */
+    const size_t limit = 4 + 1 + avail_payload();
+    /* The fixed part alone is 22 bytes, and the name/enum loops below already
+     * respect `limit` — but nothing checked that the *header* fits. At the
+     * 23-byte default ATT MTU a notification carries 20 bytes, so this built
+     * a 22-byte frame the stack could only refuse, and the client saw
+     * silence. Clients are expected to negotiate MTU >= 247
+     * (docs/BLE_PROTOCOL.md); a status is the honest answer for one that has
+     * not got there yet. */
+    /* header + status + id + type + curve + enum_count + min/max/def */
+    constexpr size_t kFixedLen = 5 + 2 + 1 + 1 + 1 + 4 + 4 + 4;
+    if (kFixedLen > limit) {
+        send_status(OP_PARAM_INFO, seq, ST_UNSUPPORTED);
+        return;
+    }
     size_t n = 5; /* payload starts after the 4 B header + status byte */
     wr16(s_tx + n, d->id);
     n += 2;
@@ -360,7 +374,6 @@ void handle_param_info(uint8_t seq, const uint8_t* p, uint16_t plen) {
     n += 4;
     wrf32(s_tx + n, d->def);
     n += 4;
-    const size_t limit = 4 + 1 + avail_payload();
     size_t len = strlen(d->name) + 1;
     if (n + len <= limit) {
         memcpy(s_tx + n, d->name, len);

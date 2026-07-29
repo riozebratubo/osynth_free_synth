@@ -47,6 +47,20 @@ inline bool valid(int pattern, int track, int step) {
            step < SEQ_MAX_STEPS;
 }
 
+/* Bulk edits walk the step store in bounded chunks rather than holding the
+ * spinlock across a whole track. The store is 128 KB of PSRAM on the S3, and
+ * a 2 KB memset — or a 256-entry scatter — with interrupts disabled is tens
+ * of microseconds of jitter for everything else on core 0, the clock task
+ * included. This is the header's "bulk edits take the lock per step, never
+ * across a whole BLE frame" rule applied to the generators too, which is
+ * where it had quietly stopped holding. A reader that catches a track
+ * half-cleared or half-rotated sees steps that are on their way to exactly
+ * that state; the lock table, which cannot survive a torn update, still gets
+ * one section to itself. */
+constexpr int kBulkChunk = 16;
+static_assert(SEQ_MAX_STEPS % kBulkChunk == 0,
+              "the whole-track passes below assume an exact split");
+
 /* Ticks per step at 96 PPQN. A quarter note is 96 ticks; triplet divisions
  * divide by three, which is exactly why 96 was chosen over 24 — 1/16T needs
  * 8 ticks and would have been 2 at 24 PPQN, leaving no room for micro-timing
@@ -328,12 +342,17 @@ int seq_div_ticks(int div) {
 
 void seq_track_clear(int pattern, int track) {
     if (!valid(pattern, track, 0)) return;
-    /* One critical section for both the steps and the lock compaction: the
-     * swap-with-last removal reshuffles indices, so re-reading the count
-     * outside the lock between iterations would walk off the live entries. */
+    for (int s = 0; s < SEQ_MAX_STEPS; s += kBulkChunk) {
+        taskENTER_CRITICAL(&s_lock);
+        memset(&s_steps[step_index(pattern, track, s)], 0,
+               (size_t)kBulkChunk * sizeof(seq_step_t));
+        taskEXIT_CRITICAL(&s_lock);
+    }
+    /* The lock compaction keeps one section of its own: the swap-with-last
+     * removal reshuffles indices, so re-reading the count outside the lock
+     * between iterations would walk off the live entries. It is a bounded
+     * scan of an internal-RAM table, not a PSRAM copy. */
     taskENTER_CRITICAL(&s_lock);
-    memset(&s_steps[step_index(pattern, track, 0)], 0,
-           (size_t)SEQ_MAX_STEPS * sizeof(seq_step_t));
     for (int i = s_plock_count - 1; i >= 0; --i) {
         if (s_plock[i].pattern == pattern && s_plock[i].track == track) {
             s_plock[i] = s_plock[--s_plock_count];
@@ -391,14 +410,24 @@ void seq_track_rotate(int pattern, int track, int delta) {
     if (d == 0) return;
 
     /* Static rather than a 2 KB stack array: this runs on the BLE command
-     * task, and the lock already serialises every caller. */
+     * task, and callers are serialised by being the only editor. */
     static seq_step_t tmp[SEQ_MAX_STEPS];
-    taskENTER_CRITICAL(&s_lock);
-    memcpy(tmp, &s_steps[step_index(pattern, track, 0)],
-           (size_t)len * sizeof(seq_step_t));
-    for (int i = 0; i < len; ++i) {
-        s_steps[step_index(pattern, track, (i + d) % len)] = tmp[i];
+    for (int s = 0; s < len; s += kBulkChunk) {
+        const int n = (len - s < kBulkChunk) ? len - s : kBulkChunk;
+        taskENTER_CRITICAL(&s_lock);
+        memcpy(&tmp[s], &s_steps[step_index(pattern, track, s)],
+               (size_t)n * sizeof(seq_step_t));
+        taskEXIT_CRITICAL(&s_lock);
     }
+    for (int s = 0; s < len; s += kBulkChunk) {
+        const int n = (len - s < kBulkChunk) ? len - s : kBulkChunk;
+        taskENTER_CRITICAL(&s_lock);
+        for (int i = s; i < s + n; ++i) {
+            s_steps[step_index(pattern, track, (i + d) % len)] = tmp[i];
+        }
+        taskEXIT_CRITICAL(&s_lock);
+    }
+    taskENTER_CRITICAL(&s_lock);
     for (int i = 0; i < s_plock_count; ++i) {
         if (s_plock[i].pattern == pattern && s_plock[i].track == track &&
             s_plock[i].step < len) {
@@ -427,9 +456,12 @@ void seq_track_euclid(int pattern, int track, int pulses, int steps,
     on.ratchet = 1;
     on.cond = SEQ_COND_ALWAYS;
 
-    taskENTER_CRITICAL(&s_lock);
-    memset(&s_steps[step_index(pattern, track, 0)], 0,
-           (size_t)SEQ_MAX_STEPS * sizeof(seq_step_t));
+    for (int s = 0; s < SEQ_MAX_STEPS; s += kBulkChunk) {
+        taskENTER_CRITICAL(&s_lock);
+        memset(&s_steps[step_index(pattern, track, s)], 0,
+               (size_t)kBulkChunk * sizeof(seq_step_t));
+        taskEXIT_CRITICAL(&s_lock);
+    }
     if (pulses > 0) {
         int acc = 0;
         for (int i = 0; i < steps; ++i) {
@@ -439,10 +471,15 @@ void seq_track_euclid(int pattern, int track, int pulses, int steps,
                 int at = i + rotate;
                 at %= steps;
                 if (at < 0) at += steps;
+                taskENTER_CRITICAL(&s_lock);
                 s_steps[step_index(pattern, track, at)] = on;
+                taskEXIT_CRITICAL(&s_lock);
             }
         }
     }
+    /* Length last: until the hits are placed, the track is better described
+     * by its old length than by a new one over empty steps. */
+    taskENTER_CRITICAL(&s_lock);
     s_pattern[pattern].track[track].length = (uint16_t)steps;
     taskEXIT_CRITICAL(&s_lock);
 }
@@ -473,6 +510,44 @@ void seq_track_humanize(int pattern, int track, int amount) {
 
 /* ======================= parameter locks =============================== */
 
+namespace {
+
+/* Parameters a lock must never target.
+ *
+ * A lock is applied every time its step fires, so anything that is a
+ * *command* rather than a value fires with it: a lock on preset.load reloads
+ * a patch sixteen times a bar, one on drums.trig machine-guns a slot, one on
+ * engine.type runs the whole S6 switch protocol under the playhead. The
+ * looper range and the transport/navigation parameters are excluded for the
+ * same reason the preset system skips them — they are state, not sound.
+ *
+ * Spelled as literal ids rather than pulled from the owning components'
+ * headers: this file sits below drums, looper and presets in the component
+ * graph (presets already depends on seqarp), and the id map is a stable
+ * contract — see docs/PARAM_MAP.md. */
+bool plock_forbidden(uint16_t pid) {
+    if (pid < 0x0010) return true; /* master.volume, engine.type, preset.* */
+    if (pid >= 0x0600 && pid < 0x0700) return true; /* looper: transport + mix */
+    switch (pid) {
+        case 0x0401: /* seq.clock      — rig wiring, not music */
+        case 0x0405: /* seq.pattern    — navigation */
+        case 0x0406: /* seq.song */
+        case 0x040B: /* seq.pos        — firmware-written telemetry */
+        case 0x040C: /* seq.curpat */
+        case 0x040E: /* seq.edit.track — editor cursors */
+        case 0x040F: /* seq.edit.step */
+        case 0x0420: /* seq.mode       — transport */
+        case 0x0421: /* seq.steps */
+        case 0x0703: /* drums.kit */
+        case 0x0704: /* drums.trig */
+            return true;
+        default:
+            return false;
+    }
+}
+
+} // namespace
+
 int seq_plock_count(void) { return s_plock_count; }
 
 bool seq_plock_get_at(int index, seq_plock_t* out) {
@@ -502,6 +577,13 @@ bool seq_plock_set(int pattern, int track, int step, uint16_t pid,
                    float value) {
     if (!valid(pattern, track, step)) return false;
     const bool remove = std::isnan(value); /* the documented "remove" value */
+    /* Removal is always allowed, so a file written before this check can
+     * still be cleaned up; only creating one is refused. */
+    if (!remove && plock_forbidden(pid)) {
+        ESP_LOGW(TAG, "lock on 0x%04x refused: that parameter is a command or "
+                      "transport state, not part of the sound", pid);
+        return false;
+    }
     bool ok = true;
     taskENTER_CRITICAL(&s_lock);
     int found = -1;

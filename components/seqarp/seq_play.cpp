@@ -34,8 +34,18 @@ constexpr int kMaxPendingOffs = 24; /* one per track plus slide overlaps */
 
 struct ActiveLock {
     uint16_t pid;
-    float base; /* value to restore when the lock lapses */
+    uint32_t gen; /* ParamStore::generation() when `base` was captured */
+    float base;   /* value to restore when the lock lapses */
 };
+
+/* True when the id `pid` refers to now is still the parameter it referred to
+ * when a lock captured its pre-lock value. The 0x02xx range is re-registered
+ * from scratch on every engine switch, so a lock captured under the FM engine
+ * and released under the wavetable engine would write an FM operator level
+ * into whatever wavetable parameter inherited the id. */
+inline bool lock_still_valid(const ActiveLock& l) {
+    return l.gen == ParamStore::instance().generation();
+}
 
 struct TrackState {
     int32_t base_tick;  /* nominal tick of the next step */
@@ -170,7 +180,9 @@ void apply_locks(int track, int pattern, int step) {
             }
         }
         if (!still) {
-            ps.set(t.lock[i].pid, t.lock[i].base, ParamOrigin::Internal);
+            if (lock_still_valid(t.lock[i])) {
+                ps.set(t.lock[i].pid, t.lock[i].base, ParamOrigin::Internal);
+            }
             t.lock[i] = t.lock[--t.lock_count];
         }
     }
@@ -187,6 +199,12 @@ void apply_locks(int track, int pattern, int step) {
             if (t.lock_count >= SEQ_TRACK_LOCKS) continue;
             found = t.lock_count++;
             t.lock[found].pid = locks[j].pid;
+            t.lock[found].gen = ps.generation();
+            t.lock[found].base = ps.get(locks[j].pid);
+        } else if (!lock_still_valid(t.lock[found])) {
+            /* The registry moved under a held lock: re-anchor on the new
+             * parameter rather than carrying a base that means nothing. */
+            t.lock[found].gen = ps.generation();
             t.lock[found].base = ps.get(locks[j].pid);
         }
         ps.set(locks[j].pid, locks[j].value, ParamOrigin::Internal);
@@ -197,7 +215,9 @@ void release_locks(int track) {
     TrackState& t = s_trk[track];
     ParamStore& ps = ParamStore::instance();
     for (int i = 0; i < t.lock_count; ++i) {
-        ps.set(t.lock[i].pid, t.lock[i].base, ParamOrigin::Internal);
+        if (lock_still_valid(t.lock[i])) {
+            ps.set(t.lock[i].pid, t.lock[i].base, ParamOrigin::Internal);
+        }
     }
     t.lock_count = 0;
 }
@@ -480,18 +500,18 @@ void switch_pattern(int pattern) {
  * mid-bar would restart every track's step counter out of phase. */
 void pattern_boundary() {
     if (pv(s_p_song) >= 0.5f && seq_song_length() > 0) {
-        if (++s_song_repeat >= 1) {
-            seq_song_entry_t e;
+        seq_song_entry_t e;
+        seq_song_get(s_song_index, &e);
+        /* seq_song_set()/seq_song_set_length() both floor `repeats` at 1, so
+         * a chain entry always advances after at least one pass. */
+        if (++s_song_repeat >= e.repeats) {
+            s_song_repeat = 0;
+            s_song_index = (s_song_index + 1) % seq_song_length();
             seq_song_get(s_song_index, &e);
-            if (s_song_repeat >= e.repeats) {
-                s_song_repeat = 0;
-                s_song_index = (s_song_index + 1) % seq_song_length();
-                seq_song_get(s_song_index, &e);
-                switch_pattern(e.pattern);
-                ParamStore::instance().set(SEQ_PID_PATTERN, (float)e.pattern,
-                                           ParamOrigin::Internal);
-                return;
-            }
+            switch_pattern(e.pattern);
+            ParamStore::instance().set(SEQ_PID_PATTERN, (float)e.pattern,
+                                       ParamOrigin::Internal);
+            return;
         }
     }
     if (s_queued >= 0) {

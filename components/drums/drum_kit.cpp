@@ -237,6 +237,7 @@ bool wav_open(FILE* f, WavInfo* w) {
         return false;
     }
     bool have_fmt = false;
+    bool have_data = false;
     for (;;) {
         char id[4];
         uint32_t sz;
@@ -251,12 +252,15 @@ bool wav_open(FILE* f, WavInfo* w) {
             memcpy(&w->bits, fmt + 14, 2);
             if (sz > 16) fseek(f, (long)(sz - 16), SEEK_CUR);
             have_fmt = true;
-        } else if (memcmp(id, "data", 4) == 0) {
-            w->data_pos = ftell(f);
-            w->data_bytes = sz;
-            if (have_fmt) return true;
-            fseek(f, (long)sz, SEEK_CUR);
+            if (have_data) return true; /* `data` came first — legal, and the
+                                         * old code walked to EOF and failed */
         } else {
+            if (memcmp(id, "data", 4) == 0 && !have_data) {
+                w->data_pos = ftell(f);
+                w->data_bytes = sz;
+                have_data = true;
+                if (have_fmt) return true; /* the usual ordering */
+            }
             fseek(f, (long)sz, SEEK_CUR);
         }
         if (sz & 1) fseek(f, 1, SEEK_CUR); /* chunks are word-aligned */
@@ -277,13 +281,20 @@ uint32_t wav_read_mono(FILE* f, const WavInfo& w, int16_t* dst,
 
     /* One sector-ish staging buffer, converted frame by frame. */
     /* Staged on the caller's stack, so keep it modest: drum_ctl has 8 KB and
-     * the directory listing above already claims a couple of them. */
-    constexpr int kChunkFrames = 128;
-    uint8_t buf[kChunkFrames * 8];
+     * the directory listing above already claims a couple of them.
+     *
+     * The frames-per-pass count is derived from the buffer rather than fixed.
+     * `bits` is bounded above (<= 32) but `channels` comes straight off the
+     * file and is not: a 5.1 stem carries 18-byte frames, and a fixed 128
+     * frames per pass then asked fread() for 2304 bytes of a 1 KB buffer. */
+    constexpr size_t kStageBytes = 1024;
+    uint8_t buf[kStageBytes];
+    const uint32_t chunk_frames = (uint32_t)(kStageBytes / (size_t)frame_bytes);
+    if (chunk_frames == 0) return 0; /* > 1 KB per frame: not a sane WAV */
     uint32_t done = 0;
     while (done < frames) {
         uint32_t n = frames - done;
-        if (n > kChunkFrames) n = kChunkFrames;
+        if (n > chunk_frames) n = chunk_frames;
         const size_t want = (size_t)n * (size_t)frame_bytes;
         if (fread(buf, 1, want, f) != want) break;
         for (uint32_t i = 0; i < n; ++i) {

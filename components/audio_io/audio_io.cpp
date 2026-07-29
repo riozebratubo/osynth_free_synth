@@ -26,6 +26,15 @@ TaskHandle_t s_task = nullptr;
 const audio_sink_t* s_sink = nullptr;
 audio_io_stats_t s_stats = {};
 
+/* Guards the peak meters against a read-and-reset landing between the audio
+ * task's compare and its store. The counters either side are 32-bit aligned
+ * and cannot tear on Xtensa, but `out_peak` and `dsp_load_peak_pct` are
+ * read-modify-write on *both* sides: without this, a reset could drop a block
+ * that maxed after the copy-out, or resurrect a peak the reader had just
+ * cleared. Uncontended on every block, so it costs a couple of instructions
+ * in the audio task and nothing anywhere else. */
+portMUX_TYPE s_stats_mux = portMUX_INITIALIZER_UNLOCKED;
+
 /* Consecutive blocks whose output peak stayed below kQuietPeak. Written by the
  * audio task, read by control tasks — a relaxed atomic, because it is a hint
  * and being one block stale never matters. */
@@ -120,8 +129,10 @@ void SYNTH_RENDER_IRAM audio_task(void*) {
             s_out[2 * i + 1] = to_i16_dith(osynth::dsp::soft_clip(r));
         }
         s_gain = g1;
+        portENTER_CRITICAL(&s_stats_mux);
         if (peak > s_stats.out_peak) s_stats.out_peak = peak;
         s_stats.soft_clips += clips;
+        portEXIT_CRITICAL(&s_stats_mux);
 
         /* Silence run, for anything that needs a moment where a stall cannot
          * be heard — persist.c writes NVS in one. One compare per block, on a
@@ -140,12 +151,14 @@ void SYNTH_RENDER_IRAM audio_task(void*) {
          * deadline and counts as an underrun. */
         const uint32_t busy = esp_cpu_get_cycle_count() - c0;
         const float inst_pct = 100.0f * (float)busy / (float)cycles_per_block;
+        portENTER_CRITICAL(&s_stats_mux);
         s_stats.dsp_load_pct += 0.01f * (inst_pct - s_stats.dsp_load_pct);
         if (inst_pct > s_stats.dsp_load_peak_pct) {
             s_stats.dsp_load_peak_pct = inst_pct;
         }
         if (busy > cycles_per_block) s_stats.underruns++;
         s_stats.blocks_rendered++;
+        portEXIT_CRITICAL(&s_stats_mux);
 
         /* Blocking write: the sink's DMA (or timer) is the real clock. */
         esp_err_t err = s_sink->write(s_out, SYNTH_BLOCK_SIZE);
@@ -217,11 +230,13 @@ uint32_t audio_io_quiet_ms(void) {
 }
 
 void audio_io_get_stats(audio_io_stats_t* out) {
-    if (out != nullptr) {
-        *out = s_stats;
-        /* The peaks are read-and-reset windows. Clearing from this task can
-         * lose a concurrently-maxing block — fine for a diagnostic meter. */
-        s_stats.dsp_load_peak_pct = 0.0f;
-        s_stats.out_peak = 0.0f;
-    }
+    if (out == nullptr) return;
+    /* The peaks are read-and-reset windows, so the copy and the clear have to
+     * be one operation as far as the audio task is concerned — otherwise a
+     * block that maxes in between is reported by neither window. */
+    portENTER_CRITICAL(&s_stats_mux);
+    *out = s_stats;
+    s_stats.dsp_load_peak_pct = 0.0f;
+    s_stats.out_peak = 0.0f;
+    portEXIT_CRITICAL(&s_stats_mux);
 }

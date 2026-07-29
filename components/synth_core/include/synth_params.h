@@ -120,6 +120,17 @@ public:
     /* Resets every registered parameter in the range to its default. */
     void resetRange(uint16_t first, uint16_t last_exclusive);
 
+    /* Bumped by every add() and every removeRange() that removed something,
+     * i.e. once per engine bind and once per engine unbind — never while an
+     * engine is simply playing.
+     *
+     * Exists because an id does not identify a parameter across a switch: the
+     * 0x02xx range is re-registered per engine, so a holder that stashed
+     * `{id, value}` (the sequencer's parameter locks) and wrote it back later
+     * would land on whatever now owns that id. Capture this alongside the id
+     * and skip the write when it no longer matches. Readable from any task. */
+    uint32_t generation() const;
+
     /* Returns a handle (>= 0) or -1 if the listener table is full. */
     int addListener(ParamListener fn, void* ctx);
     void removeListener(int handle);
@@ -151,6 +162,7 @@ private:
     int16_t index_[PID_SPACE_END]; /* id -> slot in entries_, -1 if none */
     ListenerSlot listeners_[kMaxListeners];
     size_t count_ = 0;
+    std::atomic<uint32_t> generation_{0};
 };
 
 } // namespace osynth

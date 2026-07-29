@@ -67,6 +67,11 @@ constexpr int kFireNow = 0x4000; /* tick_in_step: force a step on next tick */
 /* How far the recovered clock may lag before it stops interpolating and
  * jumps: a quarter of a 1/16 step, i.e. inaudible, but bounded. */
 constexpr int32_t kSlaveCatchUp = 8;
+/* Silence on the external clock that counts as "the master is gone". Long
+ * enough that a ritardando to the 30 BPM floor (500 ms between 0xF8 bytes at
+ * 24 PPQN is already 5 BPM) never trips it, short enough that a yanked cable
+ * does not leave a chord droning. */
+constexpr int64_t kExtStallUs = 750000;
 
 constexpr int kClkTaskPrio = 10; /* control plane, core 0 (ARCHITECTURE.md) */
 constexpr int kClkTaskStack = 5120;
@@ -485,11 +490,14 @@ void clk_task(void* arg) {
     uint64_t period_us = 20833 / kSubTicks; /* 120 BPM until reconciled */
     bool timer_running = false;
     int src_prev = -1;
-    int idle_wakes = 0;
     int64_t last_poll_us = 0;
+    /* External-clock stall watchdog state (see the check further down). */
+    uint32_t seen_clocks = 0;
+    int64_t last_clock_us = 0;
+    bool ext_stalled = false;
 
     for (;;) {
-        const uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
 
         const int src = pi(CLOCK_SRC);
         if (src != src_prev) { /* switching source restarts the recovery */
@@ -498,6 +506,8 @@ void clk_task(void* arg) {
             s_ext_clocks.store(0, std::memory_order_release);
             s_ticks.store(0, std::memory_order_relaxed);
             src_prev = src;
+            last_clock_us = 0;
+            ext_stalled = false;
         }
 
         uint64_t want_us = period_us;
@@ -553,6 +563,49 @@ void clk_task(void* arg) {
             poll_edges();
         }
 
+        /* External-clock stall watchdog.
+         *
+         * A master that stops without sending 0xFC — cable pulled, DAW
+         * crashed, USB re-enumerated — leaves slave_budget() returning 0
+         * forever, so process_tick() never runs again. That is where the
+         * note-offs live: pend_tick() releases the arpeggiator's gates and
+         * seq_play_tick() releases the sequencer's, so without this every
+         * note sounding at the moment the clock died drones until something
+         * else sends CC 123.
+         *
+         * Measured in wall time on purpose. The previous guard asked whether
+         * a wake carried a task notification, which cannot work: the sub-tick
+         * timer runs in *both* clock modes and notifies on every fire, so the
+         * test was always false and the recovery never ran once. */
+        if (src == CLK_MIDI) {
+            const uint32_t clocks = s_ext_clocks.load(std::memory_order_acquire);
+            if (clocks != seen_clocks) {
+                seen_clocks = clocks;
+                last_clock_us = now_us;
+                ext_stalled = false;
+            } else if (!ext_stalled && seen_clocks != 0 &&
+                       now_us - last_clock_us >= kExtStallUs) {
+                /* seen_clocks != 0 keeps this quiet when no master has ever
+                 * been connected — selecting the MIDI clock source with
+                 * nothing plugged in is a setup step, not a stall. A 0xFA
+                 * start zeroes the counter, so it re-arms on the first byte
+                 * of each transport run. */
+                ext_stalled = true; /* one shot until the clock comes back */
+                ESP_LOGW(TAG, "external clock stalled — releasing held notes");
+                pend_flush();
+                seq_play_stop();
+                /* Reflect the transport so the app (and poll_edges' own edge
+                 * detection) agree that it is no longer running. */
+                if (pi(SEQ_MODE) != SEQ_STOP) {
+                    ParamStore::instance().set(SEQ_PID_SEQ_MODE,
+                                               (float)SEQ_STOP);
+                }
+            }
+        } else {
+            last_clock_us = 0;
+            ext_stalled = false;
+        }
+
         if (flags & kFlagKick) {
             /* First key of a chord with the step grid idle: fire the arp now
              * and re-align the grid to this instant. While the sequencer
@@ -573,16 +626,7 @@ void clk_task(void* arg) {
                      (unsigned)(n - kMaxBurst));
             n = kMaxBurst;
         }
-        if (n == 0) {
-            if (notified == 0 && src == CLK_MIDI && s_pend_count > 0 &&
-                ++idle_wakes >= 2) {
-                pend_flush(); /* external clock stalled: nothing hangs */
-                seq_play_stop();
-                idle_wakes = 0;
-            }
-            continue;
-        }
-        idle_wakes = 0;
+        if (n == 0) continue; /* a stalled external clock is handled above */
         while (n-- > 0) process_tick();
     }
 }

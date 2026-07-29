@@ -204,8 +204,15 @@ void midi_route_channel_message(uint8_t status, uint8_t d1, uint8_t d2) {
                 case 1: /* mod wheel: the matrix `wheel` source (S9) */
                     synth_mod_set_wheel((float)d2 * (1.0f / 127.0f));
                     break;
-                case 6: /* NRPN data entry MSB: stored, applied on the LSB */
-                    s_nrpn_data_msb = d2;
+                case 6:
+                    /* NRPN data entry MSB: stored, applied on the LSB.
+                     * Ignored while nothing is selected, so a stray CC 6 —
+                     * an RPN sequence, a generic controller a DAW happens to
+                     * map there — cannot sit in the latch and corrupt the top
+                     * 7 bits of whatever NRPN write comes next. */
+                    if (s_nrpn_msb != 0x7F || s_nrpn_lsb != 0x7F) {
+                        s_nrpn_data_msb = d2;
+                    }
                     break;
                 case 38: { /* NRPN data entry LSB: apply the 14-bit value */
                     if (s_nrpn_msb == 0x7F && s_nrpn_lsb == 0x7F) break;
@@ -224,16 +231,23 @@ void midi_route_channel_message(uint8_t status, uint8_t d1, uint8_t d2) {
                 case 64: /* sustain pedal */
                     voice_manager_set_sustain(d2 >= 64);
                     break;
+                /* A fresh selection starts with a clean data latch, so a
+                 * value can never inherit the MSB of the previous one. A
+                 * sender that streams LSB-only updates (CC 38 alone) after a
+                 * full sequence still works: only 98/99 clear it. */
                 case 98: /* NRPN select LSB */
                     s_nrpn_lsb = d2;
+                    s_nrpn_data_msb = 0;
                     break;
                 case 99: /* NRPN select MSB */
                     s_nrpn_msb = d2;
+                    s_nrpn_data_msb = 0;
                     break;
                 case 100: /* RPN select: cancels any NRPN selection */
                 case 101:
                     s_nrpn_msb = 0x7F;
                     s_nrpn_lsb = 0x7F;
+                    s_nrpn_data_msb = 0;
                     break;
                 case 120: /* all sound off */
                     voice_manager_all_sound_off();
