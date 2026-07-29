@@ -364,7 +364,19 @@ void seq_track_clear(int pattern, int track) {
 void seq_pattern_clear(int pattern) {
     if (pattern < 0 || pattern >= SEQ_PATTERNS) return;
     for (int t = 0; t < SEQ_TRACKS; ++t) seq_track_clear(pattern, t);
-    default_pattern(&s_pattern[pattern], pattern);
+    /* Built on the stack (default_pattern snprintf()s a name, which has no
+     * business inside a critical section) and copied in under the lock. This
+     * was the one writer in the file not honouring the file's own rule: the
+     * tick path reads track configs through the lock, and memsetting ~150 live
+     * bytes from outside it let a tick catch a half-reset track — a zero div
+     * and a zero length, both of which the readers clamp, but neither of which
+     * describes anything. The copy in is one struct, the same cost as
+     * seq_pattern_cfg_set(). */
+    seq_pattern_cfg_t fresh;
+    default_pattern(&fresh, pattern);
+    taskENTER_CRITICAL(&s_lock);
+    s_pattern[pattern] = fresh;
+    taskEXIT_CRITICAL(&s_lock);
 }
 
 void seq_pattern_copy(int src, int dst) {
@@ -794,13 +806,10 @@ size_t seq_pattern_serialize(int pattern, void* buf, size_t cap) {
     h.track_count = SEQ_TRACKS;
     memcpy(h.name, cfg.name, sizeof(h.name));
 
-    /* Only the live part of each track is stored: a 16-step pattern has no
-     * business writing 2 KB of zeros to a flash filesystem. */
-    int locks = 0;
-    for (int i = 0; i < s_plock_count; ++i) {
-        if (s_plock[i].pattern == pattern) ++locks;
-    }
-    h.plock_count = (uint16_t)locks;
+    /* plock_count is filled in after the lock pass below and the header
+     * rewritten in place, because it has to be whatever that pass actually
+     * wrote. */
+    h.plock_count = 0;
 
     if (off + sizeof(h) > cap) return 0;
     memcpy(p + off, &h, sizeof(h));
@@ -834,16 +843,32 @@ size_t seq_pattern_serialize(int pattern, void* buf, size_t cap) {
         }
     }
 
-    for (int i = 0; i < s_plock_count; ++i) {
-        if (s_plock[i].pattern != pattern) continue;
-        if (off + sizeof(seq_plock_t) > cap) return 0;
-        seq_plock_t l;
+    /* The count in the header is whatever this pass writes, not what a
+     * separate counting pass saw a moment earlier. Both used to walk
+     * s_plock/s_plock_count unlocked, so a BLE edit landing between them left
+     * the header declaring a number the body did not contain — the loader
+     * stops on its own bounds check, but the file is silently wrong.
+     *
+     * The table is still read one entry at a time rather than under a single
+     * section: an edit that reshuffles it mid-walk (removal is swap-with-last)
+     * can cost or repeat one lock, which re-saving fixes, while a header that
+     * disagrees with its body cannot be fixed by anything. */
+    uint16_t locks = 0;
+    for (int i = 0;; ++i) {
+        seq_plock_t l = {}; /* the copy is conditional; keep it defined */
         taskENTER_CRITICAL(&s_lock);
-        l = s_plock[i];
+        const bool more = i < s_plock_count;
+        if (more) l = s_plock[i];
         taskEXIT_CRITICAL(&s_lock);
+        if (!more) break;
+        if (l.pattern != pattern) continue;
+        if (off + sizeof(l) > cap) return 0;
         memcpy(p + off, &l, sizeof(l));
         off += sizeof(l);
+        ++locks;
     }
+    h.plock_count = locks;
+    memcpy(p, &h, sizeof(h)); /* rewrite the header with the real count */
     return off;
 }
 

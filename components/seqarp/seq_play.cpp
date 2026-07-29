@@ -39,11 +39,23 @@ struct ActiveLock {
 };
 
 /* True when the id `pid` refers to now is still the parameter it referred to
- * when a lock captured its pre-lock value. The 0x02xx range is re-registered
- * from scratch on every engine switch, so a lock captured under the FM engine
- * and released under the wavetable engine would write an FM operator level
- * into whatever wavetable parameter inherited the id. */
+ * when a lock captured its pre-lock value. Only the 0x02xx range is
+ * re-registered from scratch on an engine switch, so a lock captured under the
+ * FM engine and released under the wavetable engine would write an FM operator
+ * level into whatever wavetable parameter inherited the id.
+ *
+ * The range test is the point, not a shortcut. ParamStore::generation() counts
+ * every add() and removeRange() in the whole store, so one engine switch
+ * invalidates it for *every* id at once. Asked unconditionally, a lock on
+ * fx.rev.mix or drum3.decay — ids that mean the same thing for the life of the
+ * firmware — was dropped by apply_locks() without its release ever writing
+ * `base` back, and the next pass re-anchored `base` on the value the lock
+ * itself had set. The parameter stayed welded to the locked value until a
+ * reboot, which is a good deal worse than the mis-restore this guards. */
 inline bool lock_still_valid(const ActiveLock& l) {
+    if (l.pid < osynth::PID_ENGINE_BASE || l.pid >= osynth::PID_FX_BASE) {
+        return true; /* stable id: no switch can change what it means */
+    }
     return l.gen == ParamStore::instance().generation();
 }
 

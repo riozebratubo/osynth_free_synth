@@ -9,11 +9,15 @@
  * trigger time. What is left in the inner loop is two table reads, a lerp,
  * a multiply-accumulate per channel and a decay multiply.
  *
- * Kit swapping is the same problem as an engine switch (S6): the audio task
- * holds raw pointers into the kit's sample data, so freeing a kit under it
- * would be a use-after-free. Same solution — silence the voices, publish the
- * new kit, wait for two render boundaries (the first block may still have
- * loaded the old pointer, the second provably saw the new one), then free.
+ * Kit swapping is the same problem as an engine switch (S6), with one extra
+ * twist: the audio task holds raw pointers into the kit's sample data, and a
+ * *voice* keeps its copy for the whole of its decay rather than re-reading it
+ * each block. So freeing a kit under it would be a use-after-free that two
+ * render boundaries alone do not cover. Solution — silence the voices, publish
+ * the new kit, wait for two render boundaries (the first block may still have
+ * loaded the old pointer, the second provably saw the new one), then free;
+ * and the silencing itself triggers on the kit pointer changing, so the first
+ * block to see the new kit drops every voice still holding the old one.
  *
  * Triggers arrive from control tasks (sequencer, MIDI, BLE, the audition
  * parameter) through a lock-free ring the audio task drains at block start:
@@ -139,6 +143,12 @@ std::atomic<drum_kit_t*> s_kit{nullptr}; /* what the audio task plays */
 int s_kit_back = 1;                /* index of the buffer not in use */
 std::atomic<uint32_t> s_render_seq{0};
 std::atomic<bool> s_kill_voices{false};
+/* The kit the audio task last rendered with — audio task only, never read by
+ * a control task. A voice latches raw sample pointers at trigger time and
+ * holds them for its whole decay, so "silence the voices" has to key off the
+ * pointer the block actually loaded and not off a flag some earlier block
+ * happened to consume. See the comparison in drums_pre_fx(). */
+const drum_kit_t* s_last_kit = nullptr;
 char s_kit_names[kMaxKits][DRUM_KIT_NAME_MAX];
 int s_kit_count = 1;
 int s_kit_current = 0;
@@ -455,12 +465,28 @@ void SYNTH_RENDER_IRAM drums_pre_fx(float* l, float* r, size_t frames) {
 
     const drum_kit_t* kit = s_kit.load(std::memory_order_acquire);
 
-    if (SYNTH_UNLIKELY(s_kill_voices.load(std::memory_order_acquire))) {
+    /* Silence on either signal: an explicit kill (the swap protocol arms one
+     * before it publishes, so the gap while a kit loads is quiet), or the kit
+     * pointer having moved since the last block.
+     *
+     * The second test is what makes drums_kit_select()'s two render boundaries
+     * sufficient. The flag alone was consumed by whichever block saw it first,
+     * necessarily *before* the publish — and every block between that one and
+     * the publish could still drain a trigger and latch the old kit's sample
+     * pointers into a voice. Those voices outlive both boundaries (a crash
+     * cymbal rings for seconds), so the free at the end of the swap was a
+     * use-after-free right here in the render loop. Comparing the pointer
+     * instead means the first block that loads the new kit clears every voice
+     * the old one spawned, and no block that loaded the old pointer can still
+     * be running by the second boundary. */
+    if (SYNTH_UNLIKELY(s_kill_voices.load(std::memory_order_acquire) ||
+                       kit != s_last_kit)) {
         for (int i = 0; i < kVoices; ++i) {
             s_voice[i].active = false;
             s_voice[i].data = nullptr;
         }
         s_kill_voices.store(false, std::memory_order_release);
+        s_last_kit = kit;
     }
 
     /* Derivations first: start_voice() latches a voice's gains and playback
@@ -615,7 +641,11 @@ esp_err_t drums_kit_select(int index) {
      * use-after-free in the render loop. Leaking the block instead costs at
      * most a few hundred KB of PSRAM (the ROM kit owns nothing at all) and
      * only happens when the audio task has already stalled for half a
-     * second, which is its own, louder problem. */
+     * second, which is its own, louder problem.
+     *
+     * True is now a real guarantee rather than a hope: the publish above is
+     * what arms drums_pre_fx's kit-changed silencing, so by the second
+     * boundary no voice can still hold a pointer into `old`. */
     const bool settled = wait_render_boundaries(2, 500);
     if (old != nullptr) {
         if (settled) {

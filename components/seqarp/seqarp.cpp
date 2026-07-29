@@ -878,7 +878,26 @@ void seqarp_pattern_reflect(int pattern) {
     }
     s_scale_prev = cfg.scale;
     s_root_prev = cfg.root;
-    s_steps_prev = -1;
+    /* seq.steps mirrors the *edited track's* length, so it has to be moved
+     * exactly the way scale/root are above — parameter and shadow together.
+     * Moving only the shadow (to -1, meaning "force the republish branch")
+     * did the opposite of what it reads like: poll_edges tests
+     * `steps != s_steps_prev` before it tests `tc.length != s_steps_prev`, and
+     * with the shadow at -1 the first test matched on every poll. So within
+     * 20 ms of any sequence or set load the app's stale steps knob was written
+     * straight back over the length the file had just restored.
+     *
+     * Resolved against whatever is *currently* selected rather than against
+     * `pattern`: a set load reflects every pattern in turn (presets.cpp) and
+     * only the selected one owns this parameter, so this re-establishes the
+     * same invariant poll_edges maintains, whichever pattern was reflected. */
+    const int et = (s_p[EDIT_TRACK] != nullptr) ? pi(EDIT_TRACK) : 1;
+    const int trk = (et >= 1 && et <= SEQ_TRACKS) ? et - 1 : 0;
+    seq_track_cfg_t etc;
+    seq_track_cfg_get(seqarp_edit_pattern(), trk, &etc);
+    ps.set(SEQ_PID_SEQ_STEPS, (float)etc.length, ParamOrigin::Preset);
+    s_edit_track_prev = et;
+    s_steps_prev = etc.length;
 }
 
 bool seqarp_pattern_import(int pattern, const void* buf, size_t len) {

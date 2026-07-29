@@ -238,6 +238,14 @@ bool wav_open(FILE* f, WavInfo* w) {
     }
     bool have_fmt = false;
     bool have_data = false;
+    /* Every chunk must leave the file further along than it started, and the
+     * walk stops the moment one does not. `sz` comes straight off an SD card
+     * and is not a length we get to trust: as a long it can be negative, and
+     * a chunk declaring 0xFFFFFFF8 seeks back exactly the 8 bytes the header
+     * read advanced, so the loop sat on one offset forever — fread kept
+     * succeeding on the same bytes and drum_ctl (prio 4, core 0) span without
+     * ever yielding, starving ble_cmd and persist underneath it. */
+    long pos = ftell(f);
     for (;;) {
         char id[4];
         uint32_t sz;
@@ -264,6 +272,9 @@ bool wav_open(FILE* f, WavInfo* w) {
             fseek(f, (long)sz, SEEK_CUR);
         }
         if (sz & 1) fseek(f, 1, SEEK_CUR); /* chunks are word-aligned */
+        const long next = ftell(f);
+        if (next <= pos) return false; /* malformed size: the walk cannot end */
+        pos = next;
     }
     return false;
 }

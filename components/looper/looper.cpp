@@ -523,6 +523,9 @@ std::atomic<int> s_arm_beats{0};   /* beats still to wait; 0 = not armed */
 std::atomic<bool> s_arm_fire{false}; /* countdown done, take not started yet */
 std::atomic<bool> s_arm_click{false};
 std::atomic<int> s_arm_track{0};
+/* Transport the arm interrupted, so a take that cannot start has somewhere
+ * honest to land. Plain int: armed and read on loop_ctl, nowhere else. */
+int s_arm_prev_mode = MODE_STOP;
 
 void ctl_arm_cancel() {
     const bool was_armed =
@@ -661,6 +664,7 @@ void ctl_handle_mode() {
                 const int beats = want_count ? 5 : (((4 - bib) % 4) + 1);
                 s_arm_fire.store(false, std::memory_order_relaxed);
                 s_arm_beats.store(beats, std::memory_order_release);
+                s_arm_prev_mode = s_ctl_mode; /* where a failed take lands */
                 s_ctl_mode = MODE_REC;
                 ps.set(LOOP_PID_ARMED, (float)beats, ParamOrigin::Internal);
                 ESP_LOGI(TAG, "track %d armed: %d beat(s)%s", trk + 1, beats,
@@ -892,7 +896,20 @@ void ctl_task(void* arg) {
             /* The countdown ran on the clock task; the take starts here,
              * where allocating is allowed. */
             if (!ctl_start_rec(s_arm_track.load(std::memory_order_acquire))) {
-                ESP_LOGW(TAG, "armed take could not start");
+                /* ctl_start_rec's own revert writes s_ctl_mode back into
+                 * loop.mode — and arming had already set that to rec, so the
+                 * revert was a no-op and the looper was left claiming to
+                 * record with no take open: rec pressed again did nothing
+                 * (want == s_ctl_mode), compaction stayed disabled, and
+                 * save/load answered "finish the recording first". Fall back
+                 * to the transport the arm interrupted. No command is issued:
+                 * the audio task was never told to record, so it is still in
+                 * exactly that state and only the shadow and the parameter
+                 * need to agree with it again. */
+                ESP_LOGW(TAG, "armed take could not start — back to %s",
+                         kModeNames[s_arm_prev_mode]);
+                s_ctl_mode = s_arm_prev_mode;
+                ps.set(LOOP_PID_MODE, (float)s_ctl_mode, ParamOrigin::Internal);
             }
         }
         if (flags & kFlagMono) ctl_mirror_maxlen();
