@@ -80,7 +80,10 @@ esp_err_t presets_request_seqset_load(int slot);
 esp_err_t presets_request_seqset_save(int slot);
 
 /* True if the slot holds a preset; copies its name out (both optional
- * outputs). Reads the file header on the caller's task for user slots. */
+ * outputs). Served from an in-RAM directory cache, so it is safe to call in a
+ * loop from a latency-sensitive task (BLE LIST_PRESETS walks all 80 slots of
+ * a bank). Only if the cache could not be allocated does it fall back to
+ * reading the file header on the caller's task. */
 bool presets_slot_info(int engine, int slot, char name[PRESETS_NAME_MAX],
                        bool* factory);
 

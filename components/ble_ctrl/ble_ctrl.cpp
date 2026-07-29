@@ -128,7 +128,12 @@ enum : uint8_t {
 };
 
 constexpr size_t kMaxFrame = 256; /* rx and tx ceiling, incl. 4 B header */
-constexpr int kCmdQueueDepth = 4;
+/* Deep enough to absorb the app's connect burst. Only PARAM_INFO is windowed
+ * app-side (three in flight); the GET_PARAM value sweep, LIST_PRESETS and the
+ * sequencer and kit probes ride outside that window, so the old depth of 4 was
+ * reachable by an ordinary discovery and cost a dropped frame plus a BUSY
+ * round trip. At 258 B per CmdBuf this is ~4 KB against ~1 KB. */
+constexpr int kCmdQueueDepth = 16;
 constexpr int kTaskPrio = 3; /* control plane, below preset (4) */
 constexpr int kTaskStack = 4096;
 constexpr TickType_t kFlushPeriod = pdMS_TO_TICKS(50); /* ~20 Hz events */

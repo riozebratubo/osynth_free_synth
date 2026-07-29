@@ -40,6 +40,8 @@
  */
 #include "presets.h"
 
+#include <dirent.h>
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -121,6 +123,33 @@ bool s_fs_ok = false;
 int s_cur_load = 0;         /* preset.load rests on the last loaded slot */
 int s_cur_save = kUserFirst;
 
+/* User-slot directory cache.
+ *
+ * presets_slot_info() used to fopen() the slot's file on the caller's task,
+ * so one LIST_PRESETS meant 64 LittleFS lookups — nearly all of them misses,
+ * but a miss still walks the directory. That ran inline on the BLE control
+ * task, which is single-threaded: the command queue behind it filled during
+ * the app's connect burst and a frame was dropped. The cache makes the call a
+ * memcpy. It is built from one directory scan at mount and updated in place by
+ * do_save(), the only thing that ever writes a preset file.
+ *
+ * Factory slots are not in it — their names are const data already.
+ *
+ * 4 engines x 64 user slots x 25 B is ~6 KB, so it is allocated rather than
+ * static, and a mount or allocation failure simply leaves it null: every
+ * lookup then takes the old per-call read, which is slow but correct. */
+struct SlotCache {
+    bool used;
+    char name[PRESETS_NAME_MAX];
+};
+constexpr int kUserPerEngine = PRESETS_PER_ENGINE - PRESETS_FACTORY_SLOTS;
+constexpr int kCacheEntries = SYNTH_ENGINE_COUNT * kUserPerEngine;
+SlotCache* s_cache = nullptr;
+int s_cache_count = -1; /* user presets on disk; -1 = no cache */
+/* do_save() writes on the preset task while BLE and the local UI read; the
+ * critical section is a 24 B copy, in the house style (seq_model, drums). */
+portMUX_TYPE s_cache_lock = portMUX_INITIALIZER_UNLOCKED;
+
 /* preset-task-only scratch (single consumer — no reentrancy) */
 uint16_t s_ids[ParamStore::kMaxParams];
 preset_pair_t s_pairs[ParamStore::kMaxParams];
@@ -140,6 +169,102 @@ void seq_path(char* out, size_t n, int slot) {
 
 void set_path(char* out, size_t n, int slot) {
     snprintf(out, n, "%s/set%d.oss", kBasePath, slot);
+}
+
+/* ---- user-slot directory cache ---------------------------------------- */
+
+/* Reads a user slot's header off the filesystem. False for a missing file and
+ * for anything that is not a preset of this version, so a stray or truncated
+ * file never shows up in a listing. */
+bool read_slot_name(int engine, int slot, char name[PRESETS_NAME_MAX]) {
+    char path[40];
+    preset_path(path, sizeof(path), engine, slot);
+    FILE* fp = fopen(path, "rb");
+    if (fp == nullptr) return false;
+    PresetHdr h;
+    const bool ok = fread(&h, sizeof(h), 1, fp) == 1 &&
+                    h.magic == kPresetMagic && h.version == 1;
+    fclose(fp);
+    if (!ok) return false;
+    if (name != nullptr) {
+        h.name[PRESETS_NAME_MAX - 1] = '\0'; /* the file need not terminate it */
+        strlcpy(name, h.name, PRESETS_NAME_MAX);
+    }
+    return true;
+}
+
+int cache_index(int engine, int slot) {
+    return engine * kUserPerEngine + (slot - kUserFirst);
+}
+
+/* Both callers have already range-checked engine and slot. */
+void cache_store(int engine, int slot, const char* name) {
+    if (s_cache == nullptr) return;
+    char copy[PRESETS_NAME_MAX];
+    strlcpy(copy, name, sizeof(copy));
+    SlotCache* e = &s_cache[cache_index(engine, slot)];
+    taskENTER_CRITICAL(&s_cache_lock);
+    const bool was_used = e->used;
+    memcpy(e->name, copy, sizeof(copy));
+    e->used = true;
+    taskEXIT_CRITICAL(&s_cache_lock);
+    if (!was_used && s_cache_count >= 0) ++s_cache_count;
+}
+
+bool cache_lookup(int engine, int slot, char name[PRESETS_NAME_MAX]) {
+    const SlotCache* e = &s_cache[cache_index(engine, slot)];
+    char copy[PRESETS_NAME_MAX];
+    taskENTER_CRITICAL(&s_cache_lock);
+    const bool used = e->used;
+    if (used) memcpy(copy, e->name, sizeof(copy));
+    taskEXIT_CRITICAL(&s_cache_lock);
+    if (used && name != nullptr) memcpy(name, copy, sizeof(copy));
+    return used;
+}
+
+/* "p<engine>_<slot>.osp". Hand-parsed rather than sscanf'd: sscanf reports a
+ * match on the two numbers whatever follows them, so a sequence file would
+ * pass, and %n (which would catch that) is not there under nano formatting. */
+bool parse_preset_name(const char* fn, int* engine, int* slot) {
+    if (fn[0] != 'p') return false;
+    char* end = nullptr;
+    const long e = strtol(fn + 1, &end, 10);
+    if (end == fn + 1 || *end != '_') return false;
+    const char* s = end + 1;
+    const long sl = strtol(s, &end, 10);
+    if (end == s || strcmp(end, ".osp") != 0) return false;
+    if (e < 0 || e >= SYNTH_ENGINE_COUNT) return false;
+    if (sl < kUserFirst || sl >= PRESETS_PER_ENGINE) return false;
+    *engine = (int)e;
+    *slot = (int)sl;
+    return true;
+}
+
+/* One readdir pass; only files that exist cost a header read, so a board with
+ * no user presets pays a single directory scan and nothing else. Runs once,
+ * from presets_init(), before the audio task exists. */
+void cache_build(void) {
+    s_cache_count = 0;
+    DIR* dir = opendir(kBasePath);
+    if (dir == nullptr) {
+        ESP_LOGW(TAG, "cannot scan %s — listings fall back to per-slot reads",
+                 kBasePath);
+        free(s_cache);
+        s_cache = nullptr;
+        s_cache_count = -1;
+        return;
+    }
+    const struct dirent* de = nullptr;
+    while ((de = readdir(dir)) != nullptr) {
+        int engine = 0, slot = 0;
+        if (!parse_preset_name(de->d_name, &engine, &slot)) continue;
+        char name[PRESETS_NAME_MAX];
+        /* opened anyway: the name lives in the header, and the check there
+         * is what keeps a half-written file out of the listing */
+        if (!read_slot_name(engine, slot, name)) continue;
+        cache_store(engine, slot, name);
+    }
+    closedir(dir);
 }
 
 /* State that is not part of a patch — see the file header. */
@@ -355,6 +480,7 @@ void do_save(int linear, const char* name_in) {
                         (size_t)count * sizeof(preset_pair_t))) {
             break;
         }
+        cache_store(engine, slot, h.name); /* the listing is served from RAM */
         ESP_LOGI(TAG, "saved %s/%d '%s' (%d non-default values, %u B)",
                  engine_name(engine), slot, h.name, count,
                  (unsigned)(sizeof(h) + (size_t)count * sizeof(preset_pair_t)));
@@ -749,6 +875,14 @@ extern "C" esp_err_t presets_init(void) {
     if (mnt == ESP_OK) {
         s_fs_ok = true;
         esp_littlefs_info(kPartLabel, &total, &used);
+        s_cache = (SlotCache*)calloc(kCacheEntries, sizeof(SlotCache));
+        if (s_cache == nullptr) {
+            ESP_LOGW(TAG, "no room for the %u B directory cache — listings "
+                     "will read every slot",
+                     (unsigned)(kCacheEntries * sizeof(SlotCache)));
+        } else {
+            cache_build();
+        }
     } else {
         ESP_LOGW(TAG, "littlefs mount failed (%s) — factory presets only, "
                  "saving disabled", esp_err_to_name(mnt));
@@ -788,11 +922,12 @@ extern "C" esp_err_t presets_init(void) {
 
     ESP_LOGI(TAG,
              "up: littlefs %u/%u KB used, %d factory + %d user presets x %d "
-             "engines, %d seq slots, %d set slots "
+             "engines, %d seq slots, %d set slots, %d saved (cached) "
              "(preset.load/.save/.seq.*/.seqset.*)",
              (unsigned)(used / 1024), (unsigned)(total / 1024),
              PRESETS_FACTORY_SLOTS, PRESETS_PER_ENGINE - PRESETS_FACTORY_SLOTS,
-             SYNTH_ENGINE_COUNT, PRESETS_SEQ_SLOTS, PRESETS_SET_SLOTS);
+             SYNTH_ENGINE_COUNT, PRESETS_SEQ_SLOTS, PRESETS_SET_SLOTS,
+             s_cache_count);
     return ESP_OK;
 }
 
@@ -852,18 +987,6 @@ extern "C" bool presets_slot_info(int engine, int slot,
         return true;
     }
     if (!s_fs_ok) return false;
-    char path[40];
-    preset_path(path, sizeof(path), engine, slot);
-    FILE* fp = fopen(path, "rb");
-    if (fp == nullptr) return false;
-    PresetHdr h;
-    const bool ok = fread(&h, sizeof(h), 1, fp) == 1 &&
-                    h.magic == kPresetMagic && h.version == 1;
-    fclose(fp);
-    if (!ok) return false;
-    if (name != nullptr) {
-        h.name[PRESETS_NAME_MAX - 1] = '\0';
-        strlcpy(name, h.name, PRESETS_NAME_MAX);
-    }
-    return true;
+    if (s_cache != nullptr) return cache_lookup(engine, slot, name);
+    return read_slot_name(engine, slot, name); /* no cache: read the header */
 }
