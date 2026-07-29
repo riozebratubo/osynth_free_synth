@@ -115,6 +115,29 @@ bool ParamStore::set(uint16_t id, float value, ParamOrigin origin) {
     Entry* e = entryFor(id);
     if (e == nullptr) return false;
 
+    /* Non-finite values have to be refused before the clamp, because the
+     * clamp cannot catch them: every comparison against NaN is false, so
+     * `value < min` and `value > max` both fail and the NaN lands in the
+     * store — where it latches.
+     *
+     * master.volume is the worst case. audio_io slews the gain with
+     * `d = target - s_gain`, so one NaN block leaves s_gain NaN and every
+     * later block computes `target - NaN` — the output never recovers, not
+     * even after the parameter is set back to something sane, and persist
+     * (S25) writes the NaN to NVS during the silence that follows, so a
+     * reboot restores it. An Exp-curve engine parameter poisons its
+     * block smoother (synth_smooth.h multiplies through it) until the engine
+     * is re-bound, and an Enum one makes the `(int)` casts the render path
+     * does on it undefined — engine_wavetable indexes wt_tables with one.
+     *
+     * This is reachable input, not a theoretical case: BLE SET_PARAM carries
+     * four raw bytes straight into a float (ble_ctrl.cpp rdf32), and preset
+     * and set files are read back off the filesystem the same way. */
+    if (!std::isfinite(value)) {
+        ESP_LOGW(TAG, "set: non-finite value for 0x%04x ignored", id);
+        return false;
+    }
+
     const ParamDesc& d = e->desc;
     if (d.type != ParamType::Float) value = std::round(value);
     if (value < d.min) value = d.min;

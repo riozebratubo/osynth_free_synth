@@ -701,6 +701,16 @@ void seq_song_set(int index, const seq_song_entry_t* in) {
     if (e.repeats < 1) e.repeats = 1;
     if (e.repeats > 64) e.repeats = 64;
     taskENTER_CRITICAL(&s_lock);
+    /* Writing past the end extends the chain, so the entries skipped over have
+     * to be filled the way seq_song_set_length() fills them. They were left as
+     * they lay — zero on a fresh boot, which is `repeats` 0 — and
+     * seq_play.cpp's pattern_boundary() states in a comment that both setters
+     * floor repeats at 1 and advances on `++repeat >= e.repeats`, so a gap
+     * entry burned a pass on pattern 1 that nobody put in the chain. */
+    for (int i = s_song_len; i < index; ++i) {
+        s_song[i].pattern = 0;
+        s_song[i].repeats = 1;
+    }
     s_song[index] = e;
     if (index >= s_song_len) s_song_len = index + 1;
     taskEXIT_CRITICAL(&s_lock);

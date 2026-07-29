@@ -408,6 +408,14 @@ void fire_step(int track, const seq_track_cfg_t& cfg,
     seq_step_t st;
     seq_step_get(s_pattern, track, index, &st);
 
+    /* A ratchet belongs to the step that started it. fire_step only ever
+     * *set* rat_left, never cleared it, and a step can open before the
+     * previous one's nominal slot is over — micro-timing down to -50 %, swing
+     * under 50 on an odd step, humanise — so an eight-ratchet step followed by
+     * an early one still owed hits when the new step began, and kept
+     * retriggering the previous note on top of it. */
+    t.rat_left = 0;
+
     apply_locks(track, s_pattern, index);
 
     if (st.vel != 0 && (st.flags & SEQ_STEP_F_MUTE) == 0 && track_audible(track)) {
@@ -573,6 +581,19 @@ void seq_play_tick(void) {
     for (int i = 0; i < SEQ_TRACKS; ++i) {
         seq_track_cfg_t cfg;
         seq_track_cfg_get(s_pattern, i, &cfg);
+        /* Track 1 defines the pattern's bar, and its length and division are
+         * editable while the transport runs — the seq.steps knob (poll_edges),
+         * OP_SEQ_TRACK, the euclid generator. s_pattern_ticks was only rebuilt
+         * on start and on a pattern switch, so after any of those edits the
+         * boundary that advances the song chain and lands a queued pattern
+         * change kept firing on the *old* bar length: shorten track 1 from 64
+         * steps to 16 and the next queued pattern still waited four bars.
+         * The config is already in hand here, so keeping it current is free. */
+        if (i == 0) {
+            const int32_t span =
+                (int32_t)seq_track_length(s_pattern, 0) * seq_div_ticks(cfg.div);
+            s_pattern_ticks = span > 0 ? span : 1;
+        }
         tick_ratchets(i, cfg);
 
         TrackState& t = s_trk[i];
