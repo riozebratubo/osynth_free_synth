@@ -1378,6 +1378,23 @@ int gap_event(struct ble_gap_event* ev, void*) {
                 start_advertising();
             }
             return 0;
+        /* Purely informational, and the synth asks for nothing: the central
+         * owns these. Worth logging because the interval is what every
+         * request/response on this protocol is really priced in — a discovery
+         * pass is made of round trips, and this says what one costs. */
+        case BLE_GAP_EVENT_CONN_UPDATE: {
+            struct ble_gap_conn_desc desc;
+            if (ble_gap_conn_find(ev->conn_update.conn_handle, &desc) == 0) {
+                /* itvl is in 1.25 ms units; print the ms as x.xx */
+                const unsigned q = (unsigned)desc.conn_itvl * 125u;
+                ESP_LOGI(TAG,
+                         "conn params: itvl %u.%02u ms, latency %u, timeout "
+                         "%u ms",
+                         q / 100u, q % 100u, (unsigned)desc.conn_latency,
+                         (unsigned)desc.supervision_timeout * 10u);
+            }
+            return 0;
+        }
         case BLE_GAP_EVENT_DISCONNECT:
             s_conn.store(BLE_HS_CONN_HANDLE_NONE, std::memory_order_relaxed);
             s_evt_sub.store(false, std::memory_order_relaxed);

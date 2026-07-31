@@ -111,6 +111,20 @@ std::atomic<float> s_mute_now{1.0f};
 float s_mute_gain = 1.0f;               /* audio-task local */
 constexpr float kMuteStep = 0.125f;     /* per block: full ramp in 8 (~11 ms) */
 
+/* Blocks rendered with no engine bound (audio-task local). While a switch is
+ * in flight the ring is *held*, not discarded, so a note event that lands in
+ * that window is delivered to the new engine instead of vanishing — a note-off
+ * arriving there used to be dropped silently, which left the key that sent it
+ * with no way to stop its note. The hold is bounded because "no engine bound"
+ * is not always transient: the switch's restore path can fail outright and
+ * leave the synth with none, and in that state events must go back to being
+ * discarded rather than filling the ring and warning once per push. Two
+ * seconds clears the switch protocol's own ceiling (250 ms mute + 500 ms
+ * detach + init) several times over. */
+uint32_t s_unbound_blocks = 0;
+constexpr uint32_t kUnboundHoldBlocks =
+    (uint32_t)(2 * SYNTH_SAMPLE_RATE / SYNTH_BLOCK_SIZE);
+
 constexpr float kVoiceGain = 1.0f / SYNTH_VOICES;
 
 /* Cached engine-common (0x01xx) value pointers, set in init. */
@@ -427,14 +441,21 @@ extern "C" void SYNTH_RENDER_IRAM voice_manager_render(float* out_l,
     (void)ctx;
     const synth_engine_t* eng = s_engine.load(std::memory_order_acquire);
     if (eng == nullptr) {
-        /* no engine bound: discard events so the ring can't fill, stay silent */
-        s_evt_tail.store(s_evt_head.load(std::memory_order_acquire),
-                         std::memory_order_release);
+        /* No engine bound. Stay silent, and hold the ring for the new engine
+         * for as long as this could still be a switch in flight; past that,
+         * discard so it can't fill (see kUnboundHoldBlocks). */
+        if (s_unbound_blocks < kUnboundHoldBlocks) {
+            ++s_unbound_blocks;
+        } else {
+            s_evt_tail.store(s_evt_head.load(std::memory_order_acquire),
+                             std::memory_order_release);
+        }
         s_active.store(0, std::memory_order_relaxed);
         apply_mute(out_l, out_r, frames);
         s_render_seq.fetch_add(1, std::memory_order_release);
         return;
     }
+    s_unbound_blocks = 0;
 
     drain_events(eng);
 
