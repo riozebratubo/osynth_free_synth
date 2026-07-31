@@ -140,7 +140,9 @@ const ParamDesc kParams[] = {
     {LOOP_PID_RECTRK, "loop.rectrk", ParamType::Int, ParamCurve::Linear,
      0.0f, (float)LOOP_TRACKS, 0.0f, nullptr, 0}, /* read-only, 0 = none */
     {LOOP_PID_MONO, "loop.mono", ParamType::Enum, ParamCurve::Linear,
-     0.0f, 1.0f, 0.0f, kMonoNames, 2}, /* format of the *next* loop set */
+     0.0f, 1.0f, 1.0f, kMonoNames, 2}, /* format of the *next* loop set;
+                                        * defaults on — length beats the
+                                        * stereo image for a loop pedal */
     {LOOP_PID_MAXLEN, "loop.maxlen", ParamType::Float, ParamCurve::Linear,
      0.0f, kLoopAbsMaxS, kLoopBaseCapS, nullptr, 0}, /* read-only live cap;
                                                       * default = base cap,
@@ -155,8 +157,11 @@ const ParamDesc kParams[] = {
     {LOOP_PID_ARMED, "loop.armed", ParamType::Int, ParamCurve::Linear,
      0.0f, 8.0f, 0.0f, nullptr, 0}, /* read-only: beats until rec starts */
     {LOOP_PID_TRACKMODE, "loop.tracks", ParamType::Enum, ParamCurve::Linear,
-     0.0f, 1.0f, 0.0f, kTracksNames, 2}, /* cap/UI policy for the *next*
-                                          * set; never blocks loop.track */
+     0.0f, 1.0f, 1.0f, kTracksNames, 2}, /* cap/UI policy for the *next*
+                                          * set; never blocks loop.track.
+                                          * Defaults to 4 — with mono also
+                                          * on the out-of-the-box cap is the
+                                          * 160 s ceiling */
     {LOOP_PID_LEVEL(0), "loop.lvl1", ParamType::Float, ParamCurve::Linear,
      0.0f, 1.0f, 1.0f, nullptr, 0},
     {LOOP_PID_LEVEL(1), "loop.lvl2", ParamType::Float, ParamCurve::Linear,
@@ -202,10 +207,13 @@ std::atomic<uint8_t*> s_buf[LOOP_TRACKS]; /* ADPCM bytes (stereo 1 B/frame,
 size_t s_cap_bytes[LOOP_TRACKS];          /* bytes allocated; loop_ctl only —
                                            * bytes, not frames: the frame
                                            * size follows the set format */
-std::atomic<bool> s_mono{false};          /* live set format; loop_ctl
+std::atomic<bool> s_mono{true};           /* live set format; loop_ctl
                                            * latches it while audio is
-                                           * detached or the set is empty */
-std::atomic<uint32_t> s_rec_limit{cap_frames(false, false)};
+                                           * detached or the set is empty.
+                                           * Seeded from the registered
+                                           * loop.mono/loop.tracks defaults
+                                           * (both on) until it does */
+std::atomic<uint32_t> s_rec_limit{cap_frames(true, true)};
                                           /* first-take ceiling in frames —
                                            * the policy cap, or less after
                                            * the alloc fallback; loop_ctl
@@ -975,6 +983,11 @@ extern "C" esp_err_t looper_init(void) {
         return ESP_FAIL;
     }
     if (ps.addListener(param_listener, nullptr) < 0) return ESP_FAIL;
+    /* loop.mono and loop.tracks default on, so the live cap out of the box is
+     * not loop.maxlen's registered default (the base cap — what clients
+     * multiply per enabled toggle). Mirror once so the value a fresh app read
+     * gets is the real one, without waiting for a toggle. */
+    ctl_mirror_maxlen();
     /* The seq/arp clock drives loop.sync and loop.countin. seqarp_init() runs
      * before this (main.cpp), so the subscription is live from here on. */
     seqarp_set_beat_callback(beat_cb, nullptr);

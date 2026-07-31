@@ -333,7 +333,9 @@ ApplicationWindow {
                 anchors.top: parent.top
                 anchors.left: parent.left
                 anchors.right: parent.right
-                height: navRow.implicitHeight + 6
+                // Exactly the buttons' height: the dock is their background, and
+                // any slack here reads as a dead strip under the icons.
+                height: navRow.implicitHeight
                 color: Material.theme === Material.Dark ? "#14FFFFFF" : "#0A000000"
                 z: 2
 
@@ -355,8 +357,18 @@ ApplicationWindow {
                             // Compact padding: the stacked icon+label content
                             // keeps the dock close to its old single-line height.
                             padding: 4
+                            // Height follows that content. Material sizes a
+                            // ToolButton's background to the 48 px touch target,
+                            // which is taller than an icon over a small label —
+                            // and a Column packs to the top, so the slack all
+                            // ended up as empty space along the dock's bottom
+                            // edge. Width is untouched, and 40-odd px high is
+                            // still a comfortable tap.
+                            implicitHeight: navBtnContent.implicitHeight
+                                            + navBtn.topPadding + navBtn.bottomPadding
                             onClicked: swipeView.currentIndex = navBtn.index
                             contentItem: Column {
+                                id: navBtnContent
                                 spacing: 1
                                 Label {
                                     anchors.horizontalCenter: parent.horizontalCenter
@@ -390,9 +402,22 @@ ApplicationWindow {
                 anchors.bottomMargin: Math.max(keyboard.visible ? keyboard.height : 0,
                                                drumPads.visible ? drumPads.height : 0)
 
-                // Set once the pages exist, so an out-of-range stored index can
-                // be clamped against the real page count.
-                Component.onCompleted: currentIndex = mainWindow.startupIndex()
+                Component.onCompleted: {
+                    // No page-change animation, whichever way the page is
+                    // changed. Every route — the nav dock, the toolbar's
+                    // prev/next arrows, the startup index, the settle after a
+                    // swipe — ends in a currentIndex write, and SwipeView runs
+                    // that through its contentItem (a ListView) with a 250 ms
+                    // highlight move. Zeroing the duration is the only handle
+                    // on it: the style's contentItem cannot be reached
+                    // declaratively without replacing it wholesale. Swiping
+                    // still works — the drag tracks the finger as before, it
+                    // just lands instead of gliding.
+                    contentItem.highlightMoveDuration = 0
+                    // Set once the pages exist, so an out-of-range stored index
+                    // can be clamped against the real page count.
+                    currentIndex = mainWindow.startupIndex()
+                }
                 // Remembered for the "Last used" startup option. Written on every
                 // page change, which is what makes it survive a crash or a kill
                 // as well as a clean exit.

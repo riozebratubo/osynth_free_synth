@@ -65,7 +65,10 @@ extern "C" {
  * ceiling — clients derive any combo as default x2 per enabled toggle.
  * During a fallback-capped first take loop.maxlen shows the achieved
  * ceiling instead. loop.tracks does not restrict loop.track writes — it
- * is a cap/UI policy, not an enforcement (state, not patch). */
+ * is a cap/UI policy, not an enforcement (state, not patch). Both default
+ * on, so a fresh boot records mono, 4-track and caps at the 160 s ceiling;
+ * loop.maxlen's *registered* default stays the base cap for the client-side
+ * derivation above and its value is mirrored to the real cap at init. */
 #define LOOP_PID_MONO   0x0609 /* loop.mono   enum stereo|mono               */
 #define LOOP_PID_MAXLEN 0x060A /* loop.maxlen float seconds, read-only       */
 #define LOOP_PID_TRACKMODE 0x060B /* loop.tracks enum 8|4                    */
