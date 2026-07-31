@@ -81,6 +81,17 @@ enum Op : quint8 {
   OP_PING          = 0x7F,
 };
 
+// Ops that carry a live gesture — a key, a pad, a knob — as opposed to the
+// bulk reads a discovery pass fires. On Windows every GATT call is a blocking
+// hop onto one WinRT MTA thread, so a strictly-FIFO write path puts a keypress
+// behind however many listing frames happen to be queued: an engine switch
+// used to leave notes stuck on for tens of seconds because their note-off sat
+// behind the re-discovery burst. BluetoothManager gives these their own lane.
+inline constexpr bool isRealtimeOp(quint8 op) {
+  return op == OP_NOTE_ON || op == OP_NOTE_OFF || op == OP_DRUM_TRIG ||
+         op == OP_SET_PARAM;
+}
+
 // Response opcodes are the request op | RESPONSE_FLAG; events sit at 0xC0+.
 inline constexpr quint8 RESPONSE_FLAG = 0x80;
 enum Evt : quint8 {

@@ -76,6 +76,10 @@ class BluetoothManager : public IBluetoothManager {
   // onto the WinRT MTA thread, so neither may run on the GUI thread.
   void writeBlocking(const QByteArray& data, bool withResponse);
 
+  // Takes the next frame off the priority queue and writes it. Runs on
+  // m_writeThread, once per frame write() enqueued.
+  void drainWriteQueue();
+
   // Mirrors of the peripheral's state for the QML property accessors, written
   // by the worker as the connection comes up and goes down.
   void publishConnectionState(bool connected, const QString& name,
@@ -113,10 +117,29 @@ class BluetoothManager : public IBluetoothManager {
   QString m_deviceAddressCache;
 
   // Serialises CTRL writes off the GUI thread. A plain QObject on its own
-  // thread: invokeMethod posts each write to its event queue, so ordering is
-  // preserved and the GUI thread never waits on the radio.
+  // thread: invokeMethod posts a drain step per frame, so the GUI thread never
+  // waits on the radio.
   QThread m_writeThread;
   QObject* m_writeCtx = nullptr;
+
+  // Two-lane write queue, drained by drainWriteQueue() on m_writeThread.
+  //
+  // The frames themselves used to ride the invokeMethod, which made the write
+  // path strictly FIFO — and since every SimpleBLE call blocks for a full hop
+  // onto the single WinRT MTA thread (a write_request for an ATT round trip on
+  // top), a keypress queued behind a discovery burst waited for all of it. An
+  // engine switch is exactly that case: notes played right after one had their
+  // note-off stranded behind ~80 listing frames and the synth droned until the
+  // link dropped. Live gestures (SynthProto::isRealtimeOp) now go in their own
+  // lane and are always taken first. Ordering *within* a lane is preserved,
+  // which is what the paced SET_PARAM queue and the chunked listings rely on.
+  struct PendingWrite {
+    QByteArray data;
+    bool withResponse = false;
+  };
+  QMutex m_writeQueueMutex;
+  QList<PendingWrite> m_writeHigh;
+  QList<PendingWrite> m_writeLow;
 
   QStringList m_lastConnectedDevices;
   QVariantList m_discoveredDevices;

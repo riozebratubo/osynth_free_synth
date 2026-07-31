@@ -39,6 +39,17 @@ BluetoothManager::BluetoothManager(QObject* parent)
     deviceQueue{},
     m_scanning{false},
     addressToDeviceMap{} {
+  // Generous: it only has to beat "never", and firing it early would issue a
+  // second write while the first is genuinely still in flight — the exact
+  // thing the queue exists to prevent.
+  m_writeWatchdog.setSingleShot(true);
+  m_writeWatchdog.setInterval(1500);
+  connect(&m_writeWatchdog, &QTimer::timeout, this, [this]() {
+    if (!m_writeInFlight) return;
+    qWarning() << "bt | CTRL write never completed; releasing the queue";
+    onWriteSettled();
+  });
+
   if (Settings::instance().setting("bluetooth_enabled") != "false") {
     initializeBt();
   }
@@ -338,6 +349,9 @@ void BluetoothManager::setIsConnected(bool is) {
 }
 
 void BluetoothManager::teardownConnection() {
+  // Before the service goes: anything still queued belongs to a link that is
+  // ending, and the firmware runs voice_manager_all_notes_off() on disconnect.
+  clearWriteQueue();
   if (service) {
     service->disconnect(this);
     service->deleteLater();
@@ -423,6 +437,27 @@ void BluetoothManager::discover(QString deviceAddress) {
                       if (c.uuid() == infoUuid) emit infoRead(value);
                     });
 
+            // The write queue's clock. Without this the queue would only ever
+            // advance on its watchdog.
+            connect(service, &QLowEnergyService::characteristicWritten, this,
+                    [this](const QLowEnergyCharacteristic& c, const QByteArray&) {
+                      if (c.uuid() == ctrlUuid) onWriteSettled();
+                    });
+
+            // Nothing used to listen here, which is why a refused write was
+            // invisible: the frame was dropped, the firmware never saw it, and
+            // the app went on waiting for a response that could not come.
+            connect(service, &QLowEnergyService::errorOccurred, this,
+                    [this](QLowEnergyService::ServiceError e) {
+                      qWarning() << "bt | Service error:" << e;
+                      if (e == QLowEnergyService::CharacteristicWriteError) {
+                        // The frame is gone. Release the queue so the rest of
+                        // it still goes out — the controller retries what
+                        // matters off the BUSY/timeout paths it already has.
+                        onWriteSettled();
+                      }
+                    });
+
             service->discoverDetails();
           });
 
@@ -474,13 +509,56 @@ void BluetoothManager::onServiceDetailsDiscovered() {
 }
 
 void BluetoothManager::write(const QByteArray& data, bool withResponse) {
-  if (not service) return;
+  if (not service or data.isEmpty()) return;
+  // Byte 0 is the opcode (SynthProto frame header). Live gestures skip the
+  // listing backlog; see the note on the lanes in the header.
+  const bool live = SynthProto::isRealtimeOp(quint8(data.at(0)));
+  (live ? m_writeHigh : m_writeLow).append(PendingWrite{data, withResponse});
+  // A link that has stopped draining must not accumulate stale listing frames.
+  // The live lane is never capped — dropping a note-off is the one outcome
+  // this whole path exists to prevent.
+  while (m_writeLow.size() > 256) m_writeLow.removeFirst();
+  pumpWriteQueue();
+}
+
+void BluetoothManager::pumpWriteQueue() {
+  if (m_writeInFlight) return;
+  if (not service) {
+    clearWriteQueue();
+    return;
+  }
   const QLowEnergyCharacteristic ctrlChar = service->characteristic(ctrlUuid);
-  if (not ctrlChar.isValid()) return;
-  service->writeCharacteristic(
-      ctrlChar, data,
-      withResponse ? QLowEnergyService::WriteWithResponse
-                   : QLowEnergyService::WriteWithoutResponse);
+  if (not ctrlChar.isValid()) {
+    clearWriteQueue();
+    return;
+  }
+
+  PendingWrite next;
+  if (not m_writeHigh.isEmpty()) {
+    next = m_writeHigh.takeFirst();
+  } else if (not m_writeLow.isEmpty()) {
+    next = m_writeLow.takeFirst();
+  } else {
+    return;
+  }
+
+  m_writeInFlight = true;
+  m_writeWatchdog.start();
+  service->writeCharacteristic(ctrlChar, next.data,
+                               QLowEnergyService::WriteWithResponse);
+}
+
+void BluetoothManager::onWriteSettled() {
+  m_writeWatchdog.stop();
+  m_writeInFlight = false;
+  pumpWriteQueue();
+}
+
+void BluetoothManager::clearWriteQueue() {
+  m_writeWatchdog.stop();
+  m_writeInFlight = false;
+  m_writeHigh.clear();
+  m_writeLow.clear();
 }
 
 void BluetoothManager::finish() {

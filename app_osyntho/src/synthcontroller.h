@@ -436,7 +436,16 @@ class SynthController : public QObject, public DatabaseClient {
   int maxStepsPerFrame() const;
 
   void resetState();
-  void beginDiscovery();          // PARAM_INFO 0xFFFF
+
+  // How much a discovery pass has to re-read. A fresh connection knows
+  // nothing, so it reads everything. An engine switch only re-registers the
+  // engine-specific 0x02xx range — the sequencer, the kit, the patch graph and
+  // the song chain are all untouched by it — so re-reading them was pure cost:
+  // ~80 blocking frames on the Windows write path, during which nothing else
+  // (a note-off, say) could get out. EngineParams keeps the parameter work and
+  // the per-engine preset list, and skips the rest.
+  enum class DiscoveryScope { Full, EngineParams };
+  void beginDiscovery(DiscoveryScope scope = DiscoveryScope::Full);
   void onParamListComplete();     // ids known: register, go ready, start info pump
   void pumpInfoRequests();        // flow-controlled: keeps a small window in flight
   void sendInfoRequest(quint16 id);  // one PARAM_INFO, tracked for flow control
@@ -444,6 +453,8 @@ class SynthController : public QObject, public DatabaseClient {
   void onInfoBadArg(quint8 seq);  // BAD_ARG: id not registered; stop retrying it
   void finishDiscovery();         // all infos in (or budget spent): stop the pump
   void requestAllParamValues();   // GET_PARAM for every registered id
+  void requestParamValues(const QList<quint16>& ids);  // GET_PARAM, batched
+  QList<quint16> engineParamIds() const;  // the registered 0x02xx ids
   void flushPendingSets();        // coalesced SET_PARAM batch
   void scheduleParamsDiscovered(); // coalesce the paramsDiscovered signal
 
@@ -531,6 +542,7 @@ class SynthController : public QObject, public DatabaseClient {
   qint64 m_discoveryStartMs = 0;        // for the overall safety budget
   QTimer m_infoRequestTimer;            // drives the flow-controlled pump
   bool m_discovering = false;
+  DiscoveryScope m_discoveryScope = DiscoveryScope::Full;
   QTimer m_discoveryTimer;              // list-response watchdog (single-shot)
   int m_listRetries = 0;                // remaining list-request resends
 

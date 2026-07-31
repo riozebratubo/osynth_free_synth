@@ -67,7 +67,29 @@ Rectangle {
     radius: 8
     color: Material.theme === Material.Dark ? "#1AFFFFFF" : "#0D000000"
 
-    function refresh() { ids = Synth.paramIdsByPrefix(prefix) }
+    // Only assign when the set actually changed. `ids` is the Repeater's model,
+    // and assigning a list to a var property always fires the change signal
+    // even when the contents are identical — which tears down and rebuilds
+    // every ParamControl in the card. paramsDiscovered arrives up to ~7×/s for
+    // the length of a discovery pass, so an unguarded refresh had every visible
+    // group rebuilding its whole control set that often, on the GUI thread, for
+    // the seconds the pass takes. For groups outside the engine range (the
+    // common case on an engine switch) the answer is unchanged every time.
+    function refresh() {
+        const next = Synth.paramIdsByPrefix(prefix)
+        if (next.length === ids.length) {
+            let same = true
+            for (let i = 0; i < next.length; ++i) {
+                if (next[i] !== ids[i]) {
+                    same = false
+                    break
+                }
+            }
+            if (same)
+                return
+        }
+        ids = next
+    }
     Component.onCompleted: refresh()
 
     Connections {

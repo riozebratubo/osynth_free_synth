@@ -17,6 +17,12 @@ using namespace std::chrono_literals;
 
 constexpr int rescanRetryInterval = 2000;
 
+// Ceiling on the low-priority (listing/discovery) write lane. A full discovery
+// pass is well under a hundred frames, so this only ever engages when the link
+// has stopped draining at all — at which point the oldest frames are the least
+// worth keeping.
+constexpr int kMaxQueuedWrites = 256;
+
 // osynth GATT service + characteristics (see docs/BLE_PROTOCOL.md).
 static const std::string serviceUuidStr = SynthProto::kServiceUuid;
 static const std::string ctrlUuidStr = SynthProto::kCtrlUuid;   // Write / Write-no-response
@@ -482,20 +488,60 @@ void BluetoothManager::setScanning(bool newScanning) {
 // acknowledges — a full ATT round trip, tens of milliseconds at a typical
 // connection interval — and the controller issues these in bursts
 // (refreshSequencer sends five, writeSteps up to eleven). Doing that inline
-// froze the UI for the length of the burst. Hand it to the write thread and
-// return immediately; ordering is preserved because that thread drains its
-// event queue in post order.
+// froze the UI for the length of the burst. Queue it and return immediately;
+// the write thread does the blocking part.
 void BluetoothManager::write(const QByteArray& data, bool withResponse) {
-  if (m_writeCtx == nullptr) return;
+  if (m_writeCtx == nullptr || data.isEmpty()) return;
+  // Byte 0 is the opcode (SynthProto frame header).
+  const bool live = SynthProto::isRealtimeOp(quint8(data.at(0)));
+  {
+    QMutexLocker lock(&m_writeQueueMutex);
+    (live ? m_writeHigh : m_writeLow).append(PendingWrite{data, withResponse});
+    // A link that has gone unresponsive must not grow this without bound: the
+    // writes are already stale by the time it recovers. Live gestures are not
+    // capped — that lane only ever holds a handful of frames, and dropping a
+    // note-off is the one thing this whole path exists to prevent.
+    while (m_writeLow.size() > kMaxQueuedWrites) m_writeLow.removeFirst();
+  }
   QMetaObject::invokeMethod(
-      m_writeCtx, [this, data, withResponse]() { writeBlocking(data, withResponse); },
-      Qt::QueuedConnection);
+      m_writeCtx, [this]() { drainWriteQueue(); }, Qt::QueuedConnection);
+}
+
+// One posted step per queued frame, each taking the highest-priority frame
+// pending at the moment it runs — so a note enqueued during a discovery burst
+// goes out on the next step rather than after the rest of the burst.
+void BluetoothManager::drainWriteQueue() {
+  PendingWrite next;
+  {
+    QMutexLocker lock(&m_writeQueueMutex);
+    // Nothing queued for a link that is down: the firmware runs
+    // voice_manager_all_notes_off() on disconnect, and the listings would be
+    // answered into a closed connection.
+    if (!m_connectedCache.load()) {
+      m_writeHigh.clear();
+      m_writeLow.clear();
+      return;
+    }
+    if (!m_writeHigh.isEmpty()) {
+      next = m_writeHigh.takeFirst();
+    } else if (!m_writeLow.isEmpty()) {
+      next = m_writeLow.takeFirst();
+    } else {
+      return;
+    }
+  }
+  writeBlocking(next.data, next.withResponse);
 }
 
 void BluetoothManager::writeBlocking(const QByteArray& data, bool withResponse) {
   try {
     auto peripheral = peripheralHandle();
-    if (peripheral.initialized() and peripheral.is_connected()) {
+    // Deliberately no is_connected() probe: that is itself a blocking hop onto
+    // the WinRT MTA thread, so it doubled the serialised work per frame on the
+    // one path that must stay quick. drainWriteQueue() has already checked the
+    // cached state, and a peripheral that drops mid-write throws — which is
+    // what the catch below is for.
+    if (peripheral.initialized()) {
       SimpleBLE::ByteArray ba(reinterpret_cast<const uint8_t*>(data.constData()),
                               size_t(data.size()));
       if (withResponse) {
@@ -539,8 +585,13 @@ void BluetoothManager::finish() {
     m_bluetoothThread.waitForFinished();
   }
   // Terminal (called once from main after exec() returns), so the write thread
-  // goes down with it. Drain first: a queued write still holding the last
-  // handle would otherwise be destroyed mid-flight.
+  // goes down with it. Empty the lanes first so a drain step still sitting in
+  // its event queue finds nothing to write into a torn-down stack.
+  {
+    QMutexLocker lock(&m_writeQueueMutex);
+    m_writeHigh.clear();
+    m_writeLow.clear();
+  }
   if (m_writeThread.isRunning()) {
     m_writeThread.quit();
     m_writeThread.wait();

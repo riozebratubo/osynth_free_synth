@@ -74,6 +74,10 @@ constexpr int kStepsWindowRetries = 3;
 
 // Well-known ids the controller tracks directly.
 constexpr quint16 ID_PRESET_LOAD = 0x0002;
+// The engine-specific block: whatever engine is bound owns it, and its meaning
+// changes wholesale on a switch. Everything outside it survives one.
+constexpr quint16 ID_ENGINE_FIRST = 0x0200;
+constexpr quint16 ID_ENGINE_LAST = 0x02FF;
 // seq.pos: firmware-written playhead, -1 while stopped. It arrives in the
 // ~20 Hz EVT_PARAMS batches like any other change, so the grid highlight
 // costs no extra traffic.
@@ -326,6 +330,7 @@ void SynthController::resetState() {
   m_ready = false;
   m_linkMtu = 0;
   m_discovering = false;
+  m_discoveryScope = DiscoveryScope::Full;
   m_awaitingInfoList = false;
   m_discoveryTimer.stop();
   m_infoRequestTimer.stop();
@@ -402,8 +407,9 @@ void SynthController::onInfoRead(const QByteArray& info) {
 
 /* ------------------------------------------------------------- discovery */
 
-void SynthController::beginDiscovery() {
+void SynthController::beginDiscovery(DiscoveryScope scope) {
   m_discovering = true;
+  m_discoveryScope = scope;
   m_awaitingInfoList = true;
   m_listRetries = kListRetries;
   m_infoListAccum.clear();
@@ -578,12 +584,23 @@ void SynthController::finishDiscovery() {
   // would skip them (see the note there).
   m_pendingInfoIds.clear();
   scheduleParamsDiscovered();
+
   // A second value sweep. onParamListComplete() already fetched them so the UI
   // was never showing defaults; this catches anything the synth changed during
   // the metadata walk (a MIDI CC, a preset load, the sequencer's telemetry),
-  // which at ~200 params is a few seconds of opportunity.
-  requestAllParamValues();
+  // which at ~200 params is a few seconds of opportunity. An engine-switch pass
+  // only walks the ~36 ids of the new engine, so its window is a fraction of
+  // that and one frame covering that range is enough.
+  if (m_discoveryScope == DiscoveryScope::EngineParams) {
+    requestParamValues(engineParamIds());
+  } else {
+    requestAllParamValues();
+  }
+  // Presets are stored per engine, so this one *is* engine-scoped.
   listPresets(m_engine);
+
+  if (m_discoveryScope == DiscoveryScope::EngineParams) return;
+
   // The sequencer and kit are not parameters, so discovery does not reach
   // them; ask once the parameter traffic has been queued.
   refreshSequencer();
@@ -594,21 +611,23 @@ void SynthController::finishDiscovery() {
   // page stays hidden.
   refreshGraph();
   m_songAccum.clear();
-  send(OP_SEQ_SONG, payloadSeqSongGet(), true);
+  send(OP_SEQ_SONG, payloadSeqSongGet(), false);
   // Capability probe: the firmware ignores velocity 0, so this is silent where
   // the opcode exists and answers UNKNOWN_OP where it does not.
   m_drumTrigOpcode = true;
-  send(OP_DRUM_TRIG, payloadDrumTrig(0, 0), true);
+  send(OP_DRUM_TRIG, payloadDrumTrig(0, 0), false);
 }
 
 void SynthController::scheduleParamsDiscovered() {
   if (!m_discoveredCoalesceTimer.isActive()) m_discoveredCoalesceTimer.start();
 }
 
-void SynthController::requestAllParamValues() {
+void SynthController::requestAllParamValues() { requestParamValues(m_paramOrder); }
+
+void SynthController::requestParamValues(const QList<quint16>& ids) {
   const int perFrame = maxGetIdsPerFrame();
   QList<quint16> chunk;
-  for (quint16 id : std::as_const(m_paramOrder)) {
+  for (quint16 id : ids) {
     chunk.append(id);
     if (chunk.size() >= perFrame) {
       send(OP_GET_PARAM, payloadGetParam(chunk), false);
@@ -616,6 +635,14 @@ void SynthController::requestAllParamValues() {
     }
   }
   if (!chunk.isEmpty()) send(OP_GET_PARAM, payloadGetParam(chunk), false);
+}
+
+QList<quint16> SynthController::engineParamIds() const {
+  QList<quint16> out;
+  for (quint16 id : m_paramOrder) {
+    if (id >= ID_ENGINE_FIRST && id <= ID_ENGINE_LAST) out.append(id);
+  }
+  return out;
 }
 
 /* ------------------------------------------------- paced SET_PARAM output */
@@ -913,8 +940,11 @@ void SynthController::applyValue(quint16 id, float value, bool echo) {
 void SynthController::handleEngineEvent(const QByteArray& payload) {
   const EngineEvent e = parseEngineEvent(payload);
   setEngineCaps(e.engine, e.caps);
-  // (Re)discover: the 0x02xx map is re-registered per engine.
-  beginDiscovery();
+  // (Re)discover, but only what the switch actually changed: the 0x02xx map is
+  // re-registered per engine, and setEngineCaps() has just dropped the stale
+  // half of it. Everything else the synth holds — the pattern data, the kit,
+  // the patch graph — is engine-independent and does not need re-reading.
+  beginDiscovery(DiscoveryScope::EngineParams);
 }
 
 void SynthController::setEngineCaps(quint8 engine, quint8 caps) {
@@ -923,7 +953,7 @@ void SynthController::setEngineCaps(quint8 engine, quint8 caps) {
     // The engine-specific 0x02xx range changes meaning — drop its stale infos
     // so discovery re-fetches them.
     for (auto it = m_paramOrder.begin(); it != m_paramOrder.end();) {
-      if (*it >= 0x0200 && *it <= 0x02FF) {
+      if (*it >= ID_ENGINE_FIRST && *it <= ID_ENGINE_LAST) {
         m_params.remove(*it);
         it = m_paramOrder.erase(it);
       } else {
@@ -1783,9 +1813,13 @@ void SynthController::refreshSequencer() {
   m_stepsAccumFirst = 0;
   m_plocksAccum.clear();
 
-  send(OP_SEQ_INFO, QByteArray(), true);
-  send(OP_SEQ_PATTERN, payloadSeqGetPattern(m_editPattern), true);
-  send(OP_SEQ_PLOCK, payloadSeqPlockListPattern(m_editPattern), true);
+  // Write-without-response, like every other read here: the EVT response *is*
+  // the acknowledgement, so the ATT write-response round trip on top of it only
+  // buys latency — and on Windows each one blocks the single write path for the
+  // whole trip, which is what let a discovery burst strand a note-off.
+  send(OP_SEQ_INFO, QByteArray(), false);
+  send(OP_SEQ_PATTERN, payloadSeqGetPattern(m_editPattern), false);
+  send(OP_SEQ_PLOCK, payloadSeqPlockListPattern(m_editPattern), false);
 
   // The step walk needs this track's length, and only this response carries
   // it — so it starts in handleSeqTrack(), not here. Starting it here meant
@@ -1797,7 +1831,7 @@ void SynthController::refreshSequencer() {
   m_awaitingTrackGet = true;
   m_trackGetFallbackTimer.start();
   sendWithSeq(OP_SEQ_TRACK, m_trackGetSeq,
-              payloadSeqGetTrack(m_editPattern, m_editTrack), true);
+              payloadSeqGetTrack(m_editPattern, m_editTrack), false);
 }
 
 void SynthController::requestSteps() {
@@ -1815,7 +1849,7 @@ void SynthController::requestSteps() {
   const int count = qMin(maxStepsPerFrame(), len - m_stepsWindowNext);
   send(OP_SEQ_STEPS,
        payloadSeqGetSteps(m_editPattern, m_editTrack, m_stepsWindowNext, count),
-       true);
+       false);
   m_stepsRetryTimer.start();  // watchdog on this window
 }
 
@@ -2254,8 +2288,8 @@ void SynthController::refreshKit() {
   // appended to it, duplicating every kit and slot in the pickers.
   m_kitsAccum.clear();
   m_kitSlotsAccum.clear();
-  send(OP_KIT_INFO, payloadKitInfo(0), true);  // selectable kits
-  send(OP_KIT_INFO, payloadKitInfo(1), true);  // the current kit's slots
+  send(OP_KIT_INFO, payloadKitInfo(0), false);  // selectable kits
+  send(OP_KIT_INFO, payloadKitInfo(1), false);  // the current kit's slots
 }
 
 // ---- modular patch graph (S28) --------------------------------------------
@@ -2265,12 +2299,12 @@ void SynthController::refreshGraph() {
   // GRAPH_INFO first and alone: it carries the sizing everything else is read
   // against, and its failure (ST_UNSUPPORTED on a firmware without the
   // modular engine) is what decides whether to ask for anything more at all.
-  send(OP_GRAPH_INFO, QByteArray(), true);
+  send(OP_GRAPH_INFO, QByteArray(), false);
 }
 
 void SynthController::refreshGraphModel() {
   if (!m_connected || !m_graphAvailable) return;
-  send(OP_GRAPH_NODES, payloadGraphNodesGet(), true);
+  send(OP_GRAPH_NODES, payloadGraphNodesGet(), false);
 }
 
 void SynthController::handleGraphInfo(const QByteArray& payload) {
@@ -2295,7 +2329,7 @@ void SynthController::handleGraphInfo(const QByteArray& payload) {
     m_graphKinds.clear();
     m_graphKindCount = g.kindCount;
     for (int k = 0; k < g.kindCount; ++k) {
-      send(OP_GRAPH_KIND, payloadGraphKind(k), true);
+      send(OP_GRAPH_KIND, payloadGraphKind(k), false);
     }
   }
   refreshGraphModel();

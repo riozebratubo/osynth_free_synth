@@ -24,3 +24,6 @@ CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
 # stalls — not worth bricking boot. Re-enable only per-board once the chip is
 # confirmed on IDF's suspend-supported list.
 # CONFIG_SPI_FLASH_AUTO_SUSPEND is not set
+
+# External I2S DAC (PCM5102A) instead of USB audio; see HARDWARE.md.                                                                            │
+CONFIG_OSYNTH_ENABLE_I2S_DAC=y 

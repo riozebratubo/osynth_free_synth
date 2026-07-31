@@ -11,6 +11,7 @@
 #include <QLowEnergyService>
 #include <QObject>
 #include <QPointer>
+#include <QTimer>
 #include <QVariantList>
 
 #include "ibluetoothmanager.h"
@@ -71,6 +72,42 @@ class BluetoothManager : public IBluetoothManager {
   // Called once the osynth service's details are discovered: reads INFO, enables
   // EVT notifications, then announces the connection.
   void onServiceDetailsDiscovered();
+
+  // --- serialised CTRL writes -------------------------------------------
+  //
+  // Android's BluetoothGatt carries exactly ONE outstanding GATT operation at
+  // a time. writeCharacteristic() while another is in flight is refused, and
+  // the refusal surfaces as QLowEnergyService::errorOccurred — which nothing
+  // used to listen to, so the frame simply disappeared. Anything that writes
+  // in a burst therefore lost most of it: an engine switch (the app re-reads
+  // the parameter table on EVT_ENGINE) reliably wedged the link, and any
+  // note-off issued in that window went with it, which is why notes stuck on.
+  //
+  // So frames queue here and go out one at a time, each released by the
+  // previous one's completion. Live gestures — notes, pads, knobs — get their
+  // own lane so they are never stuck behind a listing burst.
+  //
+  // Every queued frame is written WithResponse regardless of what the caller
+  // asked for: characteristicWritten() is the only portable "the stack is
+  // ready for the next one" signal (Qt does not emit it for
+  // WriteWithoutResponse on BlueZ or CoreBluetooth), and without a completion
+  // signal there is nothing to pace against. One ATT round trip per frame is
+  // the price of not losing them.
+  struct PendingWrite {
+    QByteArray data;
+    bool withResponse = false;
+  };
+  void pumpWriteQueue();   // issue the next frame if the stack is idle
+  void onWriteSettled();   // completion, refusal or watchdog: stack is idle
+  void clearWriteQueue();
+
+  QList<PendingWrite> m_writeHigh;
+  QList<PendingWrite> m_writeLow;
+  bool m_writeInFlight = false;
+  // Releases the queue if a completion never arrives. Without it one lost
+  // callback would stall every later frame for the rest of the session —
+  // exactly the failure this queue exists to remove.
+  QTimer m_writeWatchdog;
 
   QBluetoothLocalDevice* localDevice;
   QBluetoothDeviceDiscoveryAgent* discoveryAgent;
