@@ -631,11 +631,17 @@ Rectangle {
                     newPointNotes[points[i].pointId] = n
                     newActive[n] = true
                 }
+                var changed = false
                 for (var na in newActive)
-                    if (!root.activeNotes[na]) root.noteOn(parseInt(na))
+                    if (!root.activeNotes[na]) { root.noteOn(parseInt(na)); changed = true }
                 for (var oa in root.activeNotes)
-                    if (!newActive[oa]) root.noteOff(parseInt(oa))
-                root.activeNotes = newActive
+                    if (!newActive[oa]) { root.noteOff(parseInt(oa)); changed = true }
+                // A finger resting on a key still produces a touch event on
+                // every move, and reassigning activeNotes re-evaluates the
+                // colour of all 24 keys and both note labels each time — work
+                // that lands on the same thread as the next press. Only the
+                // events that actually change the sounding set pay for it.
+                if (changed) root.activeNotes = newActive
                 pointNotes = newPointNotes
             }
         }

@@ -51,7 +51,7 @@ Item {
     // Cap policies for the *next* loop set, latched when its first take
     // starts: mono record mode (loop.mono, S19; a load adopts the set's
     // format) and 4-track mode (loop.tracks, S20 — trades slots for cap).
-    // (both default on in S25+ firmware; rebind() adopts whatever the
+    // (both default on in S30+ firmware; rebind() adopts whatever the
     // connected synth reports, so older firmware still shows stereo/8)
     property bool monoOn: true
     property bool fourTracks: true

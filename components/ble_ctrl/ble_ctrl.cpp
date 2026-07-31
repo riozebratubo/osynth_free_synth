@@ -1366,6 +1366,55 @@ const struct ble_gatt_svc_def kSvcs[] = {
 
 void start_advertising();
 
+/* Connection interval policy (S30). A key press is one ATT frame, and a frame
+ * can only leave the central on a connection event — so the interval is the
+ * floor under the app's key-to-sound latency, and a chord is that floor once
+ * per note. Centrals pick a lazy one on their own: Android settles at 30-50 ms
+ * once discovery is done, which is why the on-screen keyboard feels sluggish
+ * even though the synth answers a frame in microseconds.
+ *
+ * A peripheral is allowed to ask for better, so it does — 7.5-15 ms, the
+ * fastest range every central must support, with no slave latency (a note must
+ * never wait for a skipped event). Apple's rules are stricter (interval min
+ * >= 15 ms), so a refusal retries once at 15-30 ms, still well under the
+ * default. A second refusal is left alone: the link works, it is just lazier
+ * than we would like, and nagging a central that has said no costs airtime on
+ * the very path we are trying to keep clear.
+ *
+ * Sent when the app subscribes to EVT rather than on connect: discovery is
+ * over by then, so the request is not competing with the burst it would
+ * accelerate, and centrals are far more likely to accept an update on an idle
+ * link. */
+constexpr uint16_t kFastItvlMin = 6;   /* x1.25 ms = 7.5 ms */
+constexpr uint16_t kFastItvlMax = 12;  /* 15 ms                */
+constexpr uint16_t kSafeItvlMin = 12;  /* 15 ms — Apple's floor */
+constexpr uint16_t kSafeItvlMax = 24;  /* 30 ms                 */
+constexpr uint16_t kConnTimeout = 400; /* x10 ms = 4 s supervision timeout */
+
+/* Host task only (every touch is inside a GAP callback). */
+uint8_t s_upd_tries = 0;
+
+void request_fast_conn(uint16_t conn_handle, bool apple_safe) {
+    struct ble_gap_upd_params p = {};
+    p.itvl_min = apple_safe ? kSafeItvlMin : kFastItvlMin;
+    p.itvl_max = apple_safe ? kSafeItvlMax : kFastItvlMax;
+    p.latency = 0;
+    p.supervision_timeout = kConnTimeout;
+    const int rc = ble_gap_update_params(conn_handle, &p);
+    if (rc != 0) {
+        /* Local refusal (no such connection, one already in flight): nothing
+         * to retry against — the result path below only sees requests that
+         * actually went out. */
+        ESP_LOGW(TAG, "conn param request not sent (rc %d)", rc);
+        return;
+    }
+    ESP_LOGI(TAG, "asking for a %u.%02u-%u.%02u ms connection interval",
+             (unsigned)(p.itvl_min * 125u) / 100u,
+             (unsigned)(p.itvl_min * 125u) % 100u,
+             (unsigned)(p.itvl_max * 125u) / 100u,
+             (unsigned)(p.itvl_max * 125u) % 100u);
+}
+
 int gap_event(struct ble_gap_event* ev, void*) {
     switch (ev->type) {
         case BLE_GAP_EVENT_CONNECT:
@@ -1373,25 +1422,46 @@ int gap_event(struct ble_gap_event* ev, void*) {
                 s_conn.store(ev->connect.conn_handle,
                              std::memory_order_relaxed);
                 s_state.store("connected", std::memory_order_relaxed);
+                s_upd_tries = 0;
                 ESP_LOGI(TAG, "app connected");
             } else {
                 start_advertising();
             }
             return 0;
-        /* Purely informational, and the synth asks for nothing: the central
-         * owns these. Worth logging because the interval is what every
-         * request/response on this protocol is really priced in — a discovery
-         * pass is made of round trips, and this says what one costs. */
+        /* The result of a parameter change — ours (see request_fast_conn) or
+         * one the central made on its own. Worth logging either way: the
+         * interval is what every request/response on this protocol is really
+         * priced in — a discovery pass is made of round trips, and a played
+         * note is one frame waiting for the next connection event. */
         case BLE_GAP_EVENT_CONN_UPDATE: {
+            /* s_upd_tries == 1 means our request is the one being answered:
+             * it is only ever set at SUBSCRIBE, so a central-driven update
+             * during discovery (which happens on Android) is still 0 here and
+             * falls through to the log. Either outcome settles us at 2 — the
+             * link is as good as it is going to get, and a later update the
+             * central makes on its own must not be mistaken for our result. */
+            if (s_upd_tries == 1) {
+                s_upd_tries = 2;
+                if (ev->conn_update.status != 0) {
+                    /* Refused. One retry inside Apple's window, then we live
+                     * with whatever the central chose. */
+                    ESP_LOGI(TAG,
+                             "conn params refused (status 0x%02x), retrying",
+                             (unsigned)ev->conn_update.status);
+                    request_fast_conn(ev->conn_update.conn_handle, true);
+                    return 0;
+                }
+            }
             struct ble_gap_conn_desc desc;
             if (ble_gap_conn_find(ev->conn_update.conn_handle, &desc) == 0) {
                 /* itvl is in 1.25 ms units; print the ms as x.xx */
                 const unsigned q = (unsigned)desc.conn_itvl * 125u;
                 ESP_LOGI(TAG,
                          "conn params: itvl %u.%02u ms, latency %u, timeout "
-                         "%u ms",
+                         "%u ms%s",
                          q / 100u, q % 100u, (unsigned)desc.conn_latency,
-                         (unsigned)desc.supervision_timeout * 10u);
+                         (unsigned)desc.supervision_timeout * 10u,
+                         ev->conn_update.status == 0 ? "" : " (request refused)");
             }
             return 0;
         }
@@ -1419,6 +1489,13 @@ int gap_event(struct ble_gap_event* ev, void*) {
                                 std::memory_order_relaxed);
                 /* greet a fresh subscriber with the engine + caps */
                 s_announced_engine.store(-1, std::memory_order_relaxed);
+                /* The app is up: ask for an interval a keyboard can play on.
+                 * Once per subscription — a re-subscribe on the same link is
+                 * the app re-reading, not a new central. */
+                if (ev->subscribe.cur_notify && s_upd_tries == 0) {
+                    s_upd_tries = 1;
+                    request_fast_conn(ev->subscribe.conn_handle, false);
+                }
             }
             return 0;
         case BLE_GAP_EVENT_MTU:

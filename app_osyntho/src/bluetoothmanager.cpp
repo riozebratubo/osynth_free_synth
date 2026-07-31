@@ -4,6 +4,7 @@
 #include <QDebug>
 #include <QGuiApplication>
 #include <QLocationPermission>
+#include <QLowEnergyConnectionParameters>
 #include <QTimer>
 
 #include "src/ble/synthprotocol.h"
@@ -15,6 +16,12 @@
  * with the WinRT Qt backend, subscribing can be broken — set
  * BLUETOOTH_FORCE_DBUS_LE_VERSION=1. See QTBUG-89723.
  */
+
+// Releases the write queue when a completion never arrives. The short one is
+// for writes issued without an acknowledgement, which settle in the stack
+// rather than over the air.
+constexpr int kWriteWatchdogMs = 1500;
+constexpr int kFastWriteWatchdogMs = 250;
 
 // osynth GATT service + characteristics (see docs/BLE_PROTOCOL.md).
 static const QBluetoothUuid serviceUuid{QString(SynthProto::kServiceUuid)};
@@ -41,9 +48,10 @@ BluetoothManager::BluetoothManager(QObject* parent)
     addressToDeviceMap{} {
   // Generous: it only has to beat "never", and firing it early would issue a
   // second write while the first is genuinely still in flight — the exact
-  // thing the queue exists to prevent.
+  // thing the queue exists to prevent. pumpWriteQueue() picks the interval per
+  // frame (an unacknowledged write settles far sooner than a round trip).
   m_writeWatchdog.setSingleShot(true);
-  m_writeWatchdog.setInterval(1500);
+  m_writeWatchdog.setInterval(kWriteWatchdogMs);
   connect(&m_writeWatchdog, &QTimer::timeout, this, [this]() {
     if (!m_writeInFlight) return;
     qWarning() << "bt | CTRL write never completed; releasing the queue";
@@ -502,6 +510,24 @@ void BluetoothManager::onServiceDetailsDiscovered() {
       evtChar.descriptor(QBluetoothUuid::DescriptorType::ClientCharacteristicConfiguration);
   if (cccd.isValid()) service->writeDescriptor(cccd, QByteArray::fromHex("0100"));
 
+#ifdef Q_OS_ANDROID
+  // Ask for a connection interval a keyboard can be played on. Android drops
+  // to 30-50 ms once discovery is done, and since a frame only leaves on a
+  // connection event that interval is the floor under every note's latency.
+  // Qt maps a sub-30 ms request onto BluetoothGatt.requestConnectionPriority
+  // (CONNECTION_PRIORITY_HIGH, ~11-15 ms). The firmware asks for the same
+  // thing from its end when it sees the EVT subscription — either side
+  // getting through is enough, and centrals treat their own app's request as
+  // the more authoritative one.
+  if (bleController) {
+    QLowEnergyConnectionParameters fast;
+    fast.setIntervalRange(7.5, 15.0);
+    fast.setLatency(0);
+    fast.setSupervisionTimeout(4000);
+    bleController->requestConnectionUpdate(fast);
+  }
+#endif
+
   emit deviceNameChanged();
   emit deviceAddressChanged();
   emit updateConnectedBluetoothDevice(m_deviceName, m_deviceAddress);
@@ -543,9 +569,35 @@ void BluetoothManager::pumpWriteQueue() {
   }
 
   m_writeInFlight = true;
-  m_writeWatchdog.start();
+#ifdef Q_OS_ANDROID
+  // A frame the caller did not want acknowledged goes out unacknowledged. It
+  // is still paced by this queue, but it settles as soon as the stack has
+  // handed the frame to the controller instead of after a full ATT round trip
+  // with the synth. That round trip is the whole of a played note's latency:
+  // with it, notes leave at best one per connection interval and a chord
+  // audibly arpeggiates — which is what made the on-screen keyboard feel
+  // unresponsive once every frame became WriteWithResponse.
+  //
+  // Safe because of two things in Qt's Android backend (verified in 6.11):
+  // handleOnCharacteristicWrite() does not branch on write type, so
+  // characteristicWritten still arrives and this queue keeps its clock; and
+  // QtBluetoothLE.java has a job queue of its own, so a frame issued while
+  // another is genuinely outstanding is queued rather than refused. The
+  // shorter watchdog is therefore a formality — and cheap to wait out.
+  //
+  // Android only. The other backends this file builds for (BlueZ,
+  // CoreBluetooth) do not report no-response writes at all, so there would be
+  // nothing to advance the queue: they stay on WriteWithResponse.
+  const bool ack = next.withResponse;
+  m_writeWatchdog.start(ack ? kWriteWatchdogMs : kFastWriteWatchdogMs);
+  service->writeCharacteristic(ctrlChar, next.data,
+                               ack ? QLowEnergyService::WriteWithResponse
+                                   : QLowEnergyService::WriteWithoutResponse);
+#else
+  m_writeWatchdog.start(kWriteWatchdogMs);
   service->writeCharacteristic(ctrlChar, next.data,
                                QLowEnergyService::WriteWithResponse);
+#endif
 }
 
 void BluetoothManager::onWriteSettled() {
