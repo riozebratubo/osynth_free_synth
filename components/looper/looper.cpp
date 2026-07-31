@@ -694,6 +694,24 @@ void ctl_handle_mode() {
     }
 }
 
+/* Back to "nothing recorded": detach the audio, drop every buffer, and reset
+ * the loop length so the next first take latches the format and the full
+ * policy cap again (S19/S20). Shared by clear-all and by the track clear that
+ * happens to empty the set — those two land in the same state, so they take
+ * the same path. */
+void ctl_reset_empty_set() {
+    ParamStore& ps = ParamStore::instance();
+    s_cmd.store(kCmdDetach, std::memory_order_release);
+    ctl_release_all(ctl_handshake());
+    s_filled.store(0, std::memory_order_release);
+    s_loop_frames.store(0, std::memory_order_release);
+    s_ctl_len = 0;
+    s_ctl_mode = MODE_STOP;
+    ps.set(LOOP_PID_MODE, (float)MODE_STOP, ParamOrigin::Internal);
+    ctl_mirror_state();
+    ctl_mirror_maxlen(); /* the policy cap applies again */
+}
+
 void ctl_handle_clear() {
     ctl_arm_cancel();
     ParamStore& ps = ParamStore::instance();
@@ -701,19 +719,27 @@ void ctl_handle_clear() {
     if (what == CLR_TRACK) {
         int trk = (int)(ps.get(LOOP_PID_TRACK) + 0.5f) - 1;
         if (trk < 0 || trk >= LOOP_TRACKS) trk = 0;
-        s_filled.fetch_and((uint8_t)~(1u << trk), std::memory_order_release);
-        /* buffer kept for reuse — the loop length is unchanged */
-        ctl_mirror_state();
+        const uint8_t bit = (uint8_t)(1u << trk);
+        const uint8_t before =
+            s_filled.fetch_and((uint8_t)~bit, std::memory_order_acq_rel);
+        const uint8_t left = (uint8_t)(before & ~bit);
+        /* Clearing the *last* filled track leaves no loop at all, and a length
+         * with nothing behind it is not a length: the next first take would
+         * still be bound by a loop nobody can hear, and the app would still
+         * show the old ceiling instead of the cap. A take in flight is being
+         * recorded against that length, so it keeps it (the punch is the loop
+         * now); loop_ctl's mode is the honest test — both the first take and a
+         * pending punch sit in MODE_REC. */
+        if ((before & bit) != 0 && left == 0 && s_ctl_mode != MODE_REC) {
+            ctl_reset_empty_set();
+            ESP_LOGI(TAG, "track %d cleared (last one), loop length reset",
+                     trk + 1);
+        } else {
+            /* buffer kept for reuse — the loop length is unchanged */
+            ctl_mirror_state();
+        }
     } else if (what == CLR_ALL) {
-        s_cmd.store(kCmdDetach, std::memory_order_release);
-        ctl_release_all(ctl_handshake());
-        s_filled.store(0, std::memory_order_release);
-        s_loop_frames.store(0, std::memory_order_release);
-        s_ctl_len = 0;
-        s_ctl_mode = MODE_STOP;
-        ps.set(LOOP_PID_MODE, (float)MODE_STOP, ParamOrigin::Internal);
-        ctl_mirror_state();
-        ctl_mirror_maxlen(); /* the policy cap applies again */
+        ctl_reset_empty_set();
         ESP_LOGI(TAG, "all tracks cleared, loop length reset");
     }
     if (what != CLR_NONE) {
