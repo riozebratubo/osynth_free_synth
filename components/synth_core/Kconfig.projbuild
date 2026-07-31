@@ -14,6 +14,32 @@ menu "osynth Synthesizer"
             Routes audio to an external I2S DAC (e.g. PCM5102) for higher
             quality output. Pinout in docs/HARDWARE.md. Off by default.
 
+    config OSYNTH_USB_AUDIO_TAP
+        bool "Also stream to USB while the I2S DAC plays"
+        depends on OSYNTH_ENABLE_I2S_DAC && IDF_TARGET_ESP32S3
+        default y
+        help
+            Sends every rendered block to the external I2S DAC and the USB
+            audio interface at once, instead of the I2S output replacing the
+            USB one.
+
+            The DAC keeps the clock: its DMA still paces the render loop, and
+            the USB write is best-effort, so a host that stalls mid-stream
+            cannot stall the audio task. The two clocks are independent and
+            drift apart; the USB class driver absorbs that by varying the
+            isochronous packet between 47, 48 and 49 frames, which costs no
+            samples and no resampling. Its correction range is roughly
+            +/-1875 ppm, against the tens of ppm two crystals actually
+            differ by.
+
+            Costs a 256-byte copy per block - well under 1% of the block
+            budget, and the USB stack is already running for MIDI either way
+            - plus the EP-IN FIFO (OSYNTH_USB_FIFO_MS in usb_descriptors.h).
+
+            Turning this off restores the older either/or behaviour, where
+            enabling the I2S DAC leaves the USB audio interface enumerated
+            but silent.
+
     config OSYNTH_ENABLE_LOCAL_UI
         bool "Enable local UI (LCD + encoders + buttons)"
         default n

@@ -25,5 +25,5 @@ CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
 # confirmed on IDF's suspend-supported list.
 # CONFIG_SPI_FLASH_AUTO_SUSPEND is not set
 
-# External I2S DAC (PCM5102A) instead of USB audio; see HARDWARE.md.                                                                            │
+# External I2S DAC (PCM5102A) is the master out
 CONFIG_OSYNTH_ENABLE_I2S_DAC=y 

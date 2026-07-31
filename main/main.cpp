@@ -23,6 +23,8 @@
  * nothing if it fails, so the synth core is already alive either way) ->
  * local UI (stub; hardware bring-up is future work) -> heartbeat loop.
  */
+#include <cstdio>
+
 #include "esp_cpu.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -179,15 +181,38 @@ extern "C" void app_main(void) {
     vTaskDelete(nullptr);
 #else
     audio_io_stats_t st;
+    char usb_seg[40];
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(SYNTH_HEARTBEAT_MS));
         audio_io_get_stats(&st);
         const synth_engine_t* eng = engines_get(engines_active_type());
+#if SYNTH_ENABLE_USB
+        /* Occupancy of the USB EP-IN FIFO as a percentage of its depth, over
+         * the heartbeat window. The class driver steers this toward 50% by
+         * varying the isochronous packet size, which is how the render clock
+         * and the host's frame clock stay reconciled without resampling — so
+         * a band around 50% is the healthy reading, and one pinned at 100%
+         * with `drop` climbing is the stream falling behind. Pegged at 100%
+         * with no drops is normal on a USB-only build, where this FIFO paces
+         * the audio task rather than following it (see usb_dev.h). */
+        usb_dev_audio_health_t uh;
+        usb_dev_audio_get_health(&uh);
+        if (uh.streaming && uh.fifo_depth != 0) {
+            snprintf(usb_seg, sizeof(usb_seg), " | usb %u-%u%% drop %u",
+                     (unsigned)(uh.fifo_min * 100u / uh.fifo_depth),
+                     (unsigned)(uh.fifo_max * 100u / uh.fifo_depth),
+                     (unsigned)uh.dropped_blocks);
+        } else {
+            snprintf(usb_seg, sizeof(usb_seg), " | usb idle");
+        }
+#else
+        usb_seg[0] = '\0';
+#endif
         ESP_LOGI(TAG,
                  "alive | heap free %u (min %u) | audio blocks %u, underruns %u, "
                  "dsp %.1f%% (pk %.1f%%) [voi %.1f fx %.1f loop %.1f] | "
                  "out pk %.2f, sat %u | voices %u/%d (+%d drum) | engine %s | "
-                 "ble %s",
+                 "ble %s%s",
                  (unsigned)esp_get_free_heap_size(),
                  (unsigned)esp_get_minimum_free_heap_size(),
                  (unsigned)st.blocks_rendered, (unsigned)st.underruns,
@@ -197,7 +222,7 @@ extern "C" void app_main(void) {
                  (unsigned)voice_manager_active_voices(),
                  SYNTH_VOICES, drums_active_voices(),
                  eng != nullptr ? eng->name : "none",
-                 ble_ctrl_state_name());
+                 ble_ctrl_state_name(), usb_seg);
     }
 #endif
 }

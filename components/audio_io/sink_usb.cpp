@@ -6,6 +6,11 @@
  * When the host is not streaming, blocks are dropped and pacing falls back
  * to the esp_timer deadline scheme of the null sink, so stats stay honest
  * and the transition into/out of streaming is seamless.
+ *
+ * Two sinks live here. audio_sink_usb() is the above: USB as the output, and
+ * therefore as the clock. audio_sink_usb_tap() is the same FIFO attached
+ * alongside an I2S DAC that owns the clock instead (S29) — same push, but
+ * non-blocking and with no pacing of its own.
  */
 #include "audio_sink.h"
 
@@ -60,8 +65,37 @@ esp_err_t usb_write(const int16_t* interleaved, size_t frames) {
 
 const audio_sink_t s_sink = {"usb", usb_start, usb_write};
 
+#if SYNTH_ENABLE_USB_TAP
+
+esp_err_t usb_tap_start(void) {
+    return ESP_OK; /* usb_dev_init() already ran; nothing to pace here */
+}
+
+/* Tap contract: the primary sink owns the clock, so this must not block and
+ * must not pace. Passing a zero wait turns usb_dev_audio_write() into a single
+ * space check — a full FIFO (host stalled, stream tearing down) costs one
+ * block on the USB side and nothing at all on the DAC's.
+ *
+ * Always ESP_OK: a dropped block is not a sink failure, and reporting one
+ * would only make the audio task log about a stream that is allowed to come
+ * and go. usb_dev counts the drops for the heartbeat instead. */
+esp_err_t usb_tap_write(const int16_t* interleaved, size_t frames) {
+    if (usb_dev_audio_streaming()) {
+        usb_dev_audio_write(interleaved, frames, 0);
+    }
+    return ESP_OK;
+}
+
+const audio_sink_t s_tap = {"usb-tap", usb_tap_start, usb_tap_write};
+
+#endif /* SYNTH_ENABLE_USB_TAP */
+
 } // namespace
 
 const audio_sink_t* audio_sink_usb(void) { return &s_sink; }
+
+#if SYNTH_ENABLE_USB_TAP
+const audio_sink_t* audio_sink_usb_tap(void) { return &s_tap; }
+#endif
 
 #endif /* SYNTH_ENABLE_USB */

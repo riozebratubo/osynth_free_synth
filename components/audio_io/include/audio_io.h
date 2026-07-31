@@ -7,6 +7,9 @@
  * write is the audio clock.
  * Session 3: USB (UAC2) sink on ESP32-S3 — the S3 default unless I2S is
  * enabled; the host's iso polling paces the audio task while it streams.
+ * Session 29: the two are no longer exclusive. With OSYNTH_USB_AUDIO_TAP the
+ * I2S DAC keeps the clock and the USB interface is fed the same blocks as a
+ * best-effort tap, so the synth records over USB while the DAC plays.
  */
 #pragma once
 
@@ -67,7 +70,8 @@ void audio_io_report_stages(uint32_t voices_cycles, uint32_t fx_cycles,
 esp_err_t audio_io_start(audio_render_fn render, void* ctx);
 
 /* Name of the active sink: "i2s", "usb", "dac", "null" — or "none" before
- * start. */
+ * start. A build that also taps a second destination reports both, primary
+ * first: "i2s+usb-tap". */
 const char* audio_io_sink_name(void);
 
 void audio_io_get_stats(audio_io_stats_t* out);

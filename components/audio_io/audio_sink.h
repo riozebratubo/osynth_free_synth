@@ -3,8 +3,13 @@
  *
  * A sink consumes interleaved int16 stereo blocks. write() blocks until the
  * sink has accepted the whole block — the sink's DMA (or esp_timer, for the
- * null sink) is the real-time clock that paces the audio task. Exactly one
- * sink is active; audio_io_start() picks it from the build configuration.
+ * null sink) is the real-time clock that paces the audio task.
+ *
+ * One sink is the primary and owns that clock; audio_io_start() picks it from
+ * the build configuration. A build may additionally attach one *tap* — a
+ * second sink fed the same blocks, whose write must never block and never
+ * pace, because only the primary is allowed to decide when the next block is
+ * due. A tap that cannot accept a block drops it (S29).
  */
 #pragma once
 
@@ -31,6 +36,12 @@ const audio_sink_t* audio_sink_null(void);
  * task while the capture stream is open; timer pacing (as in the null sink)
  * otherwise. */
 const audio_sink_t* audio_sink_usb(void);
+#endif
+
+#if SYNTH_ENABLE_USB_TAP
+/* The same EP-IN FIFO as audio_sink_usb(), attached as a tap: never blocks,
+ * never paces, drops a block rather than make the I2S DAC wait on a host. */
+const audio_sink_t* audio_sink_usb_tap(void);
 #endif
 
 #if SYNTH_ENABLE_I2S_DAC

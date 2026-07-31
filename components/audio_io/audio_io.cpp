@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 #include "esp_cpu.h"
@@ -23,7 +24,13 @@ audio_render_fn s_render = nullptr;
 void* s_render_ctx = nullptr;
 const std::atomic<float>* s_master_volume = nullptr;
 TaskHandle_t s_task = nullptr;
+/* Owns the audio clock: its blocking write is what makes the loop below run
+ * in real time. */
 const audio_sink_t* s_sink = nullptr;
+/* Optional second destination fed the same blocks (S29). Never paces, never
+ * blocks — see audio_sink.h. NULL on builds without one. */
+const audio_sink_t* s_tap = nullptr;
+char s_sink_name[24] = "none";
 audio_io_stats_t s_stats = {};
 
 /* Guards the peak meters against a read-and-reset landing between the audio
@@ -160,6 +167,16 @@ void SYNTH_RENDER_IRAM audio_task(void*) {
         s_stats.blocks_rendered++;
         portEXIT_CRITICAL(&s_stats_mux);
 
+        /* Tap first, primary second. The primary's write is what consumes the
+         * block period, so feeding the tap ahead of it keeps the tap's
+         * deposits at a fixed phase against the audio clock instead of
+         * trailing a DMA wait of varying length. Its result is deliberately
+         * ignored: a tap is best-effort, and letting it influence anything
+         * here would hand a USB host partial control of the DAC's timing. */
+        if (s_tap != nullptr) {
+            (void)s_tap->write(s_out, SYNTH_BLOCK_SIZE);
+        }
+
         /* Blocking write: the sink's DMA (or timer) is the real clock. */
         esp_err_t err = s_sink->write(s_out, SYNTH_BLOCK_SIZE);
         if (err != ESP_OK && (s_stats.blocks_rendered % 750u) == 1u) {
@@ -200,6 +217,27 @@ esp_err_t audio_io_start(audio_render_fn render, void* ctx) {
         ESP_ERROR_CHECK(s_sink->start());
     }
 
+#if SYNTH_ENABLE_USB_TAP
+    /* Attached even if the primary fell back to the null sink: the tap is
+     * independent of whether the DAC came up, and a silent board that still
+     * streams to the host is strictly more useful than one that does
+     * neither. */
+    s_tap = audio_sink_usb_tap();
+    err = s_tap->start();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "tap '%s' failed to start (%s); continuing without it",
+                 s_tap->name, esp_err_to_name(err));
+        s_tap = nullptr;
+    }
+#endif
+
+    if (s_tap != nullptr) {
+        snprintf(s_sink_name, sizeof(s_sink_name), "%s+%s", s_sink->name,
+                 s_tap->name);
+    } else {
+        snprintf(s_sink_name, sizeof(s_sink_name), "%s", s_sink->name);
+    }
+
     BaseType_t ok = xTaskCreatePinnedToCore(audio_task, "audio", 6144, nullptr,
                                             configMAX_PRIORITIES - 2, &s_task, 1);
     return (ok == pdPASS) ? ESP_OK : ESP_FAIL;
@@ -219,9 +257,7 @@ void SYNTH_RENDER_IRAM audio_io_report_stages(uint32_t voices_cycles,
         0.01f * ((float)loop_cycles * inv - s_stats.stage_loop_pct);
 }
 
-const char* audio_io_sink_name(void) {
-    return (s_sink != nullptr) ? s_sink->name : "none";
-}
+const char* audio_io_sink_name(void) { return s_sink_name; }
 
 uint32_t audio_io_quiet_ms(void) {
     const uint32_t blocks = s_quiet_blocks.load(std::memory_order_relaxed);

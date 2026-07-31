@@ -37,6 +37,17 @@
 #define SYNTH_ENABLE_I2S_DAC 0
 #endif
 
+/* Fan-out: the I2S DAC is the output *and* the USB interface still streams.
+ * The DAC owns the clock; the USB copy is best-effort. Kconfig already makes
+ * this depend on the I2S DAC and the S3, but the capability gate is repeated
+ * here so the flag is false on any target without USB-OTG rather than relying
+ * on a Kconfig dependency staying correct. */
+#if defined(CONFIG_OSYNTH_USB_AUDIO_TAP) && SYNTH_ENABLE_USB && SYNTH_ENABLE_I2S_DAC
+#define SYNTH_ENABLE_USB_TAP 1
+#else
+#define SYNTH_ENABLE_USB_TAP 0
+#endif
+
 #ifdef CONFIG_OSYNTH_ENABLE_LOCAL_UI
 #define SYNTH_ENABLE_LOCAL_UI 1
 #else

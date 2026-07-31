@@ -14,6 +14,8 @@
  */
 #include "usb_dev.h"
 
+#include <string.h>
+
 #include "esp_log.h"
 
 #include "synth_config.h"
@@ -42,6 +44,26 @@ static TaskHandle_t s_task = NULL;
 static atomic_bool s_streaming = false;
 static usb_dev_midi_rx_fn s_midi_cb = NULL;
 static void* s_midi_ctx = NULL;
+
+/* ---- Stream health (see usb_dev_audio_health_t) ---- */
+
+/* Same read-and-reset problem as audio_io's peak meters: fifo_min/fifo_max are
+ * read-modify-write on both sides, so a reset landing between the audio task's
+ * compare and its store would either drop a block or resurrect a cleared
+ * extreme. Uncontended on every block. */
+static portMUX_TYPE s_health_mux = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t s_dropped_blocks = 0;
+static uint16_t s_fifo_min = UINT16_MAX; /* sentinel: no sample yet */
+static uint16_t s_fifo_max = 0;
+
+/* Records one dropped block and yields the "accepted nothing" result, so the
+ * several failure paths in usb_dev_audio_write() stay one-liners. */
+static size_t note_drop(void) {
+    portENTER_CRITICAL(&s_health_mux);
+    s_dropped_blocks++;
+    portEXIT_CRITICAL(&s_health_mux);
+    return 0;
+}
 
 static void usb_task(void* arg) {
     (void)arg;
@@ -97,17 +119,45 @@ size_t usb_dev_audio_write(const int16_t* interleaved, size_t frames,
      * writing the whole block is race-free. A stream teardown can clear the
      * FIFO concurrently; worst case one garbled block, tolerated. */
     tu_fifo_t* ff = tud_audio_n_get_ep_in_ff(0);
+    if (ff == NULL) return note_drop(); /* audio function not set up yet */
+
+    /* Occupancy is sampled here, before the wait, because this is the one
+     * point that runs at a fixed phase against the audio clock — and where
+     * the level parks is the readout of whether the class driver's packet
+     * steering is holding (see usb_dev_audio_health_t). */
+    const uint16_t level = tu_fifo_count(ff);
+    portENTER_CRITICAL(&s_health_mux);
+    if (level < s_fifo_min) s_fifo_min = level;
+    if (level > s_fifo_max) s_fifo_max = level;
+    portEXIT_CRITICAL(&s_health_mux);
+
     uint32_t waited_ms = 0;
     while (tu_fifo_remaining(ff) < want) {
-        if (!usb_dev_audio_streaming()) return 0;
-        if (waited_ms >= max_wait_ms) return 0;
+        if (!usb_dev_audio_streaming()) return note_drop();
+        if (waited_ms >= max_wait_ms) return note_drop();
         vTaskDelay(1);
         waited_ms += portTICK_PERIOD_MS;
     }
-    if (!usb_dev_audio_streaming()) return 0;
+    if (!usb_dev_audio_streaming()) return note_drop();
 
     return tud_audio_n_write(0, interleaved, (uint16_t)want) /
            (OSYNTH_USB_CHANNELS * OSYNTH_USB_BYTES_PER_SAMPLE);
+}
+
+void usb_dev_audio_get_health(usb_dev_audio_health_t* out) {
+    if (out == NULL) return;
+    memset(out, 0, sizeof(*out));
+
+    out->streaming = usb_dev_audio_streaming();
+    out->fifo_depth = (uint16_t)CFG_TUD_AUDIO_FUNC_1_EP_IN_SW_BUF_SZ;
+
+    portENTER_CRITICAL(&s_health_mux);
+    out->dropped_blocks = s_dropped_blocks;
+    out->fifo_min = (s_fifo_min == UINT16_MAX) ? 0 : s_fifo_min;
+    out->fifo_max = s_fifo_max;
+    s_fifo_min = UINT16_MAX;
+    s_fifo_max = 0;
+    portEXIT_CRITICAL(&s_health_mux);
 }
 
 void usb_dev_midi_set_rx_callback(usb_dev_midi_rx_fn fn, void* ctx) {
@@ -170,6 +220,14 @@ static bool clock_get_request(uint8_t rhport,
         if (request->bRequest == AUDIO_CS_REQ_CUR) {
             audio_control_cur_4_t curf = {
                 (int32_t)tu_htole32(OSYNTH_USB_SAMPLE_RATE)};
+            /* Answering through this helper is load-bearing, not just
+             * convenient: it stores the CUR value it carries into TinyUSB's
+             * sample_rate_tx regardless of transfer direction, and
+             * audiod_calc_tx_packet_sz() needs that non-zero before the host
+             * selects alt 1 or the packet steering that absorbs clock drift
+             * never arms for the session. Our clock source advertises the
+             * frequency read-only, so this read is the only chance it gets —
+             * a compliant host never issues the SET below. */
             return tud_audio_buffer_and_schedule_control_xfer(
                 rhport, (tusb_control_request_t const*)request, &curf,
                 sizeof(curf));
@@ -269,6 +327,10 @@ size_t usb_dev_audio_write(const int16_t* interleaved, size_t frames,
     (void)frames;
     (void)max_wait_ms;
     return 0;
+}
+
+void usb_dev_audio_get_health(usb_dev_audio_health_t* out) {
+    if (out != NULL) memset(out, 0, sizeof(*out));
 }
 
 void usb_dev_midi_set_rx_callback(usb_dev_midi_rx_fn fn, void* ctx) {

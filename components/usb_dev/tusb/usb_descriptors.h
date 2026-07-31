@@ -37,8 +37,16 @@ extern "C" {
 #define OSYNTH_USB_BYTES_PER_MS     (OSYNTH_USB_SAMPLE_RATE / 1000 \
                                      * OSYNTH_USB_CHANNELS * OSYNTH_USB_BYTES_PER_SAMPLE)
 /* EP-IN software FIFO depth; also the worst-case extra latency the USB
- * stream adds on top of the render block. */
-#define OSYNTH_USB_FIFO_MS          8
+ * stream adds on top of the render block (the I2S path is unaffected).
+ *
+ * Sized for the tap build, where the class driver steers the level toward
+ * half depth and everything below that half-point is the cushion absorbing
+ * render-side jitter — a BLE burst, a flash write. The render task deposits a
+ * whole block at a time, so the level sawtooths by SYNTH_BLOCK_SIZE frames
+ * against a steering deadband of one frame; too shallow a FIFO leaves the
+ * steering correcting on nearly every opportunity. 16 ms puts the half-point
+ * at 8 ms, comfortably clear of a 1.33 ms block. */
+#define OSYNTH_USB_FIFO_MS          16
 
 /* ---- Interface numbers ---- */
 enum {
