@@ -448,6 +448,7 @@ class SynthController : public QObject, public DatabaseClient {
   void beginDiscovery(DiscoveryScope scope = DiscoveryScope::Full);
   void onParamListComplete();     // ids known: register, go ready, start info pump
   void pumpInfoRequests();        // flow-controlled: keeps a small window in flight
+  void queueInfoId(quint16 id);      // enqueue for the pump; priority ids first
   void sendInfoRequest(quint16 id);  // one PARAM_INFO, tracked for flow control
   void onInfoBusy(quint8 seq);    // BUSY (queue full): back off, re-queue that id
   void onInfoBadArg(quint8 seq);  // BAD_ARG: id not registered; stop retrying it

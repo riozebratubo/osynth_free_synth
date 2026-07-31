@@ -60,6 +60,18 @@ constexpr int kListWatchdogMs = 1200;
 constexpr int kListRetries = 8;
 // Coalesce the paramsDiscovered signal during progressive fill.
 constexpr int kDiscoveredCoalesceMs = 150;
+// Metadata the app's chrome is gated on, and which therefore must not wait its
+// turn in the walk. The toolbar's volume slider and the home page's Master card
+// both key off PARAM_INFO for master.volume — until it lands there is no range
+// to draw a slider against, so both hide themselves.
+//
+// The firmware lists ids in ascending order, so id 0 is asked first anyway;
+// what made it appear seconds into a sync is what happens when that first
+// request is refused (BUSY, the queue still holding the value sweep sent
+// alongside it) or lost: the id went back to the *end* of a ~250-id queue.
+// These ids are requested ahead of the list response and re-queued at the
+// front, so a bad first attempt costs one retry rather than the whole walk.
+constexpr quint16 kPriorityInfoIds[] = {0x0000};  // master.volume
 // Settle time before re-reading a pattern the firmware switched to itself.
 constexpr int kFollowPatternMs = 500;
 // If refreshSequencer's SEQ_TRACK get goes unanswered, start the step walk
@@ -88,6 +100,13 @@ constexpr quint16 ID_SEQ_CURPAT = 0x040C;
 // cause, such as a preset load replacing the whole graph.
 constexpr quint16 ID_GRAPH_COST = 0x02C0;
 constexpr quint16 ID_GRAPH_REV = 0x02C1;
+
+bool isPriorityInfoId(quint16 id) {
+  for (quint16 pid : kPriorityInfoIds) {
+    if (pid == id) return true;
+  }
+  return false;
+}
 
 qint64 nowMs() { return QDateTime::currentMSecsSinceEpoch(); }
 }  // namespace
@@ -433,6 +452,29 @@ void SynthController::beginDiscovery(DiscoveryScope scope) {
   // timeout. If it (or its response) is dropped, the watchdog resends it.
   sendWithSeq(OP_PARAM_INFO, m_infoListSeq, payloadParamInfo(PARAM_INFO_LIST_ALL), false);
   m_discoveryTimer.start();  // list watchdog
+
+  // The shell's own parameters, asked for now rather than after the list: the
+  // master volume control is then on screen one round trip into the sync,
+  // instead of waiting on a list response the watchdog may have to resend
+  // (1.2 s a try) and then on its turn in the metadata walk. Their values go
+  // with them — paramValue() falls back to the *default* until a value lands,
+  // which for master.volume is a slider sitting at 0.8 wherever the synth
+  // actually is. Two frames against a 16-deep firmware queue, and the pump
+  // below skips whatever has already answered by the time it starts.
+  //
+  // Gated on what is actually missing rather than on the scope: these ids sit
+  // outside the 0x02xx range an engine switch re-walks, so on that pass they
+  // are already known and this costs nothing — while a connect pass gets the
+  // prefetch whichever way it was kicked (the EVT_ENGINE greeting or the
+  // fallback in setConnected).
+  QList<quint16> priority;
+  for (quint16 id : kPriorityInfoIds) {
+    const auto it = m_params.constFind(id);
+    if (it != m_params.constEnd() && it->infoKnown && it->valueKnown) continue;
+    sendInfoRequest(id);
+    priority.append(id);
+  }
+  if (!priority.isEmpty()) requestParamValues(priority);
 }
 
 // The id list is known: register the ids, mark the controller ready so the UI
@@ -447,7 +489,7 @@ void SynthController::onParamListComplete() {
     if (!m_params.contains(id)) m_params.insert(id, Param{});
     if (!m_params[id].infoKnown && !m_pendingInfoIds.contains(id)) {
       m_pendingInfoIds.insert(id);
-      m_infoQueue.append(id);
+      queueInfoId(id);
     }
   }
   setEngineCaps(m_infoListEngine, m_infoListCaps);
@@ -481,6 +523,19 @@ void SynthController::onParamListComplete() {
   m_discoveryStartMs = nowMs();
   pumpInfoRequests();          // prime the window
   m_infoRequestTimer.start();  // keep it topped up + reap timeouts
+}
+
+// Queue an id for the metadata pump. Priority ids (kPriorityInfoIds) go to the
+// front — on the first pass because the shell is waiting on them, and on a
+// re-queue after a BUSY or a timeout because that is the case that hurt: an id
+// appended behind a full pass's ~250 others reappears seconds later, which is
+// exactly how long the master volume control used to take to show up.
+void SynthController::queueInfoId(quint16 id) {
+  if (m_infoQueue.contains(id)) return;
+  if (isPriorityInfoId(id))
+    m_infoQueue.prepend(id);
+  else
+    m_infoQueue.append(id);
 }
 
 void SynthController::sendInfoRequest(quint16 id) {
@@ -532,7 +587,7 @@ void SynthController::pumpInfoRequests() {
         else
           ++sit;
       }
-      if (m_pendingInfoIds.contains(id) && !m_infoQueue.contains(id)) m_infoQueue.append(id);
+      if (m_pendingInfoIds.contains(id)) queueInfoId(id);
     } else {
       ++it;
     }
@@ -558,7 +613,7 @@ void SynthController::onInfoBusy(quint8 seq) {
   const quint16 id = it.value();
   m_infoSeqToId.remove(seq);
   m_infoInflight.remove(id);
-  if (m_pendingInfoIds.contains(id) && !m_infoQueue.contains(id)) m_infoQueue.append(id);
+  if (m_pendingInfoIds.contains(id)) queueInfoId(id);
 }
 
 void SynthController::onInfoBadArg(quint8 seq) {
@@ -944,7 +999,17 @@ void SynthController::handleEngineEvent(const QByteArray& payload) {
   // re-registered per engine, and setEngineCaps() has just dropped the stale
   // half of it. Everything else the synth holds — the pattern data, the kit,
   // the patch graph — is engine-independent and does not need re-reading.
-  beginDiscovery(DiscoveryScope::EngineParams);
+  //
+  // Except on the greeting: the firmware announces engine + caps to every fresh
+  // subscriber, and *that* EVT_ENGINE is the connect pass (see setConnected,
+  // whose timer is only a fallback for when this one is missed). Whether it
+  // lands before or after the manager publishes the connection is a race, and
+  // on the side where it lands after, an engine-scoped pass skipped the
+  // sequencer, kit, graph and song reads for the whole session — they are
+  // requested from finishDiscovery() only on a full pass. Nothing known yet
+  // means nothing to keep, so read everything.
+  beginDiscovery(m_paramOrder.isEmpty() ? DiscoveryScope::Full
+                                        : DiscoveryScope::EngineParams);
 }
 
 void SynthController::setEngineCaps(quint8 engine, quint8 caps) {
