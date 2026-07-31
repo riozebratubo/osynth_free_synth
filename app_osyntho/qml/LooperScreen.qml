@@ -186,14 +186,23 @@ Item {
         function onParamChanged(id, value) {
             if (id === root.idTrack) root.curTrack = Math.round(value)
             else if (id === root.idMode) {
-                root.curMode = Math.round(value)
+                const mode = Math.round(value)
+                const moved = mode !== root.curMode
+                root.curMode = mode
                 // Leaving rec is exactly when loop.filled and loop.len change.
                 // The firmware mirrors them and they arrive in the ~20 Hz
                 // EVT_PARAMS batch — but a notification is not a guaranteed
                 // delivery, and losing this one leaves the clear buttons
                 // disabled over a loop that plainly exists. Re-read the two
                 // rather than trusting a single event.
-                root.verifyState()
+                //
+                // Only on an actual transport edge. verifyState() re-reads
+                // loop.mode itself, and paramChanged fires for every value the
+                // synth reports back whether or not it moved — so re-verifying
+                // on every report made this handler answer its own GET_PARAM
+                // with five more, forever: a permanent write storm on the link
+                // that starts with the first loop.mode value of the session.
+                if (moved) root.verifyState()
             }
             else if (id === root.idFilled) root.filledMask = Math.round(value)
             else if (id === root.idLen) root.loopLen = value
