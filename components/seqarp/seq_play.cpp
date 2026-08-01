@@ -575,25 +575,44 @@ void seq_play_tick(void) {
     ++s_tick;
     tick_offs();
 
+    /* Track 1 defines the pattern's bar, and its length and division are
+     * editable while the transport runs — the seq.steps knob (poll_edges),
+     * OP_SEQ_TRACK, the euclid generator. s_pattern_ticks was only rebuilt
+     * on start and on a pattern switch, so after any of those edits the
+     * boundary that advances the song chain and lands a queued pattern
+     * change kept firing on the *old* bar length: shorten track 1 from 64
+     * steps to 16 and the next queued pattern still waited four bars. */
+    {
+        seq_track_cfg_t cfg0;
+        seq_track_cfg_get(s_pattern, 0, &cfg0);
+        const int32_t span =
+            (int32_t)seq_track_length(s_pattern, 0) * seq_div_ticks(cfg0.div);
+        s_pattern_ticks = span > 0 ? span : 1;
+    }
+
+    /* The bar boundary is crossed *before* this tick's steps are fired,
+     * because the tick a bar ends on is the very tick the next bar's first
+     * step falls on — a track's next_tick and the span both land there.
+     *
+     * Tested after the loop, as it was, that one tick still belonged to the
+     * outgoing pattern: its step 0 fired one extra time and the incoming
+     * pattern's step 0 came a tick later. On a drum lane that is an audible
+     * ghost hit; on a synth lane the note hung into the new pattern for its
+     * whole gate whenever the incoming step 0 was empty, since nothing
+     * triggered there to flush_offs() it away. */
+    if (++s_pattern_tick >= s_pattern_ticks) {
+        s_pattern_tick = 0;
+        pattern_boundary();
+    }
+
+    /* Read after the boundary: a switch that just landed means the scale and
+     * root the steps below quantise to are the incoming pattern's. */
     seq_pattern_cfg_t pat;
     seq_pattern_cfg_get(s_pattern, &pat);
 
     for (int i = 0; i < SEQ_TRACKS; ++i) {
         seq_track_cfg_t cfg;
         seq_track_cfg_get(s_pattern, i, &cfg);
-        /* Track 1 defines the pattern's bar, and its length and division are
-         * editable while the transport runs — the seq.steps knob (poll_edges),
-         * OP_SEQ_TRACK, the euclid generator. s_pattern_ticks was only rebuilt
-         * on start and on a pattern switch, so after any of those edits the
-         * boundary that advances the song chain and lands a queued pattern
-         * change kept firing on the *old* bar length: shorten track 1 from 64
-         * steps to 16 and the next queued pattern still waited four bars.
-         * The config is already in hand here, so keeping it current is free. */
-        if (i == 0) {
-            const int32_t span =
-                (int32_t)seq_track_length(s_pattern, 0) * seq_div_ticks(cfg.div);
-            s_pattern_ticks = span > 0 ? span : 1;
-        }
         tick_ratchets(i, cfg);
 
         TrackState& t = s_trk[i];
@@ -613,11 +632,6 @@ void seq_play_tick(void) {
                                            ParamOrigin::Internal);
             }
         }
-    }
-
-    if (++s_pattern_tick >= s_pattern_ticks) {
-        s_pattern_tick = 0;
-        pattern_boundary();
     }
 }
 
