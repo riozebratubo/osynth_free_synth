@@ -371,6 +371,61 @@ Item {
             }
         }
 
+        // ---- board size ----------------------------------------------------
+        // The step count, on the page rather than only inside the Track sheet
+        // — the same reason the Level slider above moved out. The sheet keeps
+        // its free 1..256 spinbox for the odd lengths (12, 24) no button here
+        // covers; these six are the ones you reach for while playing, and a
+        // live edit can only afford one tap.
+        //
+        // Length is per track, so this resizes the *selected* lane alone: that
+        // is what makes polymeter possible, and what the sheet has always done.
+        Flow {
+            Layout.fillWidth: true
+            spacing: 4
+
+            // The label is wrapped rather than sitting in the Flow directly:
+            // a Flow positions both axes, so it refuses to lay out at all if
+            // any direct child carries an anchor ("Flow will not function") —
+            // which stacked every button at the origin. A Row only owns x, so
+            // a vertical anchor inside one is fine. Same shape as the Paint
+            // and Level rows above.
+            Row {
+                Label {
+                    text: t.t("Steps")
+                    color: Material.foreground
+                    opacity: 0.7
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+            }
+
+            Repeater {
+                model: [8, 16, 32, 64, 128, 256]
+                delegate: Button {
+                    required property int modelData
+                    // seqMaxSteps is 0 until SEQ_INFO arrives; every current
+                    // build reports 256 (SEQ_MAX_STEPS is 256 on the classic
+                    // ESP32 as well as the S3 — only tracks and patterns
+                    // shrink there), and hiding the whole row until connect
+                    // would make it jump into place afterwards.
+                    readonly property int cap: Synth.seqMaxSteps > 0 ? Synth.seqMaxSteps : 256
+                    visible: modelData <= cap
+                    text: modelData
+                    // Nothing is highlighted at a length no button names — 12
+                    // from the Euclid generator, say. That is the honest
+                    // reading of the track, not a missing state.
+                    highlighted: root.stepCount === modelData
+                    flat: !highlighted
+                    padding: 8
+                    // Shrinking does not destroy the steps past the cut: the
+                    // firmware only narrows what it plays, so tapping back up
+                    // brings them back. They go for good when the pattern is
+                    // saved, which writes `length` steps and no more.
+                    onClicked: Synth.setTrackField("length", modelData)
+                }
+            }
+        }
+
         // ---- the grid ------------------------------------------------------
         Frame {
             Layout.fillWidth: true
