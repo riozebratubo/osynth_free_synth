@@ -1,7 +1,7 @@
 # osynth partition table — fits 4 MB flash (classic ESP32). On the S3, flash
 # above 0x400000 is NOT free for new partitions: the S16 looper persistence
 # claims it as a raw region (loop_store.cpp, esp_flash access, sized by the
-# OSYNTH_S3_FLASH_MODEL Kconfig choice — 8 MB N8R8 / 16 MB N16R8).
+# OSYNTH_FLASH_MODEL Kconfig choice — 8 / 16 / 32 MB).
 # Name,     Type, SubType,  Offset,   Size,     Flags
 nvs,        data, nvs,      0x9000,   0x6000,
 phy_init,   data, phy,      0xf000,   0x1000,

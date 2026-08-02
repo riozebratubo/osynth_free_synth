@@ -10,6 +10,11 @@
  * Session 29: the two are no longer exclusive. With OSYNTH_USB_AUDIO_TAP the
  * I2S DAC keeps the clock and the USB interface is fed the same blocks as a
  * best-effort tap, so the synth records over USB while the DAC plays.
+ * Session 31: audio also flows *in*. With OSYNTH_ENABLE_I2S_LINE_IN an I2S
+ * ADC shares the DAC's port as a slave, so a captured block is sample-locked
+ * to the block being played. The capture happens here, at the top of the
+ * audio task; where it is mixed is the render chain's business, through the
+ * three audio_io_line_in_* stages below.
  */
 #pragma once
 
@@ -56,6 +61,21 @@ typedef struct {
     float stage_voices_pct;
     float stage_fx_pct;
     float stage_loop_pct;
+    /* Line input (S31); both stay 0 without SYNTH_ENABLE_LINE_IN.
+     *
+     * There is deliberately no fourth stage percentage to go with these: the
+     * input costs a fixed ~0.7% that does not vary with anything the player
+     * does, so it would never have told anyone anything. These two would. */
+    float in_peak;        /* loudest |sample| captured since the previous
+                           * audio_io_get_stats() call (reset on read),
+                           * measured *before* in.gain — the ADC clips in the
+                           * analogue domain and no firmware gain undoes it,
+                           * so a post-gain meter would hide exactly the
+                           * problem you need to see */
+    uint32_t in_starves;  /* cumulative blocks where the ADC had no full
+                           * block ready; the tail was zero-filled. Should
+                           * stay at 0 — a climbing count means the RX side
+                           * is not clocking (MCLK, or the ADC's mode straps) */
 } audio_io_stats_t;
 
 /* Called once per block from the render chain (audio task only) with the
@@ -63,6 +83,25 @@ typedef struct {
  * budget. */
 void audio_io_report_stages(uint32_t voices_cycles, uint32_t fx_cycles,
                             uint32_t loop_cycles);
+
+/* Line input (S31), mixed into the render chain at one of three points — the
+ * one `in.route` selects; the other two are silent and cost a compare each.
+ * Audio-task only, and only meaningful after the capture at the top of the
+ * block, which is why these are stages the render chain calls rather than a
+ * widened render callback: it is the same shape the drum bus already uses
+ * (drums_pre_fx / drums_post_fx), one capture with several possible
+ * destinations.
+ *
+ * Which one is selected decides what gets recorded, because the looper's
+ * record tap sits between them — see render_chain() in main.cpp:
+ *   _fx   before the FX bus:  heard with effects, recorded with them
+ *   _dry  after the FX bus:   heard dry, recorded dry
+ *   _mon  after the looper:   heard dry, never recorded
+ *
+ * All three compile to nothing on builds without line-in. */
+void audio_io_line_in_fx(float* l, float* r, size_t frames);
+void audio_io_line_in_dry(float* l, float* r, size_t frames);
+void audio_io_line_in_mon(float* l, float* r, size_t frames);
 
 /* Picks and starts the output sink, then starts the audio task.
  * `render` may be NULL (silence). Falls back to the null sink (no output,
@@ -75,20 +114,6 @@ esp_err_t audio_io_start(audio_render_fn render, void* ctx);
 const char* audio_io_sink_name(void);
 
 void audio_io_get_stats(audio_io_stats_t* out);
-
-/* How long the master output has been inaudibly quiet, in milliseconds
- * (capped; 0 means it is currently making sound).
- *
- * Exists for one job: flash writes stall the render chain — ESP-IDF disables
- * the cache and parks the other core for the duration — so anything that
- * writes flash while the synth is sounding risks an underrun. Waiting for the
- * output itself to go quiet makes such a stall inaudible, and doing it on the
- * *output* rather than on "are any voices active" is what makes it correct:
- * a reverb tail, a delay repeat or a looper track is still sound, and a
- * voice-count check would happily write straight through one.
- *
- * Read from any control task. */
-uint32_t audio_io_quiet_ms(void);
 
 /* How long the master output has been inaudibly quiet, in milliseconds
  * (capped; 0 means it is currently making sound).

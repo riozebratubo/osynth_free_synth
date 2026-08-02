@@ -110,7 +110,7 @@ parameter at runtime, so it fits whatever firmware you flashed.
 # once: build the drum kit from a folder of WAV one-shots
 python tools/gen_drumkit.py --pack opendrums --out tools/out/drumkit.bin
 
-idf.py set-target esp32s3      # or: esp32
+idf.py set-target esp32s3      # or: esp32, esp32p4
 idf.py build flash monitor
 ```
 
@@ -122,15 +122,21 @@ check — `underruns` should stay at 0.
 > The kit step is optional: with no image present the build still links and
 > the drum bus is simply silent.
 
-## Two chips, one codebase
+## Three chips, one codebase
 
-| | ESP32-S3 | classic ESP32 |
-| --- | --- | --- |
-| USB audio + MIDI | ✅ | — *(no USB-OTG)* |
-| Looper | ✅ 8 tracks | — *(needs PSRAM)* |
-| Sequencer | 8 trk × 8 patterns | 4 trk × 2 patterns |
-| Drum kit | ✅ + SD kits | ✅ ROM kit |
-| Everything else | ✅ | ✅ |
+| | ESP32-S3 | ESP32-P4 + C6 | classic ESP32 |
+| --- | --- | --- | --- |
+| USB audio + MIDI | ✅ | ✅ | — *(no USB-OTG)* |
+| BLE | ✅ on-die | ✅ *via companion C6* | ✅ on-die |
+| Looper | ✅ 8 tracks | ✅ 8 tracks | — *(needs PSRAM)* |
+| Sequencer | 8 trk × 8 patterns | 8 trk × 8 patterns | 4 trk × 2 patterns |
+| Drum kit | ✅ + SD kits | ✅ + SD kits | ✅ ROM kit |
+| Clock | 240 MHz Xtensa | 400 MHz RISC-V | 240 MHz Xtensa |
+| Everything else | ✅ | ✅ | ✅ |
+
+The P4 has no radio of its own: BLE runs the NimBLE host on the P4 and its
+controller on a companion ESP32-C6 over ESP-Hosted. See
+`private_docs/HARDWARE.md`.
 
 Capabilities are derived from the chip: undeclared modules are never compiled in,
 and a scaled-down build keeps **every** per-step feature — only the counts shrink.

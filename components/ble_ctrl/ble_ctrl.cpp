@@ -51,6 +51,10 @@ static const char* TAG = "ble_ctrl";
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 
+#if SYNTH_BLE_VIA_HOSTED
+#include "esp_hosted.h"
+#endif
+
 #include "drum_kit_fmt.h"
 #include "drums.h"
 #include "engines.h"
@@ -1568,6 +1572,38 @@ extern "C" esp_err_t ble_ctrl_init(void) {
      * sdkconfig.defaults compiles it out; this covers a tree whose sdkconfig
      * was generated before that, and costs nothing either way. */
     esp_log_level_set("NimBLE", ESP_LOG_WARN);
+
+#if SYNTH_BLE_VIA_HOSTED
+    /* No controller on this die: bring the companion up first, because with
+     * CONFIG_BT_CONTROLLER_DISABLED the bt component compiles the host with no
+     * HCI transport at all — ESP-Hosted supplies it, and nimble_port_init()
+     * below would otherwise have nothing to talk to.
+     *
+     * Every failure here is degraded-but-alive, like the NimBLE failure below:
+     * a synth whose companion did not answer still has USB audio and USB-MIDI,
+     * and bootlooping an instrument over its remote control is the wrong
+     * trade. The co-processor firmware version is logged because host and
+     * slave are versioned separately and a mismatch shows up here first. */
+    esp_err_t herr = esp_hosted_connect_to_slave();
+    if (herr != ESP_OK) {
+        ESP_LOGW(TAG, "hosted co-processor did not answer (%s) — no BLE",
+                 esp_err_to_name(herr));
+        return ESP_OK;
+    }
+    esp_hosted_coprocessor_fwver_t fwver;
+    if (esp_hosted_get_coprocessor_fwversion(&fwver) == ESP_OK) {
+        ESP_LOGI(TAG, "hosted co-processor firmware %u.%u.%u",
+                 (unsigned)fwver.major1, (unsigned)fwver.minor1,
+                 (unsigned)fwver.patch1);
+    }
+    herr = esp_hosted_bt_controller_init();
+    if (herr == ESP_OK) herr = esp_hosted_bt_controller_enable();
+    if (herr != ESP_OK) {
+        ESP_LOGW(TAG, "hosted BT controller bring-up failed (%s) — no BLE",
+                 esp_err_to_name(herr));
+        return ESP_OK;
+    }
+#endif
 
     const esp_err_t err = nimble_port_init();
     if (err != ESP_OK) {

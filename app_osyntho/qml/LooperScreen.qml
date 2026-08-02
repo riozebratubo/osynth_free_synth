@@ -45,8 +45,16 @@ Item {
     property int filledMask: 0
     property real loopLen: 0.0
     // Max loop length in seconds. S19+ firmware mirrors the live cap in
-    // loop.maxlen (S20: base 40 s, x2 for mono, x2 in 4-track mode);
-    // older firmware registers its fixed cap as loop.len's max.
+    // loop.maxlen (S20: a base cap, x2 for mono, x2 in 4-track mode); older
+    // firmware registers its fixed cap as loop.len's max.
+    //
+    // The base is not a fixed 40 s any more: since the P4 target the firmware
+    // sizes it from the free PSRAM it measures at boot, so it differs per
+    // board (~38 s on an 8 MB S3, 160 s on a 32 MB P4, less on a 2 MB S3).
+    // Nothing here hardcodes it — every text below reads this property, which
+    // is fed by loop.maxlen's live value and by predictedMax() off its
+    // registered default. The 12.0 is only a placeholder until a synth
+    // connects and reports its own.
     property real maxLen: 12.0
     // Cap policies for the *next* loop set, latched when its first take
     // starts: mono record mode (loop.mono, S19; a load adopts the set's

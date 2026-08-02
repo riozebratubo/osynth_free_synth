@@ -61,7 +61,8 @@ namespace {
 constexpr float kSr = (float)SYNTH_SAMPLE_RATE;
 constexpr float kTwoPi = 6.28318530718f;
 
-#if CONFIG_IDF_TARGET_ESP32S3
+/* PSRAM, not a particular chip, is what sets these ceilings. */
+#if CONFIG_SPIRAM
 constexpr float kDelayMaxS = 1.5f; /* stereo int16 @ 48 kHz: 288 KB, PSRAM */
 #else
 constexpr float kDelayMaxS = 0.4f; /* 77 KB, classic internal-RAM budget */
@@ -70,7 +71,7 @@ constexpr float kDelayMaxS = 0.4f; /* 77 KB, classic internal-RAM budget */
 constexpr float kChoBaseMs = 12.0f;
 constexpr float kChoDepthMaxMs = 12.0f;
 
-#if CONFIG_IDF_TARGET_ESP32S3
+#if CONFIG_SPIRAM
 constexpr float kGrnSizeMaxS = 0.5f;   /* grain length ceiling */
 constexpr float kGrnSprayMaxS = 0.25f; /* random extra-delay ceiling */
 constexpr int kGrainMax = 16;          /* fixed pool: bounds the worst case */

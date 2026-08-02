@@ -49,6 +49,25 @@ const audio_sink_t* audio_sink_usb_tap(void);
 const audio_sink_t* audio_sink_i2s(void);
 #endif
 
+#if SYNTH_ENABLE_LINE_IN
+/* Line input (S31): the RX half of the same I2S port audio_sink_i2s() drives.
+ *
+ * Two free functions rather than a second vtable, because there is nothing to
+ * dispatch on: both handles come out of one i2s_new_channel() call, share one
+ * config object and one teardown, and there is exactly one source with no
+ * fallback. A lookalike vtable would need a private header re-exporting the
+ * handle and the failure state — a split with negative information hiding.
+ *
+ * The contract is the *opposite* of the sink's, which is the other reason not
+ * to make them look alike: read() must never block and never pace. It is
+ * called from the audio task with a zero timeout, returns short (with
+ * `frames_read` set) rather than wait, and the caller zero-fills the tail. The
+ * primary sink alone decides when the next block is due. */
+bool audio_source_i2s_ready(void);
+esp_err_t audio_source_i2s_read(int16_t* interleaved, size_t frames,
+                                size_t* frames_read);
+#endif
+
 #if SYNTH_HAS_INTERNAL_DAC
 /* Classic-ESP32 internal 8-bit DAC on GPIO25 (L) / GPIO26 (R). */
 const audio_sink_t* audio_sink_dac(void);

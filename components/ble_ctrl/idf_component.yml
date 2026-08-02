@@ -1,0 +1,30 @@
+## ble_ctrl — the NimBLE *host* stack lives in IDF's `bt` component and needs
+## no dependency here. What does need one is a chip with no radio: the
+## ESP32-P4 has no Bluetooth controller on the die, so its controller sits on
+## a companion ESP32-C6 and ESP-Hosted carries HCI across the SDIO link
+## (CONFIG_ESP_HOSTED_NIMBLE_HCI_VHCI — see sdkconfig.defaults.esp32p4).
+##
+## Scoped to the P4 by the same reasoning usb_dev scopes TinyUSB: targets that
+## have the hardware must not pull the component in at all.
+##
+## esp_wifi_remote is here even though osynth wants no Wi-Fi. Two reasons, both
+## structural rather than incidental:
+##   - esp_hosted's whole CMakeLists (sources *and* its public include dirs) is
+##     inside `if(CONFIG_ESP_HOSTED_ENABLED)`, and that symbol's only default-on
+##     rule is `ESP_WIFI_REMOTE_ENABLED && ESP_WIFI_REMOTE_LIBRARY_HOSTED`.
+##     Without it the component silently builds empty and esp_hosted.h is not
+##     on the include path.
+##   - the co-processor choice (ESP_HOSTED_CP_TARGET_ESP32C6) depends on
+##     SLAVE_IDF_TARGET_ESP32C6, which esp_wifi_remote defines and IDF 6.0.1
+##     does not ship. Only the H2/H4 co-processors are selectable without it.
+## The Wi-Fi API surface it adds is weak-linked and unused; see the BLE block
+## in sdkconfig.defaults.esp32p4.
+dependencies:
+  espressif/esp_hosted:
+    version: "^2.0"
+    rules:
+      - if: target == esp32p4
+  espressif/esp_wifi_remote:
+    version: ">=1.3.1"
+    rules:
+      - if: target == esp32p4

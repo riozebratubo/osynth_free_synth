@@ -1,0 +1,11 @@
+# Renamed osynth Kconfig symbols. ESP-IDF applies these when it reads an
+# sdkconfig written before the rename, so an existing build directory keeps
+# its setting instead of silently falling back to the new choice's default.
+#
+# Format: OLD_NAME NEW_NAME (no CONFIG_ prefix).
+
+# The loops-region size was named after ESP32-S3 module part numbers, which
+# stopped making sense when the ESP32-P4 target arrived (its boards are N16R32
+# — same 16 MB flash, different PSRAM). Renamed to the flash size alone.
+OSYNTH_S3_FLASH_N8R8    OSYNTH_FLASH_8MB
+OSYNTH_S3_FLASH_N16R8   OSYNTH_FLASH_16MB

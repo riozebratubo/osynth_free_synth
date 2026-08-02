@@ -1,0 +1,194 @@
+# ESP32-P4 target overrides — assumes an ESP32-P4 + ESP32-C6 devkit of the
+# ESP32-P4-DevKit-A / ESP32-P4-WIFI6-DEV-KIT class: N16R32 (16 MB flash,
+# 32 MB PSRAM), C6 co-processor wired to the P4 over SDIO.
+#
+# What is different about this target, in one paragraph: the P4 is the fastest
+# chip osynth runs on (400 MHz dual RISC-V *with* an FPU, against the S3's
+# 240 MHz Xtensa) and it has USB-OTG and a full-duplex I2S port, so audio and
+# USB are strictly better than the S3. What it does not have is a radio. BLE
+# therefore runs the NimBLE *host* here and its controller on the C6, with
+# ESP-Hosted carrying HCI over the SDIO link — see the BLE block below.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_OSYNTH_FLASH_16MB=y
+
+# Max CPU clock (IDF defaults to 360 MHz here): the render budget wants it —
+# see the note in sdkconfig.defaults. The P4's choice members are 40/360/400,
+# so this is *not* the CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240 the other two
+# targets set.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_400=y
+
+# PSRAM. The symbols differ from the S3's: the P4 has one line mode (HEX,
+# 16-line) rather than OCT/QUAD, and its speed choice tops out at 250 MHz with
+# 200 MHz the default. SPIRAM_IGNORE_NOTFOUND keeps a board whose PSRAM does
+# not come up booting — the looper and the large FX buffers then fall back the
+# same way they do on an S3 without PSRAM.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_HEX=y
+CONFIG_SPIRAM_SPEED_200M=y
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+
+# Loop-persistence flash backend: same warning as on the S3 — do NOT enable
+# SPI_FLASH_AUTO_SUSPEND. See the long note in sdkconfig.defaults.esp32s3.
+# CONFIG_SPI_FLASH_AUTO_SUSPEND is not set
+
+# External I2S DAC is the master out, as on the S3.
+CONFIG_OSYNTH_ENABLE_I2S_DAC=y
+
+# ===========================================================================
+# BLE with no radio on the die (ESP-Hosted -> ESP32-C6)
+#
+# ble_ctrl.cpp is unchanged on this target: it only ever calls NimBLE *host*
+# APIs, and IDF does not gate BT_ENABLED / BT_NIMBLE_ENABLED on
+# SOC_BT_SUPPORTED — only BT_CONTROLLER_ENABLED. So the host stack compiles
+# and runs here exactly as it does on the S3.
+#
+# What changes is underneath it. BT_CONTROLLER_DISABLED makes the bt component
+# compile the host with *no* HCI transport at all (components/bt/CMakeLists.txt
+# only adds hci_uart.c/hci_h4.c when BT_NIMBLE_TRANSPORT_UART is also set), and
+# ESP-Hosted then supplies the transport, shipping HCI over the same SDIO link
+# it uses for Wi-Fi. Hence TRANSPORT_UART=n: this is the VHCI arrangement, not
+# a second dedicated UART to the C6.
+#
+# A link failure naming ble_transport_init / ble_transport_to_ll_cmd /
+# ble_transport_to_ll_acl means these four hosted symbols are not all set —
+# those are the functions the transport is supposed to provide.
+#
+# The C6 must be flashed with the matching ESP-Hosted co-processor firmware.
+# Host and slave are versioned separately; ble_ctrl logs the co-processor
+# version at boot precisely so a mismatch is visible before it is mysterious.
+# ===========================================================================
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=n
+CONFIG_BT_CONTROLLER_DISABLED=y
+CONFIG_BT_NIMBLE_TRANSPORT_UART=n
+
+# ESP-Hosted itself. ESP_HOSTED_ENABLED gates the component's *entire*
+# CMakeLists — sources and public include dirs alike — so with it off the
+# component builds empty and the only symptom is
+# "fatal error: esp_hosted.h: No such file or directory". Its only default-on
+# rule is ESP_WIFI_REMOTE_ENABLED && ESP_WIFI_REMOTE_LIBRARY_HOSTED, hence the
+# Wi-Fi-remote pair below even though osynth never brings Wi-Fi up: that layer
+# is weak-linked and costs nothing at runtime if esp_wifi_* is never called.
+CONFIG_ESP_WIFI_REMOTE_ENABLED=y
+CONFIG_ESP_WIFI_REMOTE_LIBRARY_HOSTED=y
+CONFIG_ESP_HOSTED_ENABLED=y
+
+# Which chip is on the other end. ESP_HOSTED_CP_TARGET_* depends on the
+# matching SLAVE_IDF_TARGET_*, which esp_wifi_remote defines (IDF 6.0.1 has no
+# components/esp_wifi/remote). C6 is already the default when the host is a
+# P4; pinned here so a config regenerated without the dependency resolved
+# fails loudly instead of quietly picking something else.
+CONFIG_SLAVE_IDF_TARGET_ESP32C6=y
+CONFIG_ESP_HOSTED_CP_TARGET_ESP32C6=y
+
+# SDIO GPIOs. The choice defaults to "No development board", which leaves
+# every pin at a generic default; FUNC_BOARD is the P4+on-board-C6 wiring and
+# is the right starting point for a P4/C6 devkit. **If the co-processor never
+# answers at boot, this is the first thing to change** — either to another
+# member of the choice or to ESP_HOSTED_P4_DEV_BOARD_NONE plus explicit
+# CONFIG_ESP_HOSTED_SDIO_* pins from the board schematic.
+# The transport itself needs no line here: ESP_HOSTED_HOST_INTERFACE already
+# defaults to SDIO for a P4 host with a C6 co-processor.
+CONFIG_ESP_HOSTED_P4_DEV_BOARD_FUNC_BOARD=y
+
+CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE=y
+CONFIG_ESP_HOSTED_NIMBLE_HCI_VHCI=y
+
+# Transport pins are deliberately NOT set here. ESP-Hosted brings its own
+# CONFIG_ESP_HOSTED_SDIO_* defaults, which match Espressif's P4+C6 reference
+# wiring; a third-party board may route the SDIO link differently. If the
+# co-processor never answers at boot ("hosted co-processor did not answer"),
+# this is the first place to look — menuconfig -> Component config ->
+# ESP-Hosted. Pin them here once the board's wiring is confirmed, so the
+# setting survives a clean build.
+
+# ===========================================================================
+# "osynth Synthesizer" options that are target-specific on the ESP32-P4.
+# Commented out at their Kconfig default; see the header in sdkconfig.defaults
+# for the syntax and for the target-independent options.
+#
+# Already set above and deliberately left alone: OSYNTH_ENABLE_I2S_DAC (the
+# DAC is the master out) and OSYNTH_FLASH_16MB (the flash size the loops
+# region is cut from — the other members are CONFIG_OSYNTH_FLASH_8MB=y and
+# CONFIG_OSYNTH_FLASH_32MB=y, each of which also wants a matching
+# CONFIG_ESPTOOLPY_FLASHSIZE_* so the image header matches the chip).
+# ===========================================================================
+
+# --- I2S analogue front end -------------------------------------------------
+
+# Same choice as on the S3 — DISCRETE (PCM5102A, optionally + PCM1808) or
+# ES8388 — and the same trade: the discrete DAC sounds better, the codec is
+# one chip for both directions.
+#
+# NOTE ON THE ON-BOARD 3.5 mm JACK: it is almost certainly NOT an ES8388.
+# P4 devkits in this class carry an **ES8311**, a different (mono, 1-in/1-out)
+# codec with a different register map, which osynth does not support yet —
+# components/codec/ implements ES8388 only. Until it does, the jack is not
+# usable and this target should drive an external PCM5102A on the I2S pins
+# below. Identify what is actually fitted before assuming: at 100 kHz an
+# ES8311 answers at I2C 0x18, an ES8388 at 0x10/0x11, an ES7210 mic array at
+# 0x40/0x41. private_docs/HARDWARE.md has the procedure.
+# CONFIG_OSYNTH_FRONTEND_DISCRETE=y
+# CONFIG_OSYNTH_FRONTEND_ES8388=y
+
+# Stereo line input on the DAC's own port. Available here — the P4's I2S is
+# full duplex and its MCLK routes through the GPIO matrix, which is the pair
+# of properties the classic ESP32 lacks. Default n on a discrete front end.
+# CONFIG_OSYNTH_ENABLE_I2S_LINE_IN=n
+
+# Stream to USB *and* the I2S DAC at once. Default y, as on the S3.
+# CONFIG_OSYNTH_USB_AUDIO_TAP=y
+
+# --- I2S pins ---------------------------------------------------------------
+
+# Defaults sit in one block at 16-20. **These are chosen to be safe, not to
+# match your board** — no P4 devkit pinout is assumed here, so check them
+# against the schematic before wiring anything.
+#
+# Pins to stay away from on this chip: **GPIO24/25 are the USB-OTG full-speed
+# PHY** (D-/D+ — the port the synth enumerates on), GPIO37/38 are console
+# UART0, GPIO10-13 are the UART1 IOMUX pins and GPIO14/15 the LP-UART. On a
+# P4+C6 board the SDIO link to the co-processor also claims a block of pins —
+# that block is board-specific and is the one most likely to collide.
+# CONFIG_OSYNTH_I2S_MCLK_GPIO=16
+# CONFIG_OSYNTH_I2S_BCLK_GPIO=17
+# CONFIG_OSYNTH_I2S_WS_GPIO=18
+# DOUT: PCM5102A DIN, or ES8388 DSDIN.
+# CONFIG_OSYNTH_I2S_DOUT_GPIO=19
+# DIN: PCM1808 DOUT, or ES8388 ASDOUT. Only with line input on.
+# CONFIG_OSYNTH_I2S_DIN_GPIO=20
+
+# --- ES8388 codec (only with OSYNTH_FRONTEND_ES8388) ------------------------
+
+# CONFIG_OSYNTH_ES8388_I2C_SDA_GPIO=7
+# CONFIG_OSYNTH_ES8388_I2C_SCL_GPIO=8
+# CONFIG_OSYNTH_ES8388_IN_LINE2=y
+# CONFIG_OSYNTH_ES8388_IN_LINE1=y
+# CONFIG_OSYNTH_ES8388_IN_DIFF=y
+# CONFIG_OSYNTH_ES8388_OUT_BOTH=y
+# CONFIG_OSYNTH_ES8388_OUT1=y
+# CONFIG_OSYNTH_ES8388_OUT2=y
+
+# --- Looper persistence -----------------------------------------------------
+
+# loop.save / loop.load. Default y (needs PSRAM, which this board has plenty
+# of — 32 MB against the S3's 8).
+# CONFIG_OSYNTH_LOOP_PERSIST=y
+# CONFIG_OSYNTH_LOOP_STORE_FLASH=y
+# CONFIG_OSYNTH_LOOP_STORE_SD=y
+
+# --- SD card ----------------------------------------------------------------
+
+# CONFIG_OSYNTH_DRUM_SD_KITS=n
+# Shared by the SD looper backend and SD drum kits; also board-specific, and
+# a P4 devkit usually has its own SD slot already wired somewhere else.
+# CONFIG_OSYNTH_SD_CS_GPIO=39
+# CONFIG_OSYNTH_SD_SCK_GPIO=40
+# CONFIG_OSYNTH_SD_MOSI_GPIO=41
+# CONFIG_OSYNTH_SD_MISO_GPIO=42
+
+# --- Serial MIDI ------------------------------------------------------------
+
+# Rarely wanted here — USB-MIDI comes free with the USB-OTG peripheral.
+# CONFIG_OSYNTH_SERIAL_MIDI_RX_GPIO=21

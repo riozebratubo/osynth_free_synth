@@ -27,6 +27,7 @@ ToolBar {
     readonly property real fixedChromeWidth:
         (prevButton.visible ? prevButton.width : 8)
         + (masterVol.visible ? 76 : 0)
+        + (outLevel.visible ? 76 : 0)
         + plugLabel.width + 4
         + menuButton.width
         + (nextButton.visible ? nextButton.width : 0)
@@ -135,6 +136,86 @@ ToolBar {
                 to: masterVol.meta.exists ? masterVol.meta.max : 1
                 property bool syncing: false
                 onMoved: if (!syncing) Synth.setParam(masterVol.volId, value)
+            }
+        }
+
+        // Analogue output level (out.level), on firmware with a codec whose
+        // output driver has one \u2014 an ES8388 build; there is no such register
+        // on a discrete PCM5102A, and the param is then never registered, so
+        // the whole strip self-hides on the same existence test masterVol
+        // uses. Resolved by name rather than by a hardcoded id because it is
+        // optional: paramIdForName returns -1 until discovery finds it.
+        //
+        // Distinct from master volume on purpose: this one sets the operating
+        // point for what is plugged in (0 dB into a line input, lower for
+        // headphones) and is set once by ear, while master.volume is the
+        // digital one you ride. Its 1.5 dB hardware steps also mean dragging
+        // it can be heard stepping \u2014 expected, and why it is not the control
+        // bound to performance.
+        RowLayout {
+            id: outLevel
+            property int levelId: -1
+            property var meta: ({ exists: false })
+            visible: meta.exists
+            spacing: 4
+            Layout.rightMargin: 6
+            Layout.preferredWidth: 70
+
+            function refresh() {
+                levelId = Synth.paramIdForName("out.level")
+                meta = levelId >= 0 ? Synth.paramMeta(levelId) : ({ exists: false })
+                if (meta.exists) {
+                    outSlider.syncing = true
+                    outSlider.value = Synth.paramValue(levelId)
+                    outSlider.syncing = false
+                }
+            }
+            Component.onCompleted: refresh()
+
+            Connections {
+                target: Synth
+                function onParamsDiscovered() { outLevel.refresh() }
+                function onParamChanged(id, v) {
+                    if (id === outLevel.levelId && outLevel.levelId >= 0
+                            && !outSlider.pressed) {
+                        outSlider.syncing = true
+                        outSlider.value = v
+                        outSlider.syncing = false
+                    }
+                }
+            }
+
+            Label {
+                text: "\uf025"  // headphones
+                font.family: App.fontAwesomeName
+                font.weight: Font.Black  // solid face
+                font.pointSize: UI.fontSize
+                color: App.theme.primaryColor
+                Layout.alignment: Qt.AlignVCenter
+
+                ToolTip.visible: outMouse.containsMouse
+                ToolTip.text: t.t("Output level: %1 dB").arg(outSlider.value.toFixed(1))
+                MouseArea {
+                    id: outMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    acceptedButtons: Qt.NoButton
+                }
+            }
+            Slider {
+                id: outSlider
+                Layout.fillWidth: true
+                Layout.alignment: Qt.AlignVCenter
+                Material.accent: App.theme.primaryColor
+                from: outLevel.meta.exists ? outLevel.meta.min : -45
+                to: outLevel.meta.exists ? outLevel.meta.max : 4.5
+                // The codec quantises to 1.5 dB anyway, so snapping the handle
+                // to the same grid stops the slider from reporting a value the
+                // hardware cannot actually take.
+                stepSize: 1.5
+                snapMode: Slider.SnapAlways
+                property bool syncing: false
+                onMoved: if (!syncing) Synth.setParam(outLevel.levelId, value)
             }
         }
 

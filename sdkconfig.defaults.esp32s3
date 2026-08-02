@@ -2,12 +2,16 @@
 # For quad-PSRAM boards (R2 variants) switch CONFIG_SPIRAM_MODE_OCT to CONFIG_SPIRAM_MODE_QUAD;
 # see docs/HARDWARE.md. SPIRAM_IGNORE_NOTFOUND keeps boards without (working) PSRAM booting.
 # CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
-CONFIG_OSYNTH_S3_FLASH_N16R8=y
+CONFIG_OSYNTH_FLASH_16MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+
+# Max CPU clock (IDF defaults to 160 MHz): the render budget needs it — see
+# the note in sdkconfig.defaults.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 
 # 32 KB instruction cache (default 16 KB, costs 16 KB internal RAM): the
 # render chain runs from flash and the engine code path is cold at note-on,
@@ -26,4 +30,144 @@ CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
 # CONFIG_SPI_FLASH_AUTO_SUSPEND is not set
 
 # External I2S DAC (PCM5102A) is the master out
-CONFIG_OSYNTH_ENABLE_I2S_DAC=y 
+CONFIG_OSYNTH_ENABLE_I2S_DAC=y
+
+# ===========================================================================
+# "osynth Synthesizer" options that are target-specific on the ESP32-S3.
+# Commented out at their Kconfig default; see the header in sdkconfig.defaults
+# for the syntax and for the target-independent options.
+#
+# Already set above and deliberately left alone: OSYNTH_ENABLE_I2S_DAC (the
+# DAC is the master out on this target) and OSYNTH_FLASH_16MB (the module
+# size the flash loops region is cut from — the other choice member is
+# CONFIG_OSYNTH_FLASH_8MB=y for an 8 MB module, which also wants
+# CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y so the image header matches the chip).
+# ===========================================================================
+
+# --- I2S analogue front end -------------------------------------------------
+
+# What is on the other end of the I2S port. This picks the *analogue*
+# hardware; the digital side is identical either way. Exactly one member,
+# default DISCRETE:
+#
+#   DISCRETE  PCM5102A DAC (+ optional PCM1808 ADC). Each chip is strapped by
+#             pins and needs no firmware. Best sounding — ~112 dB against the
+#             ES8388's ~96 — and the one to pick if the line output is what
+#             the instrument is judged on. Line input costs a second chip and
+#             two more GPIOs.
+#   ES8388    One codec for both directions, as on the ESP32-A1S, LyraT and
+#             most "ESP32 audio kit" boards. A step below a discrete DAC, but
+#             it is what is already soldered to those boards, and it brings
+#             an ADC, mic preamp and headphone driver. It has no useful
+#             strapping pins: it stays silent until the firmware writes its
+#             registers over I2C (OSYNTH_ES8388_I2C_* below), and it needs
+#             MCLK, so selecting it puts the port into the 32-bit-slot /
+#             64x fs / MCLK arrangement whether or not capture is on.
+#
+# CONFIG_OSYNTH_FRONTEND_DISCRETE=y
+CONFIG_OSYNTH_FRONTEND_ES8388=y
+
+# Stereo line input — I2S capture on the DAC's own port, so the converter
+# runs as a slave off BCLK/WS and capture is sample-locked to playback by
+# construction: nothing drifts and nothing is resampled. Default n on a
+# discrete front end (it needs a PCM1808 and two more pins), y on ES8388
+# (the ADC is already in the chip). Costs ~0.7% of the block budget and 256
+# bytes; monitoring latency is one DMA buffer plus a block, ~8-9 ms.
+# Placement in the render chain is a runtime param (`in.route`: off/mon/fx/
+# dry), not a build option — private_docs/HARDWARE.md.
+# CONFIG_OSYNTH_ENABLE_I2S_LINE_IN=n
+
+# Stream to USB *and* the I2S DAC at once, instead of the DAC replacing the
+# USB output. Default y. The DAC keeps the clock — its DMA still paces the
+# render loop and the USB write is best-effort, so a stalled host cannot
+# stall the audio task. Costs a 256-byte copy per block plus the EP-IN FIFO.
+# =n restores the older either/or behaviour, where the USB audio interface
+# stays enumerated but silent.
+# CONFIG_OSYNTH_USB_AUDIO_TAP=y
+
+# --- I2S pins ---------------------------------------------------------------
+
+# All five are configurable because codec boards come with their pinout
+# already soldered. Defaults sit in one block at 14-18; GPIO19/20 are the
+# native USB pins and **GPIO33-37 are the octal PSRAM — never touch those**.
+# Avoid strapping pins GPIO0, 3, 45, 46.
+# CONFIG_OSYNTH_I2S_BCLK_GPIO=16
+# CONFIG_OSYNTH_I2S_WS_GPIO=17
+# DOUT: PCM5102A DIN, or ES8388 DSDIN.
+# CONFIG_OSYNTH_I2S_DOUT_GPIO=18
+# DIN: PCM1808 DOUT, or ES8388 ASDOUT. Only with line input on.
+# CONFIG_OSYNTH_I2S_DIN_GPIO=15
+# MCLK: converter system clock at 256x fs (12.288 MHz at 48 kHz) — PCM1808
+# SCKI or ES8388 MCLK. Mandatory for both even in slave mode; without it a
+# PCM1808 reads silence while the starve counter climbs and an ES8388 does
+# not play at all. Only with line input or the ES8388 front end.
+# CONFIG_OSYNTH_I2S_MCLK_GPIO=14
+
+# --- ES8388 codec (only with OSYNTH_FRONTEND_ES8388) ------------------------
+
+# Control bus. Internal pull-ups are enabled, which is usually enough for a
+# short trace at 100 kHz; an unreliable board wants proper 4.7k externals.
+# CONFIG_OSYNTH_ES8388_I2C_SDA_GPIO=8
+# CONFIG_OSYNTH_ES8388_I2C_SCL_GPIO=9
+
+# Which analogue input pair the ADC listens to (only with line input on).
+# There is no way to detect it and boards differ: on the ESP32-A1S and LyraT
+# LIN1/RIN1 is the on-board microphone and LIN2/RIN2 the line/aux jack, hence
+# the default. DIFF takes both pairs as one differential input and is only
+# correct if the board is actually wired that way.
+# CONFIG_OSYNTH_ES8388_IN_LINE2=y
+# CONFIG_OSYNTH_ES8388_IN_LINE1=y
+# CONFIG_OSYNTH_ES8388_IN_DIFF=y
+
+# Which output pairs to power. Driving one you are not using costs a little
+# current and nothing else, so BOTH (the default) is the safe answer when the
+# board's wiring is unknown. OUT1 is the headphone jack on most boards, OUT2
+# the speaker amp input.
+# CONFIG_OSYNTH_ES8388_OUT_BOTH=y
+# CONFIG_OSYNTH_ES8388_OUT1=y
+# CONFIG_OSYNTH_ES8388_OUT2=y
+
+# --- Looper persistence -----------------------------------------------------
+
+# loop.save / loop.load (params 0x0605/0x0606), copying the looper's track set
+# between PSRAM and durable storage. Default y (needs PSRAM, hence S3 only).
+# Tracks are IMA-ADPCM in both places, so saves and loads are straight copies.
+# CONFIG_OSYNTH_LOOP_PERSIST=y
+
+# Storage backend, exactly one member, default FLASH:
+#
+#   FLASH  raw flash above the partition table, no extra hardware, one slot.
+#          Flash writes stall XIP code fetches, so save/load require the
+#          transport to be stopped. Sized by the module choice at the top of
+#          this file (16 MB module -> 12 MB region, ~260 s stereo ADPCM or
+#          double that mono); the region is verified against the detected
+#          chip size at boot and trimmed with a warning if it does not fit.
+#   SD     SPI-mode FAT card on the pins below: 8 slots, song-scale capacity,
+#          and no XIP interference, so save/load work while the loop plays.
+#
+# CONFIG_OSYNTH_LOOP_STORE_FLASH=y
+# CONFIG_OSYNTH_LOOP_STORE_SD=y
+
+# --- SD card ----------------------------------------------------------------
+
+# Drum kits from /sd/osynth/kits — .okit images from tools/gen_drumkit.py, or
+# folders of .wav one-shots (name a file "03_snare.wav" to pin it to a slot).
+# Read into PSRAM. Default n; the factory kit embedded in the firmware works
+# without a card.
+# CONFIG_OSYNTH_DRUM_SD_KITS=n
+
+# The SD bus is shared: whichever of the SD looper backend and SD drum kits
+# gets there first mounts the card, and these pins apply as soon as either is
+# on. FSPI IOMUX pins — the fastest SPI this chip has — so prefer to leave
+# them alone.
+# CONFIG_OSYNTH_SD_CS_GPIO=10
+# CONFIG_OSYNTH_SD_MOSI_GPIO=11
+# CONFIG_OSYNTH_SD_SCK_GPIO=12
+# CONFIG_OSYNTH_SD_MISO_GPIO=13
+
+# --- Serial MIDI ------------------------------------------------------------
+
+# UART RX pin for DIN MIDI, used when OSYNTH_ENABLE_SERIAL_MIDI (see
+# sdkconfig.defaults) is on. Default 5 on this target. Rarely wanted here —
+# USB-MIDI comes free with the USB-OTG peripheral this chip has.
+# CONFIG_OSYNTH_SERIAL_MIDI_RX_GPIO=5

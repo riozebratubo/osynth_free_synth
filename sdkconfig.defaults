@@ -8,10 +8,12 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # -O2: the DSP code needs it
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
-# Max CPU clock (IDF defaults to 160 MHz): the render budget needs it.
-# ~27% idle FX load + ~12% per subtractive voice at 160 MHz meant full
-# polyphony overran the 1.33 ms block deadline (audible as noise bursts).
-CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+# Max CPU clock lives in the per-target files: the choice members are named
+# after the frequency and the targets do not share one (240 MHz on the Xtensa
+# chips, 400 MHz on the P4), so a line here would be an unknown symbol on
+# whichever target it did not fit. The reason is the same everywhere — ~27%
+# idle FX load + ~12% per subtractive voice at 160 MHz meant full polyphony
+# overran the 1.33 ms block deadline, audible as noise bursts.
 
 # 1 kHz tick for fine-grained delays in control tasks
 CONFIG_FREERTOS_HZ=1000
@@ -45,4 +47,77 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
 # prefer the lower latency.
 CONFIG_OSYNTH_BLOCK_SIZE=64
 
+# Period of the "alive | ..." status line, 0 silences it. Also a diagnostic:
+# it is the only periodic event in the firmware slower than 500 ms, so if you
+# hear a click at this period, change it to 30000 and listen — if the clicks
+# follow, the logging path is the cause and not the synthesis.
 CONFIG_OSYNTH_HEARTBEAT_MS=5000
+
+# ===========================================================================
+# "osynth Synthesizer" menu — the rest of it, target-independent options.
+#
+# Everything below is commented out *at its Kconfig default*
+# (components/synth_core/Kconfig.projbuild), so uncommenting a line without
+# editing its value changes nothing — the value shown is what you already
+# get. Uncomment and edit to override, or pin a default you want to survive
+# a Kconfig change.
+#
+# Syntax: bools take =y or =n; an int takes the number; a choice is set by
+# giving exactly one of its member symbols =y (never =n — that just leaves
+# the choice at its own default).
+#
+# Options whose default or availability depends on the chip (I2S front end
+# and its pins, PSRAM-backed features, USB) live in sdkconfig.defaults.esp32
+# and sdkconfig.defaults.esp32s3, which ESP-IDF applies after this file.
+# ===========================================================================
+
+# --- Control surfaces -------------------------------------------------------
+
+# BLE control for the companion mobile app: custom GATT service, binary TLV
+# protocol (private_docs/BLE_PROTOCOL.md). Default y.
+# Note that =n only compiles out ble_ctrl; the NimBLE stack is still built,
+# because CONFIG_BT_ENABLED above is independent. Set that to n as well to
+# actually reclaim the flash and RAM.
+# CONFIG_OSYNTH_ENABLE_BLE=y
+
+# Local UI (LCD + encoders + buttons). Default n — the component compiles to
+# a stub, and the synth is driven over BLE/USB-MIDI instead.
+# CONFIG_OSYNTH_ENABLE_LOCAL_UI=n
+
+# Serial (UART/DIN) MIDI input on UART1 at 31250 baud. Default n. Mainly for
+# the classic ESP32, which has no USB-OTG and so no USB-MIDI. Needs a proper
+# optocoupled input circuit (6N138) — never wire a DIN cable straight to the
+# GPIO. The RX pin default differs per target, so OSYNTH_SERIAL_MIDI_RX_GPIO
+# is listed in the two target files.
+# CONFIG_OSYNTH_ENABLE_SERIAL_MIDI=n
+
+# --- Engine sizing ----------------------------------------------------------
+
+# Polyphony. Range 1..16, default 8. Costs render budget roughly linearly
+# (~12% of the block deadline per subtractive voice at 160 MHz, which is why
+# 240 MHz is forced above); the heartbeat's load figure is the thing to watch
+# after raising it — peak was 71% of budget at 8 voices.
+# CONFIG_OSYNTH_VOICES=8
+
+# Sample rate. Default 48000, which is what the UAC2 descriptor advertises —
+# usb_descriptors.h builds itself from this symbol, so USB audio follows a
+# change automatically, as does the I2S MCLK (256x fs). 48000 is the tested
+# value; anything else is untested against the host class drivers.
+# CONFIG_OSYNTH_SAMPLE_RATE=48000
+
+# Modular patch graph engine (S28): a fifth engine whose signal path is a node
+# graph patched with cables instead of a fixed chain. Costs an audio buffer
+# pool in internal RAM (~12 KB at the defaults) plus its kernels in IRAM.
+# Default y on the ESP32-S3, n on the classic ESP32 — there the fixed engines
+# fuse and a freely patched graph does not, and the headroom left after the FX
+# bus does not reliably fit one. Uncommenting here applies to both targets.
+# CONFIG_OSYNTH_ENABLE_MODULAR=y
+
+# --- Render path ------------------------------------------------------------
+
+# Marks the per-block render path (engines, voice manager, FX bus, looper,
+# audio-task conversion) IRAM_ATTR, so flash-cache misses from BLE/Wi-Fi or
+# filesystem traffic cannot add jitter to the audio deadline. Default y, costs
+# ~20-30 KB of IRAM. Set n if the image stops linking with "region iram0
+# overflowed".
+# CONFIG_OSYNTH_RENDER_IN_IRAM=y

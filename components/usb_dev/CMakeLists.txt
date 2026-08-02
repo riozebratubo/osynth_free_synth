@@ -1,7 +1,9 @@
-# USB composite device (TinyUSB) — ESP32-S3 only. On the classic ESP32 (no
-# USB-OTG peripheral) only the stub compiles and the tinyusb dependency is
-# skipped entirely (idf_component.yml rules), so gate on the CMake target.
-if(IDF_TARGET STREQUAL "esp32s3")
+# USB composite device (TinyUSB) — chips with a USB-OTG peripheral, i.e. the
+# ESP32-S3 and ESP32-P4. On the classic ESP32 (no USB-OTG) only the stub
+# compiles and the tinyusb dependency is skipped entirely (idf_component.yml
+# rules), so gate on the CMake target. Keep this list in step with
+# SYNTH_HAS_USB in synth_core/include/synth_config.h.
+if(IDF_TARGET STREQUAL "esp32s3" OR IDF_TARGET STREQUAL "esp32p4")
     # WHOLE_ARCHIVE: usb_descriptors.c defines the tud_descriptor_*_cb symbols
     # whose only references live in tinyusb's usbd.c — an archive the linker
     # processes *after* this one (dependents link before dependencies, no

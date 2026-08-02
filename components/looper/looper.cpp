@@ -47,7 +47,8 @@
  *    instead.
  *
  * The first track is allocated at the policy cap (the length is not known
- * yet; 40 s stereo x2 mono x2 4-track, S20) and compacted to the actual
+ * yet; a base cap sized from free PSRAM at init, x2 mono x2 4-track — see
+ * the cap-policy comment below) and compacted to the actual
  * loop length once it closes (copy + pointer swap + render handshake +
  * free). A first take whose cap does not fit free PSRAM halves it until
  * it fits (the achieved ceiling is mirrored via loop.maxlen). Buffers are
@@ -85,14 +86,51 @@ using osynth::ParamType;
 
 namespace {
 
-/* Cap policy (S20): base 40 s (stereo, 8-track mode), x2 for mono
- * (loop.mono halves the bytes per frame), x2 in 4-track mode (loop.tracks
- * trades slots for length) — 160 s mono/4-track ceiling. At the full cap
- * a track costs ~1.9 MB (3.8 MB in 4-track mode), so ~4 (resp. ~2) tracks
- * fit the ~7 MB PSRAM pool at cap and everything fits at half the cap;
- * the graceful first-take fallback below covers the shortfalls. */
-constexpr float kLoopBaseCapS = 40.0f;
-constexpr float kLoopAbsMaxS = kLoopBaseCapS * 4.0f; /* mono + 4-track */
+/* Cap policy (S20, sized from the free PSRAM pool since the P4 target): a
+ * base cap for stereo/8-track mode, x2 for mono (loop.mono halves the bytes
+ * per frame), x2 in 4-track mode (loop.tracks trades slots for length) — so
+ * the absolute ceiling is 4x the base, and all three modes commit the same
+ * total bytes for a full set (8 x base, or 4 x 2x base, ...).
+ *
+ * The base used to be a flat 40 s, chosen for an 8 MB S3: a full set at cap
+ * is 8 x 40 s x 48 kB/s = ~15.4 MB against a ~7 MB free pool. That ~2x
+ * over-commit was deliberate and is the thing worth preserving — most sets
+ * are not eight tracks at the ceiling, and the first-take fallback below
+ * halves gracefully for the ones that are. So rather than a seconds-per-MB
+ * constant fitted to one board, the policy is stated directly:
+ *
+ *     a full track set at cap may commit kLoopCommitRatio x the free pool
+ *
+ * which rearranges to the base cap below. It reproduces ~38 s on the S3's
+ * ~7 MB (i.e. today's behaviour), gives a 32 MB P4 board its clamped 160 s
+ * base — 640 s at the mono/4-track ceiling — and gives a 2 MB quad-PSRAM S3
+ * an honest ~10 s instead of advertising 40 s and then falling back to it
+ * with a "PSRAM short" warning on the first take.
+ *
+ * Free, not installed: by the time looper_init() runs, main.cpp has already
+ * brought up the FX buffers, the drum kit and the modular graph pool, so
+ * what is left is what the looper can actually have. A build with the graph
+ * compiled out therefore offers a longer loop, which is correct rather than
+ * surprising.
+ *
+ * The clamp exists because neither end extrapolates forever: below the floor
+ * a loop pedal stops being useful, and above the ceiling a single track no
+ * longer fits any flash persistence region worth having. */
+constexpr float kLoopCommitRatio = 2.0f;
+constexpr float kLoopBaseCapMinS = 10.0f;
+constexpr float kLoopBaseCapMaxS = 160.0f; /* reached around 30 MB free */
+/* Widest ceiling the policy can ever produce. Only the static kParams table
+ * uses it — a ParamDesc initialiser needs a constant, and registration then
+ * narrows the three seconds-valued entries to this board's real numbers. */
+constexpr float kLoopAbsMaxCeilS = kLoopBaseCapMaxS * 4.0f;
+
+/* Live base cap. Constant-initialised to the historical value so it is valid
+ * during static init (s_rec_limit below seeds itself from cap_frames), then
+ * replaced by looper_init() once the heap can be measured. */
+float s_base_cap_s = 40.0f;
+
+inline float loop_abs_max_s() { return s_base_cap_s * 4.0f; }
+
 constexpr uint32_t kMinFrames = SYNTH_SAMPLE_RATE / 4; /* 0.25 s */
 constexpr uint32_t kMinTakeCapFrames =
     SYNTH_SAMPLE_RATE * 5; /* fallback floor: give up below 5 s */
@@ -100,9 +138,26 @@ constexpr uint32_t kCompactSlackFrames = 65536; /* compact if > 64 KB
                                                  * (stereo) / 32 KB (mono)
                                                  * of waste */
 
-constexpr uint32_t cap_frames(bool mono, bool four_tracks) {
-    return (uint32_t)(kLoopBaseCapS * SYNTH_SAMPLE_RATE) *
+inline uint32_t cap_frames(bool mono, bool four_tracks) {
+    return (uint32_t)(s_base_cap_s * SYNTH_SAMPLE_RATE) *
            (mono ? 2u : 1u) * (four_tracks ? 2u : 1u);
+}
+
+/* Base cap in seconds for `free_bytes` of PSRAM, clamped. One full set at
+ * cap is LOOP_TRACKS x base x SYNTH_SAMPLE_RATE bytes (stereo ADPCM is
+ * 1 B/frame, and the mono and 4-track modes trade one factor for the other,
+ * so the total is the same in all three); allowing that to reach
+ * kLoopCommitRatio x the pool and solving for base gives this. */
+float base_cap_for_pool(size_t free_bytes) {
+    float s = kLoopCommitRatio * (float)free_bytes /
+              ((float)LOOP_TRACKS * (float)SYNTH_SAMPLE_RATE);
+    /* Whole seconds: the app prints this with no decimals, and a cap of
+     * 38.23 s displayed as "max loop 38 s" would be a promise the firmware
+     * does not keep. Floor, so the number shown is always achievable. */
+    s = (float)(int)s;
+    if (s < kLoopBaseCapMinS) return kLoopBaseCapMinS;
+    if (s > kLoopBaseCapMaxS) return kLoopBaseCapMaxS;
+    return s;
 }
 
 /* PSRAM/storage bytes of one track (S20: ADPCM — stereo 1 B/frame, mono
@@ -132,11 +187,14 @@ const ParamDesc kParams[] = {
     {LOOP_PID_FILLED, "loop.filled", ParamType::Int, ParamCurve::Linear,
      0.0f, 255.0f, 0.0f, nullptr, 0}, /* read-only status bitmask */
     {LOOP_PID_LEN, "loop.len", ParamType::Float, ParamCurve::Linear,
-     0.0f, kLoopAbsMaxS, 0.0f, nullptr, 0}, /* read-only status, seconds;
-                                             * ranged for the ceiling —
-                                             * loop.maxlen is the live cap */
+     0.0f, kLoopAbsMaxCeilS, 0.0f, nullptr, 0}, /* read-only status, seconds;
+                                                 * ranged for the ceiling —
+                                                 * loop.maxlen is the live
+                                                 * cap. Narrowed to this
+                                                 * board's ceiling by
+                                                 * register_params(). */
     {LOOP_PID_POS, "loop.pos", ParamType::Float, ParamCurve::Linear,
-     0.0f, kLoopAbsMaxS, 0.0f, nullptr, 0}, /* read-only status, seconds */
+     0.0f, kLoopAbsMaxCeilS, 0.0f, nullptr, 0}, /* read-only status, seconds */
     {LOOP_PID_RECTRK, "loop.rectrk", ParamType::Int, ParamCurve::Linear,
      0.0f, (float)LOOP_TRACKS, 0.0f, nullptr, 0}, /* read-only, 0 = none */
     {LOOP_PID_MONO, "loop.mono", ParamType::Enum, ParamCurve::Linear,
@@ -144,7 +202,8 @@ const ParamDesc kParams[] = {
                                         * defaults on — length beats the
                                         * stereo image for a loop pedal */
     {LOOP_PID_MAXLEN, "loop.maxlen", ParamType::Float, ParamCurve::Linear,
-     0.0f, kLoopAbsMaxS, kLoopBaseCapS, nullptr, 0}, /* read-only live cap;
+     0.0f, kLoopAbsMaxCeilS, kLoopBaseCapMaxS, nullptr, 0},
+                                                     /* read-only live cap;
                                                       * default = base cap,
                                                       * max = ceiling —
                                                       * clients compute
@@ -986,8 +1045,33 @@ void param_listener(uint16_t id, float value, ParamOrigin origin, void*) {
 
 extern "C" esp_err_t looper_init(void) {
     ParamStore& ps = ParamStore::instance();
+
+    /* Size the cap policy to the PSRAM actually left for the looper, before
+     * the parameters are registered — the app reads the ceiling from
+     * loop.len / loop.pos and the base cap from loop.maxlen's *default*
+     * (PARAM_INFO metadata), so those three have to be truthful at
+     * registration or the "max n s" texts describe a board that isn't this
+     * one. main.cpp calls this after fx/drums/engines, so the measurement is
+     * taken once the other PSRAM consumers have had their turn. */
+    s_base_cap_s =
+        base_cap_for_pool(heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    s_rec_limit.store(cap_frames(true, true), std::memory_order_relaxed);
+
+    /* ParamStore::add copies the descriptor, so patching a local copy is
+     * enough — and keeps kParams a single readable table. */
+    ParamDesc live[kParamCount];
+    memcpy(live, kParams, sizeof(live));
+    for (ParamDesc& d : live) {
+        if (d.id == LOOP_PID_LEN || d.id == LOOP_PID_POS) {
+            d.max = loop_abs_max_s();
+        } else if (d.id == LOOP_PID_MAXLEN) {
+            d.max = loop_abs_max_s();
+            d.def = s_base_cap_s;
+        }
+    }
+
     size_t params = kParamCount;
-    if (ps.add(kParams, kParamCount) != kParamCount) {
+    if (ps.add(live, kParamCount) != kParamCount) {
         ESP_LOGE(TAG, "param registration failed");
         return ESP_FAIL;
     }
@@ -1019,10 +1103,11 @@ extern "C" esp_err_t looper_init(void) {
     seqarp_set_beat_callback(beat_cb, nullptr);
     ESP_LOGI(TAG,
              "up: %d tracks, adpcm in PSRAM (~%u KB/s stereo, half mono), "
-             "cap %.0f s x2 mono x2 4-track (<= %.0f s), free PSRAM %u KB "
+             "cap %.0f s x2 mono x2 4-track (<= %.0f s, sized from the free "
+             "pool at init), free PSRAM %u KB "
              "(largest block %u KB), %u params, punch-in at loop start%s",
              LOOP_TRACKS, (unsigned)(SYNTH_SAMPLE_RATE / 1024),
-             kLoopBaseCapS, kLoopAbsMaxS,
+             s_base_cap_s, loop_abs_max_s(),
              (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
              (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) /
                         1024),

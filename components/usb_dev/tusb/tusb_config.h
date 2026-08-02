@@ -1,5 +1,5 @@
 /*
- * osynth — TinyUSB stack configuration (ESP32-S3, USB-OTG full speed).
+ * osynth — TinyUSB stack configuration (USB-OTG, full speed).
  *
  * Composite device: UAC2 audio source (synth -> host, one function, one
  * format) + USB-MIDI. This directory is injected into the espressif__tinyusb
@@ -16,7 +16,12 @@ extern "C" {
 #endif
 
 /* ---- Board / port ---- */
-/* ESP32-S3 USB-OTG is full speed only. */
+/* Root-hub port 0 is the full-speed controller on both supported chips: the
+ * ESP32-S3 has only that one, and on the ESP32-P4 the DWC2 port table puts
+ * OTG_FS at index 0 and OTG_HS at index 1 (dwc2_esp32.h). Staying on port 0
+ * means the UAC2 and MIDI descriptors are identical across targets — a 48 kHz
+ * stereo stream does not need high speed, and moving to it would mean
+ * recomputing every isochronous bInterval for 125 us microframes. */
 #define CFG_TUSB_RHPORT0_MODE   (OPT_MODE_DEVICE | OPT_MODE_FULL_SPEED)
 
 /* ---- Common ---- */
@@ -35,7 +40,14 @@ extern "C" {
 #define ESP_PLATFORM 1
 #endif
 
-/* Keep TinyUSB buffers in internal RAM: the USB DMA cannot reach PSRAM. */
+/* Keep TinyUSB buffers in internal RAM: the USB DMA cannot reach PSRAM.
+ *
+ * 4-byte alignment is enough because DWC2 DMA stays off — CFG_TUD_DWC2_DMA_ENABLE
+ * defaults to 0 (tusb_option.h), so the driver copies through the FIFOs and no
+ * buffer is ever handed to a bus master. If that is ever turned on for the P4,
+ * this has to become cache-line alignment and CFG_TUD_MEM_DCACHE_LINE_SIZE has
+ * to equal CONFIG_CACHE_L1_CACHE_LINE_SIZE (64), which dwc2_esp32.h enforces
+ * with an #error. */
 #define CFG_TUSB_MEM_SECTION
 #define CFG_TUSB_MEM_ALIGN      __attribute__ ((aligned(4)))
 

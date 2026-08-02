@@ -3,9 +3,9 @@ import QtQuick.Controls.Material
 
 import org.osynth.osyntho
 
-// Master FX bus: chorus -> delay -> granular delay -> reverb -> bitcrush.
-// Engine-independent (registered at boot), so these persist across engine
-// switches.
+// Master FX bus: chorus -> delay -> granular delay -> reverb -> bitcrush,
+// plus the line input that feeds into it (S31). Engine-independent
+// (registered at boot), so these persist across engine switches.
 Item {
     Flickable {
         anchors.fill: parent
@@ -15,6 +15,10 @@ Item {
 
         PanelFlow {
             id: panels
+
+            // Line input (S31). Self-hides on firmware without it, since
+            // PARAM_INFO then reports no `in.` ids at all.
+            ParamGroup { title: "Line in"; prefix: "in." }
 
             ParamGroup { title: "Chorus"; prefix: "fx.cho" }
             ParamGroup { title: "Delay"; prefix: "fx.dly" }

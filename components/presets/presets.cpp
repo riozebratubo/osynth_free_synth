@@ -302,6 +302,13 @@ bool skip_id(uint16_t id) {
         case DRUM_PID_TRIG:
         case osynth::PID_MASTER_VOLUME:
         case osynth::PID_ENGINE_TYPE:
+        /* Line input (S31): the rig's wiring, like master volume. Loading a
+         * preset that silently unmuted a live microphone — or moved its gain
+         * — would be a genuinely bad surprise. */
+        case osynth::PID_LINE_IN_ROUTE:
+        case osynth::PID_LINE_IN_GAIN:
+        case osynth::PID_LINE_IN_PGA:
+        case osynth::PID_OUT_LEVEL:
         case PRESET_PID_LOAD:
         case PRESET_PID_SAVE:
         case PRESET_PID_SEQ_LOAD:

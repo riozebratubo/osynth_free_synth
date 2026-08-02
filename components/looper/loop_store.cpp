@@ -136,10 +136,12 @@ void encode_raw_frames(osynth::adpcm::Ch& cl, osynth::adpcm::Ch& cr,
 namespace {
 
 constexpr uint32_t kFlashBase = 0x400000; /* right after `storage` */
-#if CONFIG_OSYNTH_S3_FLASH_N16R8
-constexpr uint32_t kFlashEndCfg = 0x1000000; /* N16R8: 16 MB module */
+#if CONFIG_OSYNTH_FLASH_32MB
+constexpr uint32_t kFlashEndCfg = 0x2000000; /* 32 MB module */
+#elif CONFIG_OSYNTH_FLASH_16MB
+constexpr uint32_t kFlashEndCfg = 0x1000000; /* 16 MB module */
 #else
-constexpr uint32_t kFlashEndCfg = 0x800000; /* N8R8: 8 MB module */
+constexpr uint32_t kFlashEndCfg = 0x800000; /* 8 MB module */
 #endif
 constexpr uint32_t kSector = 0x1000;
 constexpr size_t kBounce = 8192; /* internal-RAM staging chunk */

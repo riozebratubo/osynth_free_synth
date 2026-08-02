@@ -17,7 +17,10 @@
  * saved values, so it runs after every registration and before the audio
  * task) -> USB device (S3; must also
  * precede the audio task, whose USB sink feeds it) -> audio task (core 1,
- * render chain: voice sum -> drums -> FX bus -> looper) -> midi (hooks the USB RX callback)
+ * render chain: voice sum -> drums -> FX bus -> looper) -> codec (S31b; the
+ * ES8388's I2C bring-up, *after* the audio task because that is what starts
+ * the MCLK it needs — a no-op on a discrete front end)
+ * -> midi (hooks the USB RX callback)
  * -> BLE control (S14; NimBLE + the SynthCtl GATT service — after the
  * audio task on purpose: it registers no params, and radio bring-up frees
  * nothing if it fails, so the synth core is already alive either way) ->
@@ -38,6 +41,7 @@
 
 #include "audio_io.h"
 #include "ble_ctrl.h"
+#include "codec.h"
 #include "drums.h"
 #include "engines.h"
 #include "fx.h"
@@ -67,12 +71,60 @@ static void register_global_params() {
                                          "modular",
 #endif
     };
+#if SYNTH_ENABLE_LINE_IN
+    /* Where the line input joins the render chain, and therefore what it
+     * records: `mon` is mixed after the looper's record tap, so it is heard
+     * but never printed into a take; `fx` and `dry` are mixed before it. See
+     * render_chain() below. */
+    static const char* kInRouteNames[] = {"off", "mon", "fx", "dry"};
+#endif
+#if SYNTH_ENABLE_CODEC_ES8388 && SYNTH_ENABLE_LINE_IN
+    /* The ES8388's PGA moves in 3 dB steps and stops at 24. An enum of the
+     * nine reachable settings beats an integer range the firmware would
+     * silently round — the app then offers exactly what the hardware does,
+     * and the stored value *is* the register code. */
+    static const char* kInPgaNames[] = {"0 dB",  "+3 dB",  "+6 dB",
+                                        "+9 dB", "+12 dB", "+15 dB",
+                                        "+18 dB", "+21 dB", "+24 dB"};
+#endif
     static const ParamDesc kGlobals[] = {
         {PID_MASTER_VOLUME, "master.volume", ParamType::Float,
          ParamCurve::Linear, 0.0f, 1.0f, 0.8f, nullptr, 0},
         {PID_ENGINE_TYPE, "engine.type", ParamType::Enum, ParamCurve::Linear,
          0.0f, (float)(SYNTH_ENGINE_COUNT - 1), (float)SYNTH_ENGINE_SUBTRACTIVE,
          kEngineNames, SYNTH_ENGINE_COUNT},
+#if SYNTH_ENABLE_LINE_IN
+        {PID_LINE_IN_ROUTE, "in.route", ParamType::Enum, ParamCurve::Linear,
+         0.0f, 3.0f, 0.0f, kInRouteNames, 4},
+        /* Linear, not Exp: smooth_exp() divides by its running value, so an
+         * exponential curve needs min > 0 — and 0 here has to mean silent. */
+        {PID_LINE_IN_GAIN, "in.gain", ParamType::Float, ParamCurve::Linear,
+         0.0f, 4.0f, 1.0f, nullptr, 0},
+#endif
+#if SYNTH_ENABLE_CODEC_ES8388 && SYNTH_ENABLE_LINE_IN
+        /* Analogue gain, ahead of the converter — the one that actually buys
+         * headroom, since anything clipped in front of the ADC is gone. Only
+         * registered where the hardware has such a stage; `in.gain` above is
+         * the digital trim and means the same thing on every front end. */
+        {PID_LINE_IN_PGA, "in.pga", ParamType::Enum, ParamCurve::Linear, 0.0f,
+         8.0f, 0.0f, kInPgaNames, 9},
+#endif
+#if SYNTH_ENABLE_CODEC_ES8388
+        /* Analogue output driver level in dB, quantised to the hardware's
+         * 1.5 dB steps on the way to the register. A float and not an enum of
+         * the 34 reachable settings, which is what in.pga got: PARAM_INFO is
+         * a single frame and drops enum names that no longer fit (ble_ctrl.cpp),
+         * so 34 of them would arrive at the app silently truncated. Rounding
+         * by at most 0.75 dB on a trim that is set once by ear is the smaller
+         * lie, and the app shows real dB either way.
+         *
+         * This is deliberately not master.volume. That one stays digital and
+         * slewed per block; this register steps 1.5 dB with no ramp and would
+         * click on every step of a drag. Set it for the load — 0 dB into a
+         * line input, lower for headphones — and ride master.volume. */
+        {PID_OUT_LEVEL, "out.level", ParamType::Float, ParamCurve::Linear,
+         -45.0f, 4.5f, 0.0f, nullptr, 0},
+#endif
     };
     ParamStore::instance().add(kGlobals, sizeof(kGlobals) / sizeof(kGlobals[0]));
 
@@ -86,6 +138,21 @@ static void register_global_params() {
      * depending on what is bound, and patch data belongs in presets anyway. */
     static const uint16_t kPersisted[] = {
         PID_MASTER_VOLUME,
+#if SYNTH_ENABLE_LINE_IN
+        /* Same reasoning: the route and the trim describe what is plugged
+         * into the box, not what patch is loaded. Presets skip both. */
+        PID_LINE_IN_ROUTE,
+        PID_LINE_IN_GAIN,
+#endif
+#if SYNTH_ENABLE_CODEC_ES8388 && SYNTH_ENABLE_LINE_IN
+        PID_LINE_IN_PGA,
+#endif
+#if SYNTH_ENABLE_CODEC_ES8388
+        /* What is plugged into the output jack does not change with the
+         * patch, and coming back from a power cycle at line level into
+         * headphones would be unpleasant. */
+        PID_OUT_LEVEL,
+#endif
     };
     persist_add(kPersisted, sizeof(kPersisted) / sizeof(kPersisted[0]));
 }
@@ -103,7 +170,15 @@ static void register_global_params() {
  *
  * The looper still sits last so a track captures the live synth *and* the
  * drums with their FX print, and the played-back tracks are neither
- * re-recorded nor re-effected. */
+ * re-recorded nor re-effected.
+ *
+ * The line input (S31) is one capture with three possible destinations, and
+ * the looper's record tap is what makes them different. `fx` joins before the
+ * FX bus, so external gear is reverberated and that print lands in the take.
+ * `dry` joins after it, recorded without effects. `mon` joins after the
+ * looper entirely — heard, never recorded, which is what makes it safe to
+ * leave a live microphone monitored while looping. Only the position
+ * `in.route` selects carries gain; the other two return on a compare. */
 static void SYNTH_RENDER_IRAM render_chain(float* out_l, float* out_r,
                                            size_t frames, void* ctx) {
     /* Cycle-counter reads so the heartbeat can attribute the load to a stage
@@ -116,11 +191,17 @@ static void SYNTH_RENDER_IRAM render_chain(float* out_l, float* out_r,
     const uint32_t c0 = esp_cpu_get_cycle_count();
     voice_manager_render(out_l, out_r, frames, ctx);
     drums_pre_fx(out_l, out_r, frames);
+    /* Before the c1 marker, so the input's cost folds into `voi` alongside
+     * the drums rather than earning a fourth number nobody would read. */
+    audio_io_line_in_fx(out_l, out_r, frames);
     const uint32_t c1 = esp_cpu_get_cycle_count();
     fx_process(out_l, out_r, frames);
     const uint32_t c2 = esp_cpu_get_cycle_count();
     drums_post_fx(out_l, out_r, frames);
+    audio_io_line_in_dry(out_l, out_r, frames);
     looper_process(out_l, out_r, frames);
+    /* After the record tap: monitored, never printed into a take. */
+    audio_io_line_in_mon(out_l, out_r, frames);
     /* After the looper on purpose: the metronome is monitoring, not material,
      * and mixing it earlier printed count-in ticks into the take. */
     drums_render_click(out_l, out_r, frames);
@@ -130,9 +211,11 @@ static void SYNTH_RENDER_IRAM render_chain(float* out_l, float* out_r,
 
 extern "C" void app_main(void) {
     ESP_LOGI(TAG, "osynth v0.1.0 — multi-engine synthesizer");
-    ESP_LOGI(TAG, "target %s | usb:%d ble:%d i2s_dac:%d local_ui:%d serial_midi:%d",
+    ESP_LOGI(TAG,
+             "target %s | usb:%d ble:%d i2s_dac:%d line_in:%d local_ui:%d "
+             "serial_midi:%d",
              CONFIG_IDF_TARGET, SYNTH_ENABLE_USB, SYNTH_ENABLE_BLE,
-             SYNTH_ENABLE_I2S_DAC, SYNTH_ENABLE_LOCAL_UI,
+             SYNTH_ENABLE_I2S_DAC, SYNTH_ENABLE_LINE_IN, SYNTH_ENABLE_LOCAL_UI,
              SYNTH_ENABLE_SERIAL_MIDI);
     ESP_LOGI(TAG, "audio %d Hz, block %d, %d voices", SYNTH_SAMPLE_RATE,
              SYNTH_BLOCK_SIZE, SYNTH_VOICES);
@@ -168,7 +251,14 @@ extern "C" void app_main(void) {
     ESP_ERROR_CHECK(usb_dev_init());
 
     ESP_ERROR_CHECK(audio_io_start(render_chain, nullptr));
-    ESP_LOGI(TAG, "audio sink: %s", audio_io_sink_name());
+    /* After the audio task on purpose: audio_io_start() enables the I2S port
+     * before it returns, so a codec that needs MCLK to come out of reset gets
+     * a clock that is already running. Deliberately not ESP_ERROR_CHECKed —
+     * a codec that fails to answer leaves the board silent, which is worth an
+     * error in the log but not a bootloop. */
+    (void)codec_init();
+    ESP_LOGI(TAG, "audio sink: %s | codec: %s", audio_io_sink_name(),
+             codec_name());
 
     ESP_ERROR_CHECK(midi_init());
     ESP_ERROR_CHECK(ble_ctrl_init());
@@ -182,6 +272,7 @@ extern "C" void app_main(void) {
 #else
     audio_io_stats_t st;
     char usb_seg[40];
+    char in_seg[40];
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(SYNTH_HEARTBEAT_MS));
         audio_io_get_stats(&st);
@@ -208,11 +299,20 @@ extern "C" void app_main(void) {
 #else
         usb_seg[0] = '\0';
 #endif
+#if SYNTH_ENABLE_LINE_IN
+        /* Pre-gain peak, so it reads what the ADC saw: clipping in front of
+         * it is analogue and no trim in here undoes it. `starve` must stay
+         * at 0 — anything else means the RX side is not clocking. */
+        snprintf(in_seg, sizeof(in_seg), " | in pk %.2f, starve %u", st.in_peak,
+                 (unsigned)st.in_starves);
+#else
+        in_seg[0] = '\0';
+#endif
         ESP_LOGI(TAG,
                  "alive | heap free %u (min %u) | audio blocks %u, underruns %u, "
                  "dsp %.1f%% (pk %.1f%%) [voi %.1f fx %.1f loop %.1f] | "
                  "out pk %.2f, sat %u | voices %u/%d (+%d drum) | engine %s | "
-                 "ble %s%s",
+                 "ble %s%s%s",
                  (unsigned)esp_get_free_heap_size(),
                  (unsigned)esp_get_minimum_free_heap_size(),
                  (unsigned)st.blocks_rendered, (unsigned)st.underruns,
@@ -222,7 +322,7 @@ extern "C" void app_main(void) {
                  (unsigned)voice_manager_active_voices(),
                  SYNTH_VOICES, drums_active_voices(),
                  eng != nullptr ? eng->name : "none",
-                 ble_ctrl_state_name(), usb_seg);
+                 ble_ctrl_state_name(), usb_seg, in_seg);
     }
 #endif
 }

@@ -1,3 +1,40 @@
 # Classic ESP32 target overrides (typical devkit: 4 MB flash, no PSRAM, no USB-OTG)
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 # CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# Max CPU clock (IDF defaults to 160 MHz): the render budget needs it — see
+# the note in sdkconfig.defaults.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# ===========================================================================
+# "osynth Synthesizer" options that are target-specific on the classic ESP32.
+# Commented out at their Kconfig default; see the header in sdkconfig.defaults
+# for the syntax and for the target-independent options.
+#
+# Not available on this chip, whatever you write here: the ES8388 front end,
+# I2S line input, the USB audio tap, looper persistence and SD drum kits.
+# The first three need USB-OTG or the S3's I2S (on this chip MCLK cannot leave
+# through the GPIO matrix, and a duplex mismatch is a hard error rather than a
+# silent demotion); the last two need PSRAM.
+# ===========================================================================
+
+# --- Audio output -----------------------------------------------------------
+
+# External I2S DAC (PCM5102A-class). Default n on this target, which leaves
+# audio on the built-in 8-bit DAC at GPIO25/26 — fine for bring-up, but the
+# I2S DAC is the reason to build this chip into an instrument.
+# CONFIG_OSYNTH_ENABLE_I2S_DAC=y
+
+# I2S pins, used only when the DAC above is on. Defaults for this target;
+# avoid GPIO12 (MTDI flash-voltage strap) and GPIO6-11 (flash) if you move
+# them. DOUT goes to the PCM5102A's DIN.
+# CONFIG_OSYNTH_I2S_BCLK_GPIO=27
+# CONFIG_OSYNTH_I2S_WS_GPIO=32
+# CONFIG_OSYNTH_I2S_DOUT_GPIO=33
+
+# --- Serial MIDI ------------------------------------------------------------
+
+# UART RX pin for DIN MIDI, used when OSYNTH_ENABLE_SERIAL_MIDI (see
+# sdkconfig.defaults) is on. Default 35 here — an input-only pin, which is all
+# this needs.
+# CONFIG_OSYNTH_SERIAL_MIDI_RX_GPIO=35

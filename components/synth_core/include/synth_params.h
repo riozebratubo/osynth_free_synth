@@ -41,6 +41,20 @@ constexpr uint16_t PID_SPACE_END          = 0x0800;
 /* Global parameters (0x00xx) */
 constexpr uint16_t PID_MASTER_VOLUME = 0x0000;
 constexpr uint16_t PID_ENGINE_TYPE   = 0x0001;
+/* 0x0002-0x0007 belong to the preset triggers (PRESET_PID_* in presets.h). */
+/* Line input (S31), registered only on builds with SYNTH_ENABLE_LINE_IN.
+ * The ids exist unconditionally so presets' skip_id() needs no #if. */
+constexpr uint16_t PID_LINE_IN_ROUTE = 0x0008;
+constexpr uint16_t PID_LINE_IN_GAIN  = 0x0009;
+/* Analogue input gain, registered only where the hardware has one to set
+ * (the ES8388's PGA). Deliberately separate from PID_LINE_IN_GAIN, which is
+ * the digital trim and means exactly the same thing on every front end. */
+constexpr uint16_t PID_LINE_IN_PGA   = 0x000A;
+/* Analogue output driver level, likewise registered only where there is one.
+ * Sets the operating point for what is plugged in — line level, or turned
+ * down for headphones; master.volume stays the digital control the player
+ * actually rides. */
+constexpr uint16_t PID_OUT_LEVEL     = 0x000B;
 
 /* Engine-common parameters (0x01xx) — registered by the voice manager,
  * meaningful for every engine. C code uses the SYNTH_PID_* mirrors in
@@ -86,7 +100,8 @@ public:
      * node's controls missing rather than failing outright. */
     static constexpr size_t kMaxParams = 384;
     /* One per subscribing component: engines, presets, looper, drums,
-     * ble_ctrl, persist — 6 as of S25. Raised from 8 to leave headroom,
+     * ble_ctrl, persist, and codec on an ES8388 build — 7 as of S31b.
+     * Raised from 8 to leave headroom,
      * because overflowing it is silent at the call site (addListener returns
      * -1) and a component that treats that as fatal turns it into a
      * bootloop. Four spare slots cost 32 bytes. */

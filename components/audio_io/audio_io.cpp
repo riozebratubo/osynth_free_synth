@@ -15,6 +15,10 @@
 #include "synth_config.h"
 #include "synth_dsp.h"
 #include "synth_params.h"
+#if SYNTH_ENABLE_LINE_IN
+#include "synth_simd.h"
+#include "synth_smooth.h"
+#endif
 
 static const char* TAG = "audio_io";
 
@@ -57,6 +61,82 @@ constexpr uint32_t kQuietBlockCap =
 float s_buf_l[SYNTH_BLOCK_SIZE];
 float s_buf_r[SYNTH_BLOCK_SIZE];
 int16_t s_out[SYNTH_BLOCK_SIZE * 2]; /* interleaved L/R for the sinks */
+
+#if SYNTH_ENABLE_LINE_IN
+/* One int16 capture buffer (256 B) and no float copy of it: the mix stages
+ * call simd_mix_i16lr_f32(), which converts, scales and accumulates into the
+ * float buses in one 4-wide pass. */
+int16_t s_in[SYNTH_BLOCK_SIZE * 2];
+const std::atomic<float>* s_in_route = nullptr;
+const std::atomic<float>* s_in_gain = nullptr;
+/* False when the I2S sink is not the primary, when the RX half of the port
+ * failed to come up, or when the params never registered. The stages then
+ * never see a non-zero gain and the capture is skipped entirely. */
+bool s_line_in_ok = false;
+
+/* `in.route` positions. Order matches the param's enum values offset by one,
+ * since 0 there is "off": 1 = mon, 2 = fx, 3 = dry. */
+enum { kInMon = 0, kInFx = 1, kInDry = 2, kInPositions = 3 };
+
+/* One smoother per position, each tracking `in.gain` while its position is
+ * selected and 0 otherwise. Switching route then crossfades between two mix
+ * points rather than clicking, dragging the gain does not zipper, and each
+ * inactive position costs one compare per block — the same kSilent gate the
+ * FX bus uses. */
+osynth::dsp::Smooth s_in_sm[kInPositions];
+float s_in_g[kInPositions] = {0.0f, 0.0f, 0.0f};
+constexpr float kInSilent = 1e-3f;
+/* int16 -> [-1, 1), folded into the gain so the mix stays one multiply. */
+constexpr float kInScale = 1.0f / 32768.0f;
+
+/* Capture one block from the ADC and advance the three route gains. Called
+ * from the audio task after the cycle counter starts (so the cost lands
+ * honestly in dsp_load_pct) and before the render chain (so the block just
+ * captured is the one the chain mixes).
+ *
+ * Never blocks, and never needs to drain. audio_source_i2s_read() uses a zero
+ * timeout, and a short read is zero-filled and counted. Latency cannot
+ * accumulate either: the driver's RX ISR drops the oldest DMA descriptor once
+ * the queue fills, and the read skips forward when the queue is nearly full,
+ * so the backlog self-clamps at one or two buffers. Sharing BCLK with the DAC
+ * does the rest — capture and playback run off one clock, so there is nothing
+ * to resample and nothing to drift. */
+void SYNTH_RENDER_IRAM line_in_capture(void) {
+    if (!s_line_in_ok) return; /* gains stay at 0; the stages early-out */
+
+    /* The return code carries nothing the frame count does not: every failure
+     * mode, timeout or otherwise, arrives here as a short read. */
+    size_t got = 0;
+    (void)audio_source_i2s_read(s_in, SYNTH_BLOCK_SIZE, &got);
+    const bool starved = (got < SYNTH_BLOCK_SIZE);
+    if (starved) {
+        memset(s_in + got * 2, 0,
+               (SYNTH_BLOCK_SIZE - got) * 2 * sizeof(int16_t));
+    }
+
+    /* Integer max-abs over what actually arrived: one compare per sample and
+     * no float work in the metering path. */
+    int32_t pk = 0;
+    for (size_t i = 0; i < got * 2; ++i) {
+        const int32_t a = (s_in[i] < 0) ? -(int32_t)s_in[i] : (int32_t)s_in[i];
+        if (a > pk) pk = a;
+    }
+    const float peak = (float)pk * kInScale;
+
+    portENTER_CRITICAL(&s_stats_mux);
+    if (peak > s_stats.in_peak) s_stats.in_peak = peak;
+    if (starved) s_stats.in_starves++;
+    portEXIT_CRITICAL(&s_stats_mux);
+
+    const int route =
+        (int)(s_in_route->load(std::memory_order_relaxed) + 0.5f);
+    const float g = s_in_gain->load(std::memory_order_relaxed);
+    for (int i = 0; i < kInPositions; ++i) {
+        s_in_g[i] = osynth::dsp::smooth_lin(s_in_sm[i],
+                                            (route == i + 1) ? g : 0.0f);
+    }
+}
+#endif /* SYNTH_ENABLE_LINE_IN */
 
 /* Master volume is slewed like the voice manager's mute (one bounded step
  * per block, ramped linearly inside the block) so a jump — preset load, a
@@ -102,6 +182,14 @@ void SYNTH_RENDER_IRAM audio_task(void*) {
 
     for (;;) {
         const uint32_t c0 = esp_cpu_get_cycle_count();
+
+#if SYNTH_ENABLE_LINE_IN
+        /* Inside the c0 window on purpose: the input is not free and the DSP
+         * meter should say so. As early in the block as possible, too — it
+         * gives the RX DMA the longest run at refilling before the next
+         * read. */
+        line_in_capture();
+#endif
 
         memset(s_buf_l, 0, sizeof(s_buf_l));
         memset(s_buf_r, 0, sizeof(s_buf_r));
@@ -217,6 +305,25 @@ esp_err_t audio_io_start(audio_render_fn render, void* ctx) {
         ESP_ERROR_CHECK(s_sink->start());
     }
 
+#if SYNTH_ENABLE_LINE_IN
+    /* The input belongs to the I2S port, so it only exists if that port is
+     * what actually came up. If the sink fell back to the null sink, or the
+     * RX half was refused, the params stay registered and settable — they
+     * simply do nothing, which is a better answer for the app than a control
+     * that vanishes depending on how boot went. */
+    s_in_route = osynth::ParamStore::instance().valuePtr(osynth::PID_LINE_IN_ROUTE);
+    s_in_gain = osynth::ParamStore::instance().valuePtr(osynth::PID_LINE_IN_GAIN);
+    s_line_in_ok = (s_sink == audio_sink_i2s()) && audio_source_i2s_ready() &&
+                   s_in_route != nullptr && s_in_gain != nullptr;
+    if (s_line_in_ok) {
+        ESP_LOGI(TAG, "line input ready (stereo, sample-locked to the DAC)");
+    } else {
+        ESP_LOGW(TAG, "line input inactive: sink %s, rx %d, params %d",
+                 s_sink->name, (int)audio_source_i2s_ready(),
+                 (int)(s_in_route != nullptr && s_in_gain != nullptr));
+    }
+#endif
+
 #if SYNTH_ENABLE_USB_TAP
     /* Attached even if the primary fell back to the null sink: the tap is
      * independent of whether the DAC came up, and a silent board that still
@@ -242,6 +349,34 @@ esp_err_t audio_io_start(audio_render_fn render, void* ctx) {
                                             configMAX_PRIORITIES - 2, &s_task, 1);
     return (ok == pdPASS) ? ESP_OK : ESP_FAIL;
 }
+
+#if SYNTH_ENABLE_LINE_IN
+
+void SYNTH_RENDER_IRAM audio_io_line_in_fx(float* l, float* r, size_t frames) {
+    const float g = s_in_g[kInFx];
+    if (g <= kInSilent) return;
+    osynth::dsp::simd_mix_i16lr_f32(s_in, g * kInScale, l, r, frames);
+}
+
+void SYNTH_RENDER_IRAM audio_io_line_in_dry(float* l, float* r, size_t frames) {
+    const float g = s_in_g[kInDry];
+    if (g <= kInSilent) return;
+    osynth::dsp::simd_mix_i16lr_f32(s_in, g * kInScale, l, r, frames);
+}
+
+void SYNTH_RENDER_IRAM audio_io_line_in_mon(float* l, float* r, size_t frames) {
+    const float g = s_in_g[kInMon];
+    if (g <= kInSilent) return;
+    osynth::dsp::simd_mix_i16lr_f32(s_in, g * kInScale, l, r, frames);
+}
+
+#else /* empty bodies so render_chain() needs no #if of its own */
+
+void audio_io_line_in_fx(float*, float*, size_t) {}
+void audio_io_line_in_dry(float*, float*, size_t) {}
+void audio_io_line_in_mon(float*, float*, size_t) {}
+
+#endif /* SYNTH_ENABLE_LINE_IN */
 
 void SYNTH_RENDER_IRAM audio_io_report_stages(uint32_t voices_cycles,
                                               uint32_t fx_cycles,
@@ -274,5 +409,6 @@ void audio_io_get_stats(audio_io_stats_t* out) {
     *out = s_stats;
     s_stats.dsp_load_peak_pct = 0.0f;
     s_stats.out_peak = 0.0f;
+    s_stats.in_peak = 0.0f;
     portEXIT_CRITICAL(&s_stats_mux);
 }

@@ -14,9 +14,50 @@ menu "osynth Synthesizer"
             Routes audio to an external I2S DAC (e.g. PCM5102) for higher
             quality output. Pinout in docs/HARDWARE.md. Off by default.
 
+    choice OSYNTH_I2S_FRONTEND
+        prompt "I2S analogue front end"
+        depends on OSYNTH_ENABLE_I2S_DAC
+        default OSYNTH_FRONTEND_DISCRETE
+        help
+            What is on the other end of the I2S port. This picks the
+            *analogue* hardware; the digital side (block format, sample rate,
+            the render chain) is identical either way.
+
+        config OSYNTH_FRONTEND_DISCRETE
+            bool "Discrete: PCM5102A DAC, optional PCM1808 ADC"
+            help
+                Separate converter chips, each strapped by pins and needing
+                no firmware at all. The best-sounding option — a PCM5102A is
+                a ~112 dB DAC against the ES8388's ~96 — and the one to pick
+                if the line output is what the instrument is judged on.
+
+                Line input needs a second chip (PCM1808) and two more GPIOs.
+
+        config OSYNTH_FRONTEND_ES8388
+            bool "ES8388 codec (line in + line out on one chip)"
+            depends on IDF_TARGET_ESP32S3 || IDF_TARGET_ESP32P4
+            help
+                One chip for both directions, as found on the ESP32-A1S,
+                LyraT and most "ESP32 audio kit" boards. Converter quality is
+                a step below a discrete PCM5102A, but it integrates the ADC,
+                a microphone preamp and a headphone driver, and it is what is
+                already soldered to those boards.
+
+                Unlike the discrete chips the ES8388 has no strapping pins
+                worth the name: it comes up unconfigured and silent, and
+                stays that way until the firmware writes its registers over
+                I2C. That is what OSYNTH_ES8388_I2C_* below is for. It also
+                needs MCLK in slave mode, so enabling this turns the I2S port
+                into the same 32-bit-slot / 64x fs / MCLK arrangement the
+                line input uses, whether or not capture is enabled.
+
+                The analogue input and output pin pairs are selectable below,
+                because boards wire them differently.
+    endchoice
+
     config OSYNTH_USB_AUDIO_TAP
         bool "Also stream to USB while the I2S DAC plays"
-        depends on OSYNTH_ENABLE_I2S_DAC && IDF_TARGET_ESP32S3
+        depends on OSYNTH_ENABLE_I2S_DAC && (IDF_TARGET_ESP32S3 || IDF_TARGET_ESP32P4)
         default y
         help
             Sends every rendered block to the external I2S DAC and the USB
@@ -40,6 +81,172 @@ menu "osynth Synthesizer"
             enabling the I2S DAC leaves the USB audio interface enumerated
             but silent.
 
+    config OSYNTH_ENABLE_I2S_LINE_IN
+        bool "Stereo line input (I2S capture on the DAC's port)"
+        depends on OSYNTH_ENABLE_I2S_DAC && (IDF_TARGET_ESP32S3 || IDF_TARGET_ESP32P4)
+        default y if OSYNTH_FRONTEND_ES8388
+        default n
+        help
+            Adds a stereo line input on the *same* I2S port as the output —
+            a PCM1808 alongside the PCM5102A on a discrete front end, or the
+            ADC half of the ES8388 on a codec one. The I2S controller on the
+            S3 and P4 is full duplex: a TX and an RX channel allocated
+            together share BCLK and WS, so the converter runs as a slave off
+            the two clock lines the output already drives and the capture is
+            sample-locked to the playback by construction. Nothing drifts and
+            nothing is ever resampled.
+
+            The cost on the wire is that BCLK doubles, from 32x to 64x the
+            sample rate. The PCM1808 always emits 24 bits inside a 32-bit
+            slot and cannot be told otherwise, so the port has to run 32-bit
+            slots; the firmware still reads and writes 16-bit samples, taken
+            from the top of each slot. (The ES8388 is told the word length
+            over I2C and is happy either way, but runs the same arrangement
+            so there is one configuration to reason about.) MCLK becomes a
+            real pin for the same reason - both converters need a system
+            clock (12.288 MHz = 256x fs) even in slave mode, where the
+            PCM5102A never did.
+
+            On an ES8388 build this defaults on, since the ADC is already in
+            the chip and costs no extra hardware. Turning it off leaves the
+            codec playing and powers its ADC down.
+
+            `in.route` places the input in the render chain, and what it
+            records follows from where it lands:
+
+              off  silent
+              mon  monitored dry, mixed after the looper's record tap, so it
+                   is heard but never printed into a take
+              fx   into the FX bus, so it is reverberated *and* recorded
+              dry  after the FX bus, recorded without them
+
+            `in.gain` (0..4) is a digital trim after the ADC; clipping in
+            front of the ADC is analogue and no firmware gain undoes it,
+            which is why the `in pk` meter in the heartbeat reads *before*
+            this gain.
+
+            Monitoring latency is one DMA buffer plus a block, about 8-9 ms.
+            The whole feature costs roughly 0.7% of the block budget and 256
+            bytes of buffer. Off by default, and a build with it off is
+            byte-for-byte the output path that shipped before it existed.
+
+            Not on the classic ESP32: there the MCLK output cannot go through
+            the GPIO matrix (it is routed via esp_clock_output, which is
+            restricted to the CLK_OUT/strapping pins), and that chip's I2S
+            treats a duplex configuration mismatch as a hard error.
+
+            Wiring, straps and levels: docs/HARDWARE.md.
+
+    # All five I2S pins are configurable, not just the two the line input
+    # added: ES8388 boards come with their pinout already soldered, and a
+    # hardcoded BCLK/WS/DOUT triple would rule most of them out.
+    config OSYNTH_I2S_BCLK_GPIO
+        int "I2S BCLK GPIO"
+        depends on OSYNTH_ENABLE_I2S_DAC
+        default 27 if IDF_TARGET_ESP32
+        default 17 if IDF_TARGET_ESP32P4
+        default 16
+
+    config OSYNTH_I2S_WS_GPIO
+        int "I2S LRCK/WS GPIO"
+        depends on OSYNTH_ENABLE_I2S_DAC
+        default 32 if IDF_TARGET_ESP32
+        default 18 if IDF_TARGET_ESP32P4
+        default 17
+
+    config OSYNTH_I2S_DOUT_GPIO
+        int "I2S DOUT GPIO (ESP32 -> DAC data in)"
+        depends on OSYNTH_ENABLE_I2S_DAC
+        default 33 if IDF_TARGET_ESP32
+        default 19 if IDF_TARGET_ESP32P4
+        default 18
+        help
+            PCM5102A DIN, or ES8388 DSDIN.
+
+    config OSYNTH_I2S_DIN_GPIO
+        int "I2S DIN GPIO (ADC data out -> ESP32)"
+        depends on OSYNTH_ENABLE_I2S_LINE_IN
+        default 20 if IDF_TARGET_ESP32P4
+        default 15
+        help
+            PCM1808 DOUT, or ES8388 ASDOUT. On the S3, keep clear of
+            GPIO33-37, which are the octal PSRAM the looper's buffers live in.
+
+    config OSYNTH_I2S_MCLK_GPIO
+        int "I2S MCLK GPIO (system clock -> converter)"
+        depends on OSYNTH_ENABLE_I2S_LINE_IN || OSYNTH_FRONTEND_ES8388
+        default 16 if IDF_TARGET_ESP32P4
+        default 14
+        help
+            Drives the converter's system clock at 256x the sample rate
+            (12.288 MHz at 48 kHz) — PCM1808 SCKI, or ES8388 MCLK.
+            Mandatory for both: neither is a PCM5102A, and neither can
+            reconstruct a clock from BCLK alone. Without it a PCM1808 reads
+            silence while the starve counter climbs, and an ES8388 does not
+            play at all.
+
+    config OSYNTH_ES8388_I2C_SDA_GPIO
+        int "ES8388 I2C SDA GPIO (codec CDATA pin)"
+        depends on OSYNTH_FRONTEND_ES8388
+        default 7 if IDF_TARGET_ESP32P4
+        default 8
+        help
+            Goes to the codec's CDATA pin (its control pins are named CCLK
+            and CDATA, not SCL/SDA).
+
+            The firmware enables the ESP32's internal pull-ups so a bare
+            board has some chance of working, but they are around 45k and
+            the ES8388 datasheet asks for **1k** pull-ups on both lines —
+            roughly 45x stronger. Fit real 1k resistors to 3V3. Ready-made
+            codec boards already have them.
+
+    config OSYNTH_ES8388_I2C_SCL_GPIO
+        int "ES8388 I2C SCL GPIO (codec CCLK pin)"
+        depends on OSYNTH_FRONTEND_ES8388
+        default 8 if IDF_TARGET_ESP32P4
+        default 9
+        help
+            Goes to the codec's CCLK pin. Same 1k pull-up as CDATA above;
+            the datasheet also suggests an R-C low-pass on this line.
+
+    choice OSYNTH_ES8388_INPUT
+        prompt "ES8388 analogue input"
+        depends on OSYNTH_FRONTEND_ES8388 && OSYNTH_ENABLE_I2S_LINE_IN
+        default OSYNTH_ES8388_IN_LINE2
+        help
+            Which of the codec's analogue input pairs the ADC listens to.
+            Boards differ, and there is no way to detect it: on the ESP32-A1S
+            and LyraT, LIN1/RIN1 is the on-board microphone and LIN2/RIN2 is
+            the line/aux jack, which is why LINE2 is the default here.
+
+        config OSYNTH_ES8388_IN_LINE2
+            bool "LIN2 / RIN2 (line or aux jack on most boards)"
+        config OSYNTH_ES8388_IN_LINE1
+            bool "LIN1 / RIN1 (on-board microphone on most boards)"
+        config OSYNTH_ES8388_IN_DIFF
+            bool "Differential"
+            help
+                Both pairs taken as one differential input. Only correct if
+                the board is actually wired that way.
+    endchoice
+
+    choice OSYNTH_ES8388_OUTPUT
+        prompt "ES8388 analogue output"
+        depends on OSYNTH_FRONTEND_ES8388
+        default OSYNTH_ES8388_OUT_BOTH
+        help
+            Which output pairs to power. Driving one you are not using costs
+            a little current and nothing else, so "both" is the safe answer
+            when you are not sure how the board is wired.
+
+        config OSYNTH_ES8388_OUT_BOTH
+            bool "Both pairs (LOUT1/ROUT1 and LOUT2/ROUT2)"
+        config OSYNTH_ES8388_OUT1
+            bool "LOUT1 / ROUT1 only (headphone jack on most boards)"
+        config OSYNTH_ES8388_OUT2
+            bool "LOUT2 / ROUT2 only (speaker amp input on most boards)"
+    endchoice
+
     config OSYNTH_ENABLE_LOCAL_UI
         bool "Enable local UI (LCD + encoders + buttons)"
         default n
@@ -58,6 +265,7 @@ menu "osynth Synthesizer"
         int "Serial MIDI RX GPIO"
         depends on OSYNTH_ENABLE_SERIAL_MIDI
         default 35 if IDF_TARGET_ESP32
+        default 21 if IDF_TARGET_ESP32P4
         default 5
         help
             UART RX pin for DIN MIDI input (UART1, 31250 baud). Needs a
@@ -66,7 +274,7 @@ menu "osynth Synthesizer"
 
     config OSYNTH_LOOP_PERSIST
         bool "Persist looper tracks (save/load slots)"
-        depends on IDF_TARGET_ESP32S3 && SPIRAM
+        depends on SPIRAM
         default y
         help
             Adds loop.save / loop.load trigger params (0x0605/0x0606) that
@@ -74,8 +282,8 @@ menu "osynth Synthesizer"
             storage. Tracks are IMA-ADPCM (4:1 vs raw int16; mono sets,
             S19, halve that again) both live in PSRAM and in storage since
             S20, so saves and loads are straight copies. Storage backend
-            and sizing below. ESP32-S3 only (the looper itself needs
-            PSRAM).
+            and sizing below. Needs PSRAM, like the looper itself — so the
+            S3 and P4, not the classic ESP32.
 
     choice OSYNTH_LOOP_STORE
         prompt "Looper track storage backend"
@@ -102,21 +310,33 @@ menu "osynth Synthesizer"
                 docs/HARDWARE.md.
     endchoice
 
-    choice OSYNTH_S3_FLASH_MODEL
-        prompt "ESP32-S3 module (flash size for the loops region)"
+    choice OSYNTH_FLASH_MODEL
+        prompt "Flash size on the module (sizes the loops region)"
         depends on OSYNTH_LOOP_STORE_FLASH
-        default OSYNTH_S3_FLASH_N8R8
+        default OSYNTH_FLASH_8MB
+        help
+            The loops region runs from 0x400000 to the end of the chip, so
+            this is the only thing that sets its size. Named after the flash
+            size alone, not the module part number, because the same choice
+            serves S3 modules (N8R8, N16R8) and P4 boards (N16R32) — the
+            PSRAM half of those names is irrelevant here.
 
-        config OSYNTH_S3_FLASH_N8R8
-            bool "N8R8 - 8 MB flash (4 MB loops region, ~87 s stereo ADPCM, 2x mono)"
+        config OSYNTH_FLASH_8MB
+            bool "8 MB (4 MB loops region, ~87 s stereo ADPCM, 2x mono)"
 
-        config OSYNTH_S3_FLASH_N16R8
-            bool "N16R8 - 16 MB flash (12 MB loops region, ~260 s stereo ADPCM, 2x mono)"
+        config OSYNTH_FLASH_16MB
+            bool "16 MB (12 MB loops region, ~260 s stereo ADPCM, 2x mono)"
             help
                 Also set Serial flasher config -> Flash size -> 16 MB so
                 the image header matches the chip. The loops region is
                 verified against the detected chip size at boot and
                 trimmed (or disabled) with a warning if it doesn't fit.
+
+        config OSYNTH_FLASH_32MB
+            bool "32 MB (28 MB loops region, ~10 min stereo ADPCM, 2x mono)"
+            help
+                Same caveat as 16 MB: match Serial flasher config -> Flash
+                size to the chip.
     endchoice
 
     config OSYNTH_DRUM_SD_KITS
@@ -142,21 +362,25 @@ menu "osynth Synthesizer"
     config OSYNTH_SD_CS_GPIO
         int "SD card CS GPIO"
         depends on OSYNTH_SD_BUS
+        default 39 if IDF_TARGET_ESP32P4
         default 10
 
     config OSYNTH_SD_SCK_GPIO
         int "SD card SCK GPIO"
         depends on OSYNTH_SD_BUS
+        default 40 if IDF_TARGET_ESP32P4
         default 12
 
     config OSYNTH_SD_MOSI_GPIO
         int "SD card MOSI GPIO"
         depends on OSYNTH_SD_BUS
+        default 41 if IDF_TARGET_ESP32P4
         default 11
 
     config OSYNTH_SD_MISO_GPIO
         int "SD card MISO GPIO"
         depends on OSYNTH_SD_BUS
+        default 42 if IDF_TARGET_ESP32P4
         default 13
 
     config OSYNTH_RENDER_IN_IRAM
@@ -171,7 +395,7 @@ menu "osynth Synthesizer"
 
     config OSYNTH_ENABLE_MODULAR
         bool "Enable the modular patch graph engine (S28)"
-        default y if IDF_TARGET_ESP32S3
+        default y if IDF_TARGET_ESP32S3 || IDF_TARGET_ESP32P4
         default n
         help
             Adds a fifth engine whose signal path is a node graph the app
