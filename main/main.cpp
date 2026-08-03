@@ -250,13 +250,14 @@ extern "C" void app_main(void) {
 
     ESP_ERROR_CHECK(usb_dev_init());
 
-    ESP_ERROR_CHECK(audio_io_start(render_chain, nullptr));
-    /* After the audio task on purpose: audio_io_start() enables the I2S port
-     * before it returns, so a codec that needs MCLK to come out of reset gets
-     * a clock that is already running. Deliberately not ESP_ERROR_CHECKed —
-     * a codec that fails to answer leaves the board silent, which is worth an
-     * error in the log but not a bootloop. */
+    /* Before the port starts, on purpose: the codec's control bus shares the
+     * connector with MCLK and BCLK, and it is only reliably quiet while those
+     * are stopped. Deliberately not ESP_ERROR_CHECKed — a codec that fails to
+     * answer leaves the board silent, which is worth an error in the log but
+     * not a bootloop. See codec.h for what moved and why. */
     (void)codec_init();
+
+    ESP_ERROR_CHECK(audio_io_start(render_chain, nullptr));
     ESP_LOGI(TAG, "audio sink: %s | codec: %s", audio_io_sink_name(),
              codec_name());
 
@@ -303,8 +304,8 @@ extern "C" void app_main(void) {
         /* Pre-gain peak, so it reads what the ADC saw: clipping in front of
          * it is analogue and no trim in here undoes it. `starve` must stay
          * at 0 — anything else means the RX side is not clocking. */
-        snprintf(in_seg, sizeof(in_seg), " | in pk %.2f, starve %u", st.in_peak,
-                 (unsigned)st.in_starves);
+        snprintf(in_seg, sizeof(in_seg), " | in pk %.2f/%.2f, starve %u",
+                 st.in_peak_l, st.in_peak_r, (unsigned)st.in_starves);
 #else
         in_seg[0] = '\0';
 #endif

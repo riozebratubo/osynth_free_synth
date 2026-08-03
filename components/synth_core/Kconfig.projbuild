@@ -197,8 +197,15 @@ menu "osynth Synthesizer"
             The firmware enables the ESP32's internal pull-ups so a bare
             board has some chance of working, but they are around 45k and
             the ES8388 datasheet asks for **1k** pull-ups on both lines —
-            roughly 45x stronger. Fit real 1k resistors to 3V3. Ready-made
-            codec boards already have them.
+            roughly 45x stronger. Fit real 1k resistors to 3V3 on a chip you
+            wired yourself.
+
+            Ready-made codec boards fit their own, but not always to that
+            figure: the M5Stack Module Audio (M144) carries 2.2k. That is
+            enough on a stacked module and can be marginal on jumper wires,
+            where the control lines run alongside MCLK and BCLK — a second
+            2.2k pair to 3V3 brings the bus to ~1.1k, which is what the
+            datasheet asked for in the first place.
 
     config OSYNTH_ES8388_I2C_SCL_GPIO
         int "ES8388 I2C SCL GPIO (codec CCLK pin)"
@@ -219,16 +226,119 @@ menu "osynth Synthesizer"
             and LyraT, LIN1/RIN1 is the on-board microphone and LIN2/RIN2 is
             the line/aux jack, which is why LINE2 is the default here.
 
+            **The M5Stack Module Audio (M144) needs DIFF**, and that is the
+            answer worth knowing because the symptom of getting it wrong is
+            not silence. Its input jack is wired differentially, so a
+            single-ended selection reads one leg of the pair and recovers
+            exactly half the amplitude — a clean, unwavering 6 dB down on that
+            channel, which sounds like a stereo image stuck to one side rather
+            than like a misconfiguration. Nothing in the level or the noise
+            floor says "wrong mode", and trimming the imbalance in the PGA or
+            the ADC volume papers over it while throwing away half the signal.
+
+            The tell is that the imbalance is *exactly* 2:1 and stays there
+            regardless of source material. Crosstalk wanders; a divider does
+            not; one leg of a differential pair is precisely half. If a board
+            shows that, try DIFF before reaching for a balance trim.
+
         config OSYNTH_ES8388_IN_LINE2
             bool "LIN2 / RIN2 (line or aux jack on most boards)"
         config OSYNTH_ES8388_IN_LINE1
             bool "LIN1 / RIN1 (on-board microphone on most boards)"
         config OSYNTH_ES8388_IN_DIFF
-            bool "Differential"
+            bool "Differential (M5Stack Module Audio M144)"
             help
-                Both pairs taken as one differential input. Only correct if
-                the board is actually wired that way.
+                Each channel taken as the difference across its input pair
+                rather than one pin against ground. Only correct if the board
+                is wired that way — and the M144 is.
     endchoice
+
+    config OSYNTH_ES8388_M5_LINE_MIC
+        bool "M5 Module Audio: open the LINE/MIC jack path"
+        depends on OSYNTH_FRONTEND_ES8388 && OSYNTH_ENABLE_I2S_LINE_IN
+        default y
+        help
+            Register 0x00 on the M5Stack Module Audio's STM32 (I2C 0x33). It
+            connects the LINE/MIC jack to the codec's LIN1 and switches an
+            electret bias onto the jack with it.
+
+            On by default, which is also the module's own power-up state. Turn
+            it off to take that bias and its 3.3k off the jack contact — worth
+            trying with a line-level source, which needs no bias and can be
+            loaded by it. Nothing on any other board reads this: the write is
+            skipped unless something answers at 0x33.
+
+    config OSYNTH_ES8388_M5_HP_OMTP
+        bool "M5 Module Audio: OMTP headset wiring instead of CTIA"
+        depends on OSYNTH_FRONTEND_ES8388
+        default n
+        help
+            Register 0x10 on the same STM32, driving the analogue mux that
+            swaps the headset jack's mic and ground contacts. CTIA (off, the
+            default) is the common standard; M5's own examples set OMTP.
+
+            It decides which of the two contacts reaches the shared MIC_MONO_IN
+            node, and that node sits on LIN1 — so it can affect the *input* as
+            well as a headset microphone.
+
+    config OSYNTH_ES8388_ADC_BALANCE
+        int "ES8388 input balance (left minus right, 0.5 dB steps)"
+        depends on OSYNTH_FRONTEND_ES8388 && OSYNTH_ENABLE_I2S_LINE_IN
+        range -48 48
+        default 0
+        help
+            Corrects a channel imbalance in the board's analogue input wiring,
+            by attenuating the louder side in the codec's per-channel ADC
+            digital volume (ADCVOL_L/ADCVOL_R). Positive attenuates the right,
+            negative the left, 0 leaves both at 0 dB.
+
+            This is the safe place to do it and the one to reach for first.
+            Those registers only ever attenuate, so nothing here can clip, and
+            the step is 0.5 dB rather than the PGA's 3 dB — fine enough to
+            actually match a pair rather than land near it. What it costs is a
+            little resolution on the channel being turned down: 6 dB of
+            attenuation is a bit of the 16-bit word, against a converter with
+            far more range than a line input ever uses.
+
+            Defaults to 0: a correction here is a last resort, not the first
+            thing to reach for. If a board's two inputs are mismatched, find
+            out why before trimming it — on the M5Stack Module Audio (M144) the
+            candidates are the STM32-controlled switches above, both of which
+            sit on LIN1 and neither of which costs anything to try.
+
+            Measure it with a *mono* source, the same content in both channels,
+            and read `in pk L/R` from the heartbeat: the ratio is the imbalance
+            and program material cannot skew it. A ratio of 0.5 is 6 dB, i.e.
+            12 steps.
+
+    config OSYNTH_ES8388_PGA_BALANCE
+        int "ES8388 input balance in the analogue PGA (3 dB steps)"
+        depends on OSYNTH_FRONTEND_ES8388 && OSYNTH_ENABLE_I2S_LINE_IN
+        range -8 8
+        default 0
+        help
+            The same correction as OSYNTH_ES8388_ADC_BALANCE but made in the
+            analogue PGA ahead of the converter, by *raising* the quieter
+            channel instead of lowering the louder one.
+
+            Better in principle — gain applied before the ADC costs no
+            resolution at all — and worse in practice, which is why it defaults
+            to 0. The step is 3 dB, too coarse to match a pair closely, and
+            over-correcting drives the quiet channel's PGA into clipping. That
+            clipping is analogue and unrecoverable, and it sounds like it:
+            harsh and metallic on peaks. It is also asymmetric, so the channel
+            you were trying to help is the one that breaks up.
+
+            Worth using only on a board where the input is genuinely too quiet
+            *and* the imbalance is a clean multiple of 3 dB. Otherwise leave it
+            at 0 and use the ADC balance above.
+
+            Both can be set at once; they add.
+
+            ADCCONTROL1 carries two independent 4-bit PGA codes, left in the
+            high nibble and right in the low. The offset is applied then
+            clamped to the hardware's 0..8, so the top steps of `in.pga` lose
+            some of the correction — that range is for microphones anyway.
 
     choice OSYNTH_ES8388_OUTPUT
         prompt "ES8388 analogue output"

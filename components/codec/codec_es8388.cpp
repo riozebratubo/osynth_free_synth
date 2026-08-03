@@ -21,6 +21,7 @@
 #if SYNTH_ENABLE_CODEC_ES8388
 
 #include <stdint.h>
+#include <stdio.h>
 
 #include "driver/i2c_master.h"
 #include "esp_log.h"
@@ -71,26 +72,90 @@ enum : uint8_t {
 };
 
 /* ADCCONTROL2: which analogue pins reach the ADC. LINSEL is the top two
- * bits, RINSEL the next two. */
+ * bits, RINSEL the next two.
+ *
+ * ADCCONTROL3 goes with it. M5's setADCInput() writes both — 0x00 alongside
+ * LIN1/RIN1 and 0x80 alongside LIN2/RIN2 — and its init comment spells the
+ * pairs out as "(0x00 0x00)" and "(0x50 0x80)". esp-adf writes ADCCONTROL2
+ * alone and leaves ADCCONTROL3 at a constant, which is what this did until
+ * S31d: LINE2 selected the pins but never set the bit that goes with them.
+ * Nothing here exercised LINE2 once the M144 moved this build to LINE1, but
+ * it is the right setting for an A1S or a LyraT and it was quietly wrong.
+ *
+ * Bit 1 reads back set whatever is written to it, so it is included rather
+ * than fought: the init table and a register dump then agree. */
 #if defined(CONFIG_OSYNTH_ES8388_IN_LINE1)
-constexpr uint8_t kAdcInput = 0x00; /* LIN1 / RIN1 */
+constexpr uint8_t kAdcInput = 0x00;    /* LIN1 / RIN1 */
+constexpr uint8_t kAdcControl3 = 0x02;
 #elif defined(CONFIG_OSYNTH_ES8388_IN_DIFF)
-constexpr uint8_t kAdcInput = 0xf0; /* differential */
+/* Each channel is the difference across its pair rather than one pin against
+ * ground. ADCCONTROL3's DS bit picks which pair the difference is taken from
+ * and 0 is pair 1, which is what M5 names ADC_INPUT_DIFFERENCE1. This is the
+ * correct mode for the M5Stack Module Audio (M144): its jack is wired
+ * differentially, and a single-ended selection there recovers exactly half the
+ * amplitude on that channel — the 6 dB imbalance that S31d spent a long time
+ * mistaking for a summing node and trying to trim. */
+constexpr uint8_t kAdcInput = 0xf0;
+constexpr uint8_t kAdcControl3 = 0x02;
 #else
-constexpr uint8_t kAdcInput = 0x50; /* LIN2 / RIN2 — the line jack on most boards */
+constexpr uint8_t kAdcInput = 0x50;    /* LIN2 / RIN2 — the line jack on most boards */
+constexpr uint8_t kAdcControl3 = 0x82;
 #endif
 
-/* DACPOWER: LOUT1 = 0x04, ROUT1 = 0x10, LOUT2 = 0x08, ROUT2 = 0x20. */
+/* DACPOWER (0x04) enable bits: LOUT1 = 0x20, ROUT1 = 0x10, LOUT2 = 0x08,
+ * ROUT2 = 0x04 — so a *pair* is OUT1 = 0x30, OUT2 = 0x0c, both = 0x3c.
+ *
+ * This was wrong until S31d, and wrong in a way that hid: the bits were taken
+ * from esp-adf's es_dac_output_t, which names 0x04 LOUT1 and 0x10 ROUT1. Those
+ * two do OR to a plausible-looking 0x14, and 0x3c for "everything" is correct
+ * either way, so the default OUT_BOTH build worked and nothing ever exercised
+ * the other two. It is a channel split, not a pair split: 0x14 is bit 4 and
+ * bit 2, which is ROUT1 + ROUT2 — the right-hand driver of *both* pairs, and
+ * mono-right on any ES8388 board, not just this one. Selecting OUT1 on an
+ * M5Stack M144 is what finally showed it, as audio in the right ear only.
+ *
+ * The layout above is what the chip actually does, confirmed twice over: it
+ * matches M5's own es_dac_output_t (OUT1 = 0x30, OUT2 = 0x0C), and it is the
+ * only assignment under which 0x14 gives right-only, which is what the
+ * hardware did.
+ *
+ * kOutVolRegs is the same choice expressed as the volume registers that
+ * matter, so out.level writes the pair that is actually driving something and
+ * not the pair that is not. That halving is worth having: every register in
+ * this list is one more chance for a flaky bus to land half an update, and a
+ * half-landed *stereo* update is heard as the image jumping to one side. */
 #if defined(CONFIG_OSYNTH_ES8388_OUT1)
-constexpr uint8_t kDacOutputs = 0x14;
+constexpr uint8_t kDacOutputs = 0x30;
 constexpr const char* kOutputName = "LOUT1/ROUT1";
+constexpr uint8_t kOutVolRegs[] = {REG_LOUT1VOL, REG_ROUT1VOL};
 #elif defined(CONFIG_OSYNTH_ES8388_OUT2)
-constexpr uint8_t kDacOutputs = 0x28;
+constexpr uint8_t kDacOutputs = 0x0c;
 constexpr const char* kOutputName = "LOUT2/ROUT2";
+constexpr uint8_t kOutVolRegs[] = {REG_LOUT2VOL, REG_ROUT2VOL};
 #else
 constexpr uint8_t kDacOutputs = 0x3c; /* both pairs */
 constexpr const char* kOutputName = "LOUT1/ROUT1 + LOUT2/ROUT2";
+constexpr uint8_t kOutVolRegs[] = {REG_LOUT1VOL, REG_ROUT1VOL, REG_LOUT2VOL,
+                                   REG_ROUT2VOL};
 #endif
+constexpr size_t kOutVolCount = sizeof(kOutVolRegs) / sizeof(kOutVolRegs[0]);
+
+/* ADCVOL_L / ADCVOL_R: per-channel ADC digital volume, 0x00 = 0 dB counting
+ * down in 0.5 dB steps to 0xc0 (-96 dB). Attenuation only, which is exactly
+ * why the input balance is corrected here rather than in the PGA: nothing this
+ * writes can clip, and 0.5 dB is fine enough to actually match a pair.
+ *
+ * The louder channel comes down to meet the quieter one. Costs a little
+ * resolution on that side — 6 dB is a bit of the 16-bit word — against a
+ * converter with far more range than a line input uses. The PGA alternative
+ * raises the quiet channel instead and costs nothing in theory, but its step
+ * is 3 dB and over-correcting clips it analogue-side, which sounds metallic
+ * and cannot be undone. See OSYNTH_ES8388_ADC_BALANCE. */
+constexpr int kAdcBalance = CONFIG_OSYNTH_ES8388_ADC_BALANCE;
+constexpr uint8_t kAdcVolL =
+    (kAdcBalance < 0) ? (uint8_t)((-kAdcBalance > 192) ? 192 : -kAdcBalance) : 0;
+constexpr uint8_t kAdcVolR =
+    (kAdcBalance > 0) ? (uint8_t)((kAdcBalance > 192) ? 192 : kAdcBalance) : 0;
 
 /* The ADC is powered down entirely on a playback-only build: it is in the
  * chip either way, and leaving its analogue front end biased for a signal
@@ -121,9 +186,19 @@ const RegWrite kInit[] = {
      * pins should be quiet while that happens. */
     {REG_DACCONTROL3, 0x04},
 
-    /* Reference buffers up, then the digital blocks out of reset. */
+    /* Hold the DAC/ADC state machines and the digital engine in reset for the
+     * whole of the sequence below, and release them at the very end.
+     *
+     * This is what the ES8388 User Guide's own example does, and what M5's
+     * driver does — 0xff first, everything configured, 0x00 last. Until S31d
+     * this wrote 0x00 here instead, following esp-adf, which configures a
+     * running chip. Both work; only one of them is the manufacturer's. The
+     * control port is unaffected either way, so every write below still lands
+     * exactly as before. */
+    {REG_CHIPPOWER, 0xff},
+
+    /* Reference buffers up. */
     {REG_CONTROL2, 0x50},
-    {REG_CHIPPOWER, 0x00},
 
     /* Undocumented registers, verbatim from Espressif's driver, where the
      * comment says they disable the internal DLL to fix 8 kHz playback.
@@ -198,12 +273,22 @@ const RegWrite kInit[] = {
     /* Down while the input path is selected. */
     {REG_ADCPOWER, 0xff},
     {REG_ADCCONTROL2, kAdcInput},
-    {REG_ADCCONTROL3, 0x02},
-    /* Same serial format as the DAC: I2S, 16-bit, MCLK 256x fs. */
+    /* Paired with ADCCONTROL2 above — see kAdcControl3. */
+    {REG_ADCCONTROL3, kAdcControl3},
+    /* Same serial format as the DAC: I2S, 16-bit, MCLK 256x fs.
+     *
+     * The field layout is DATSEL[7:6], ADCLRP[5], ADCWL[4:2], FORMAT[1:0]. M5's
+     * driver writes 0x2c here, i.e. the same with ADCLRP set, and S31d tried it
+     * on the theory that a lopsided capture was a framing error. It is not: the
+     * bit simply moved the signal from the right slot to the left and left the
+     * other side on a low-level residue either way. One live analogue input,
+     * not a misframed pair — and with ADCLRP clear it lands in the slot it
+     * belongs in. esp-adf's value, kept. */
     {REG_ADCCONTROL4, 0x0c},
     {REG_ADCCONTROL5, 0x02},
-    {REG_ADCVOL_L, 0x00},
-    {REG_ADCVOL_R, 0x00},
+    /* 0 dB on both unless the board needs a channel matched — see kAdcVolL. */
+    {REG_ADCVOL_L, kAdcVolL},
+    {REG_ADCVOL_R, kAdcVolR},
 
     /* ADC up, microphone bias off.
      *
@@ -212,15 +297,184 @@ const RegWrite kInit[] = {
      * microphone. Into a line input that is roughly 30 dB of clipping. The
      * PGA is set from in.pga after this table instead, defaulting to 0 dB. */
     {REG_ADCPOWER, kAdcPower},
+
+    /* Everything is configured: release the digital engine. Pairs with the
+     * 0xff at the top, and must stay last — the point of the hold is that
+     * nothing above it runs on a live state machine. */
+    {REG_CHIPPOWER, 0x00},
 };
 
 i2c_master_bus_handle_t s_bus = nullptr;
 i2c_master_dev_handle_t s_dev = nullptr;
+uint16_t s_addr = 0; /* whichever of kAddrCe0/kAddrCe1 answered the probe */
 const char* s_name = "es8388?";
+
+/* One transfer, one chance, same as the vendor's driver — which does a plain
+ * beginTransmission/write/write/endTransmission and checks nothing.
+ *
+ * S31d spent a while doing otherwise: retries, then read-back verification,
+ * then a background reconciler that kept trying until the chip agreed. All of
+ * it was compensating for one hand-wired rig whose control bus stops accepting
+ * writes while the I2S port runs, and none of it fixed that — it only changed
+ * the shape of the failure, and each layer made the next symptom harder to
+ * read. A driver that reports "this write failed" is more useful than one that
+ * hides a bad bus behind machinery, because the bus is the thing to fix.
+ *
+ * The one ordering that did matter is kept: codec_init() runs before the port
+ * starts, where the bus is reliable. See codec.h. */
+constexpr int kTimeoutMs = 100;
 
 esp_err_t write_reg(uint8_t reg, uint8_t val) {
     const uint8_t buf[2] = {reg, val};
-    return i2c_master_transmit(s_dev, buf, sizeof(buf), 100);
+    return i2c_master_transmit(s_dev, buf, sizeof(buf), kTimeoutMs);
+}
+
+esp_err_t read_reg(uint8_t reg, uint8_t* val) {
+    return i2c_master_transmit_receive(s_dev, &reg, 1, val, 1, kTimeoutMs);
+}
+
+#if SYNTH_ENABLE_LINE_IN
+/* The M5Stack Module Audio (M144) carries an STM32G030 at 0x33 alongside the
+ * codec, and it owns two analogue switches in front of LIN1: the LINE/MIC jack
+ * and the headset microphone, which share that pin. M5's README is explicit
+ * that the two must be kept mutually exclusive, and its own example opens the
+ * jack and closes the headset mic before selecting LIN1/RIN1.
+ *
+ * Without this the module captures in mono. RIN1 comes straight off the jack's
+ * right channel and works; LIN1 sits behind the switch and reads only a few dB
+ * of bleed, which looks like a framing error on the meter and is not one.
+ * Register 0x00 is documented as defaulting open, but it is flash-backed on the
+ * STM32, so a module that was ever set otherwise stays that way. Setting it is
+ * a RAM-level write — the flash write-back is a separate command (0xf0) that
+ * this deliberately does not send, so nothing about the module is changed
+ * permanently.
+ *
+ * Silently skipped on any board without that chip: a bare ES8388 NACKs the
+ * probe and this returns, which is the correct behaviour everywhere else. */
+constexpr uint16_t kM5ModuleAddr = 0x33;
+constexpr uint8_t kM5RegMicStatus = 0x00;   /* LINE/MIC jack: 1 = open */
+constexpr uint8_t kM5RegHpMode = 0x10;      /* 0 = CTIA, 1 = OMTP */
+constexpr uint8_t kM5RegHpMicStatus = 0x11; /* headset mic: 0 = closed */
+constexpr uint8_t kM5RegHpInsert = 0x20;    /* headset detect, read-only */
+constexpr uint8_t kM5RegFwVersion = 0xfe;
+
+/* Read one of the STM32's registers; returns 0xff on any failure, which is not
+ * a value any of the ones read here take. */
+uint8_t m5_read(i2c_master_dev_handle_t dev, uint8_t reg) {
+    uint8_t v = 0xff;
+    if (i2c_master_transmit_receive(dev, &reg, 1, &v, 1, kTimeoutMs) != ESP_OK) {
+        return 0xff;
+    }
+    return v;
+}
+
+void configure_m5_module(void) {
+    if (i2c_master_probe(s_bus, kM5ModuleAddr, 50) != ESP_OK) return;
+
+    i2c_device_config_t cfg = {};
+    cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+    cfg.device_address = kM5ModuleAddr;
+    cfg.scl_speed_hz = 400000;
+    i2c_master_dev_handle_t dev = nullptr;
+    if (i2c_master_bus_add_device(s_bus, &cfg, &dev) != ESP_OK) {
+        ESP_LOGW(TAG, "M5 module at 0x%02x answered but would not open",
+                 (unsigned)kM5ModuleAddr);
+        return;
+    }
+
+    /* What the module is actually set to, before touching it. Both of these
+     * switches sit on LIN1 and both survive a reset — 0x00 is flash-backed —
+     * so the state a module comes up in is not necessarily the documented
+     * default, and every conclusion drawn from writing them blind is only as
+     * good as that assumption. */
+    ESP_LOGI(TAG,
+             "M5 module 0x%02x before: mic 0x%02x, hp-mode 0x%02x, hp-mic "
+             "0x%02x, inserted 0x%02x, fw 0x%02x",
+             (unsigned)kM5ModuleAddr, (unsigned)m5_read(dev, kM5RegMicStatus),
+             (unsigned)m5_read(dev, kM5RegHpMode),
+             (unsigned)m5_read(dev, kM5RegHpMicStatus),
+             (unsigned)m5_read(dev, kM5RegHpInsert),
+             (unsigned)m5_read(dev, kM5RegFwVersion));
+
+    const uint8_t mic[2] = {kM5RegMicStatus,
+#if defined(CONFIG_OSYNTH_ES8388_M5_LINE_MIC)
+                            1
+#else
+                            0
+#endif
+    };
+    const uint8_t hp_mode[2] = {kM5RegHpMode,
+#if defined(CONFIG_OSYNTH_ES8388_M5_HP_OMTP)
+                                1
+#else
+                                0
+#endif
+    };
+    const uint8_t hp_mic[2] = {kM5RegHpMicStatus, 0};
+
+    esp_err_t err = i2c_master_transmit(dev, hp_mic, 2, kTimeoutMs);
+    if (err == ESP_OK) err = i2c_master_transmit(dev, hp_mode, 2, kTimeoutMs);
+    if (err == ESP_OK) err = i2c_master_transmit(dev, mic, 2, kTimeoutMs);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "M5 module 0x%02x after:  mic 0x%02x, hp-mode 0x%02x, "
+                      "hp-mic 0x%02x",
+                 (unsigned)kM5ModuleAddr, (unsigned)m5_read(dev, kM5RegMicStatus),
+                 (unsigned)m5_read(dev, kM5RegHpMode),
+                 (unsigned)m5_read(dev, kM5RegHpMicStatus));
+    } else {
+        ESP_LOGW(TAG, "M5 module 0x%02x: setup failed (%s)",
+                 (unsigned)kM5ModuleAddr, esp_err_to_name(err));
+    }
+    (void)i2c_master_bus_rm_device(dev);
+}
+#endif /* SYNTH_ENABLE_LINE_IN */
+
+/* Every register the init table touches, read straight back off the chip.
+ * Called once at the end of codec_init(), while the port is still stopped and
+ * the bus is known good — so it is both a record of what the chip was actually
+ * left holding and a check on the read path itself. */
+void dump_regs(void) {
+    char line[80];
+    for (uint8_t base = 0x00; base < 0x36; base += 8) {
+        size_t n = 0;
+        for (uint8_t i = 0; i < 8 && (uint8_t)(base + i) < 0x36; ++i) {
+            uint8_t v = 0;
+            const esp_err_t err = read_reg((uint8_t)(base + i), &v);
+            const int w = (err == ESP_OK)
+                              ? snprintf(line + n, sizeof(line) - n, " %02x",
+                                         (unsigned)v)
+                              : snprintf(line + n, sizeof(line) - n, " --");
+            if (w < 0 || (size_t)w >= sizeof(line) - n) break;
+            n += (size_t)w;
+        }
+        ESP_LOGI(TAG, "regs %02x:%s", (unsigned)base, line);
+    }
+}
+
+/* Everything that answers on the bus, logged only when something has already
+ * gone wrong. A chip that ACKs its address and then NACKs a write looks exactly
+ * like a chip that is not there at all once the sequence has aborted, and the
+ * address map is the one piece of evidence that tells those apart — an empty
+ * scan means wiring, a full one means the codec is present and refusing.
+ *
+ * Expected maps: a bare ES8388 answers at 0x10 or 0x11 and nothing else. On the
+ * M5Stack Module Audio (M144) a healthy bus is 0x10 (the codec, CE strapped
+ * low) *and* 0x33 (its STM32G030) — if 0x33 is missing too, the fault is the
+ * bus, not the codec. */
+void log_bus_scan(i2c_master_bus_handle_t bus, const char* when) {
+    char found[96];
+    size_t n = 0;
+    for (uint16_t a = 0x08; a <= 0x77; ++a) {
+        if (i2c_master_probe(bus, a, 20) != ESP_OK) continue;
+        const int w =
+            snprintf(found + n, sizeof(found) - n, " 0x%02x", (unsigned)a);
+        if (w < 0 || (size_t)w >= sizeof(found) - n) break;
+        n += (size_t)w;
+    }
+    ESP_LOGE(TAG, "bus scan (%s) on sda %d scl %d:%s", when,
+             (int)OSYNTH_ES8388_SDA, (int)OSYNTH_ES8388_SCL,
+             n != 0 ? found : " nothing answered");
 }
 
 #if SYNTH_ENABLE_LINE_IN
@@ -230,7 +484,16 @@ esp_err_t write_reg(uint8_t reg, uint8_t val) {
  * rather than a dB number the firmware would have to round. */
 esp_err_t set_pga(uint8_t code) {
     if (code > 8) code = 8; /* 8 = +24 dB, the documented maximum */
-    return write_reg(REG_ADCCONTROL1, (uint8_t)((code << 4) | code));
+    /* The two nibbles are independent, so the board's channel imbalance is
+     * corrected here rather than left for a digital trim to paper over: this
+     * is ahead of the converter, which is the only place a correction costs
+     * no resolution. See OSYNTH_ES8388_PGA_BALANCE. */
+    int l = (int)code + CONFIG_OSYNTH_ES8388_PGA_BALANCE;
+    int r = (int)code;
+    if (l < 0) { r -= l; l = 0; } /* a negative balance lifts the right instead */
+    if (l > 8) l = 8;
+    if (r > 8) r = 8;
+    return write_reg(REG_ADCCONTROL1, (uint8_t)((l << 4) | r));
 }
 #endif
 
@@ -249,17 +512,28 @@ esp_err_t set_out_level(float db) {
     if (code < 0) code = 0;
     if (code > 33) code = 33;
     const uint8_t v = (uint8_t)code;
-    esp_err_t err = write_reg(REG_LOUT1VOL, v);
-    if (err == ESP_OK) err = write_reg(REG_ROUT1VOL, v);
-    if (err == ESP_OK) err = write_reg(REG_LOUT2VOL, v);
-    if (err == ESP_OK) err = write_reg(REG_ROUT2VOL, v);
+    /* Only the pair that is actually driving something, so a stereo level is
+     * two writes and not four. Both are attempted even if the first fails, and
+     * the first error is the one returned: stopping early is what would leave
+     * the left channel at the new level and the right at the old, which is
+     * heard as the image jumping to one side rather than as a level that did
+     * not change. */
+    esp_err_t err = ESP_OK;
+    for (size_t i = 0; i < kOutVolCount; ++i) {
+        const esp_err_t e = write_reg(kOutVolRegs[i], v);
+        if (err == ESP_OK) err = e;
+    }
     return err;
 }
 
 /* Runs on whichever control task called ParamStore::set(), never the audio
  * task (which is forbidden from calling set() at all). Each register write is
  * ~60 us at 100 kHz, against a BLE knob drag already coalesced to ~20 Hz, so
- * doing it synchronously here costs less than a queue would. */
+ * doing it synchronously here costs less than a queue would.
+ *
+ * A failure is reported and dropped, not retried. On a healthy bus this does
+ * not fail; on an unhealthy one the warning is the useful output, because the
+ * bus is what needs fixing. */
 void on_param(uint16_t id, float value, osynth::ParamOrigin, void*) {
     esp_err_t err = ESP_OK;
     switch (id) {
@@ -308,7 +582,7 @@ esp_err_t codec_init(void) {
      * "unexpected nack" error before the second one succeeds. That line is
      * expected and harmless — the one that matters is whether the summary
      * below says the codec came up. */
-    uint16_t addr = 0;
+    uint16_t& addr = s_addr;
     if (i2c_master_probe(s_bus, kAddrCe0, 100) == ESP_OK) {
         addr = kAddrCe0;
     } else if (i2c_master_probe(s_bus, kAddrCe1, 100) == ESP_OK) {
@@ -322,6 +596,7 @@ esp_err_t codec_init(void) {
                       "0x%02x) — the analogue output will be silent",
                  OSYNTH_ES8388_SDA, OSYNTH_ES8388_SCL, (unsigned)kAddrCe0,
                  (unsigned)kAddrCe1);
+        log_bus_scan(s_bus, "probe failed");
         i2c_del_master_bus(s_bus);
         s_bus = nullptr;
         return ESP_ERR_NOT_FOUND;
@@ -330,7 +605,14 @@ esp_err_t codec_init(void) {
     i2c_device_config_t dev_cfg = {};
     dev_cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
     dev_cfg.device_address = addr;
-    dev_cfg.scl_speed_hz = 100000; /* the rate Espressif's driver uses */
+    /* 400 kHz, matching M5's own driver, which passes 400000 as its default
+     * I2C speed and successfully writes volume registers with the I2S port
+     * already running. Espressif's driver uses 100 kHz, which is what this was
+     * until S31d — and it is the last configuration difference left between
+     * this build and a setup known to work on the same module. Revert to
+     * 100000 if the bus gets worse rather than better; longer wires and weak
+     * pull-ups are less forgiving of the faster edges this needs. */
+    dev_cfg.scl_speed_hz = 400000;
     err = i2c_master_bus_add_device(s_bus, &dev_cfg, &s_dev);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "I2C device 0x%02x failed: %s", (unsigned)addr,
@@ -350,10 +632,14 @@ esp_err_t codec_init(void) {
              * and the remaining writes would be guesses about what state it
              * is actually in. The DAC stays muted, which is where the table
              * starts. */
-            ESP_LOGE(TAG, "register 0x%02x = 0x%02x failed (%s); stopping with "
+            ESP_LOGE(TAG, "register 0x%02x = 0x%02x failed at step %u/%u on the "
+                          "device that answered at 0x%02x (%s); stopping with "
                           "the codec muted",
                      (unsigned)kInit[i].reg, (unsigned)kInit[i].val,
-                     esp_err_to_name(err));
+                     (unsigned)(i + 1),
+                     (unsigned)(sizeof(kInit) / sizeof(kInit[0])),
+                     (unsigned)addr, esp_err_to_name(err));
+            log_bus_scan(s_bus, "write failed");
             return err;
         }
     }
@@ -364,6 +650,8 @@ esp_err_t codec_init(void) {
      * restored any saved value long before this component existed. */
     osynth::ParamStore& params = osynth::ParamStore::instance();
 #if SYNTH_ENABLE_LINE_IN
+    /* Board-specific, and a no-op on anything that is not an M144. */
+    configure_m5_module();
     (void)set_pga((uint8_t)(params.get(osynth::PID_LINE_IN_PGA) + 0.5f));
 #endif
     (void)set_out_level(params.get(osynth::PID_OUT_LEVEL));
@@ -372,11 +660,23 @@ esp_err_t codec_init(void) {
                       "reach the chip");
     }
 
-    /* Unmute last, onto a codec that is fully configured and already being
-     * clocked by a running I2S port. */
+    /* Unmute here, on the stopped-port bus, and not after audio_io_start().
+     * Leaving it for afterwards was the first thing tried and it does not
+     * work: on a jumper-wired M144 the single unmute write NACKs five times in
+     * about a millisecond once the clocks are running, and a codec that is
+     * perfectly configured and permanently muted is no better than one that
+     * never answered.
+     *
+     * Unmuting a DAC that has no clock yet is safe rather than merely
+     * tolerable. With no MCLK it is not converting, so its outputs are sitting
+     * at VMID exactly as they were while muted; when audio_io_start() brings
+     * the clocks up a moment later the first thing it converts is the render
+     * chain's silence, because no note can have been played yet. There is no
+     * step for the output caps to pass on. */
     err = write_reg(REG_DACCONTROL3, 0x00);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "unmute failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "unmute failed: %s — configured but silent",
+                 esp_err_to_name(err));
         return err;
     }
 
@@ -386,6 +686,7 @@ esp_err_t codec_init(void) {
              "in %s, out %s",
              (unsigned)addr, OSYNTH_ES8388_SDA, OSYNTH_ES8388_SCL, kInputName,
              kOutputName);
+    dump_regs();
     return ESP_OK;
 }
 

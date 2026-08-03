@@ -91,40 +91,88 @@ CONFIG_OSYNTH_FRONTEND_ES8388=y
 # already soldered. Defaults sit in one block at 14-18; GPIO19/20 are the
 # native USB pins and **GPIO33-37 are the octal PSRAM — never touch those**.
 # Avoid strapping pins GPIO0, 3, 45, 46.
-# CONFIG_OSYNTH_I2S_BCLK_GPIO=16
-# CONFIG_OSYNTH_I2S_WS_GPIO=17
+CONFIG_OSYNTH_I2S_BCLK_GPIO=16
+CONFIG_OSYNTH_I2S_WS_GPIO=17
 # DOUT: PCM5102A DIN, or ES8388 DSDIN.
-# CONFIG_OSYNTH_I2S_DOUT_GPIO=18
+CONFIG_OSYNTH_I2S_DOUT_GPIO=18
 # DIN: PCM1808 DOUT, or ES8388 ASDOUT. Only with line input on.
-# CONFIG_OSYNTH_I2S_DIN_GPIO=15
+CONFIG_OSYNTH_I2S_DIN_GPIO=15
 # MCLK: converter system clock at 256x fs (12.288 MHz at 48 kHz) — PCM1808
 # SCKI or ES8388 MCLK. Mandatory for both even in slave mode; without it a
 # PCM1808 reads silence while the starve counter climbs and an ES8388 does
 # not play at all. Only with line input or the ES8388 front end.
-# CONFIG_OSYNTH_I2S_MCLK_GPIO=14
+CONFIG_OSYNTH_I2S_MCLK_GPIO=14
 
 # --- ES8388 codec (only with OSYNTH_FRONTEND_ES8388) ------------------------
 
-# Control bus. Internal pull-ups are enabled, which is usually enough for a
-# short trace at 100 kHz; an unreliable board wants proper 4.7k externals.
-# CONFIG_OSYNTH_ES8388_I2C_SDA_GPIO=8
-# CONFIG_OSYNTH_ES8388_I2C_SCL_GPIO=9
+# Control bus. Internal pull-ups are enabled so a bare chip has some chance of
+# answering the probe, but they are ~45k and the datasheet asks for 1k. Any
+# ready-made codec board already fits its own (2.2k on the M5Stack M144) — do
+# not add more in parallel. See private_docs/HARDWARE.md.
+CONFIG_OSYNTH_ES8388_I2C_SDA_GPIO=8
+CONFIG_OSYNTH_ES8388_I2C_SCL_GPIO=9
 
 # Which analogue input pair the ADC listens to (only with line input on).
-# There is no way to detect it and boards differ: on the ESP32-A1S and LyraT
-# LIN1/RIN1 is the on-board microphone and LIN2/RIN2 the line/aux jack, hence
-# the default. DIFF takes both pairs as one differential input and is only
-# correct if the board is actually wired that way.
-# CONFIG_OSYNTH_ES8388_IN_LINE2=y
+# There is no way to detect it and boards differ, so this one has to be set to
+# match the board rather than left alone:
+#
+#   DIFF   the M5Stack Module Audio (M144). Its jack is wired differentially,
+#          so each channel is the difference across its pair. A single-ended
+#          selection there still gives audio at a sane level with a normal
+#          noise floor — but recovers exactly *half* the amplitude on that
+#          channel, heard as the image stuck to one side. The tell is a 2:1
+#          ratio that never moves with the source material.
+#   LINE1  the on-board microphone on an ESP32-A1S or LyraT.
+#   LINE2  the line/aux jack on an ESP32-A1S, LyraT and most "audio kit"
+#          boards. Was the default here before the M144 was the target board.
+#
+# Set for the M5Stack Module Audio (M144), wired per private_docs/HARDWARE.md.
 # CONFIG_OSYNTH_ES8388_IN_LINE1=y
-# CONFIG_OSYNTH_ES8388_IN_DIFF=y
+# CONFIG_OSYNTH_ES8388_IN_LINE2=y
+CONFIG_OSYNTH_ES8388_IN_DIFF=y
 
-# Which output pairs to power. Driving one you are not using costs a little
-# current and nothing else, so BOTH (the default) is the safe answer when the
-# board's wiring is unknown. OUT1 is the headphone jack on most boards, OUT2
-# the speaker amp input.
+# M5Stack Module Audio (M144) only: the two switches its STM32 owns, both of
+# which sit on the codec's LIN1. Skipped entirely unless something answers at
+# I2C 0x33, so no other board is affected. The boot log prints the module's
+# registers before and after, which is the way to confirm either of these
+# actually took.
+#
+# LINE_MIC (register 0x00, default y) connects the LINE/MIC jack to LIN1 and
+# switches a 3.3k electret bias onto the contact with it. =n takes that bias
+# off — worth trying with a line-level source, which does not need it.
+# HP_OMTP (register 0x10, default n = CTIA) picks which headset contact reaches
+# the shared MIC_MONO_IN node, which also sits on LIN1.
+# CONFIG_OSYNTH_ES8388_M5_LINE_MIC=n
+CONFIG_OSYNTH_ES8388_M5_HP_OMTP=y
+
+# Channel balance. On the M144 LIN1 is a summing node shared by the LINE/MIC
+# jack and the headset mic, each through its own 22k, so it measures a
+# consistent 6 dB below RIN1 — heard as the input being "on the right", and not
+# a fault. Set both to 0 on a board whose inputs are already matched.
+#
+# ADC_BALANCE attenuates the louder channel in the codec's per-channel ADC
+# digital volume: 0.5 dB steps, cannot clip, costs a little resolution on the
+# side turned down. 12 = right down 6 dB. Measure it with a *mono* source and
+# read `in pk L/R` from the heartbeat — a ratio of 0.5 is 6 dB, so 12 steps.
+CONFIG_OSYNTH_ES8388_ADC_BALANCE=0
+
+# PGA_BALANCE does the same in the analogue PGA by raising the *quieter*
+# channel. Costs no resolution, but steps 3 dB at a time and clips
+# analogue-side when over-corrected — audibly harsh and metallic on peaks.
+# Left at 0; use the ADC balance above unless the input is genuinely too quiet.
+CONFIG_OSYNTH_ES8388_PGA_BALANCE=0
+
+# Which output pairs to power. BOTH is the safe answer when the board's wiring
+# is unknown, but it is not free: out.level then writes four volume registers
+# instead of two, and on a marginal control bus every extra register is another
+# chance to land half a stereo update and hear the image jump to one side.
+#
+# On the M5Stack Module Audio (M144) it is settled. M5's own driver parks
+# LOUT2VOL/ROUT2VOL at 0x00 in its init and its setDACVolume() only ever writes
+# 0x2e/0x2f, so LOUT1/ROUT1 is what drives the headphone jack and OUT2 goes
+# nowhere. OUT1 is that, and halves the runtime writes.
 # CONFIG_OSYNTH_ES8388_OUT_BOTH=y
-# CONFIG_OSYNTH_ES8388_OUT1=y
+CONFIG_OSYNTH_ES8388_OUT1=y
 # CONFIG_OSYNTH_ES8388_OUT2=y
 
 # --- Looper persistence -----------------------------------------------------

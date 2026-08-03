@@ -116,15 +116,20 @@ void SYNTH_RENDER_IRAM line_in_capture(void) {
 
     /* Integer max-abs over what actually arrived: one compare per sample and
      * no float work in the metering path. */
-    int32_t pk = 0;
-    for (size_t i = 0; i < got * 2; ++i) {
-        const int32_t a = (s_in[i] < 0) ? -(int32_t)s_in[i] : (int32_t)s_in[i];
-        if (a > pk) pk = a;
+    int32_t pk_l = 0, pk_r = 0;
+    for (size_t i = 0; i < got * 2; i += 2) {
+        const int32_t al = (s_in[i] < 0) ? -(int32_t)s_in[i] : (int32_t)s_in[i];
+        const int32_t ar =
+            (s_in[i + 1] < 0) ? -(int32_t)s_in[i + 1] : (int32_t)s_in[i + 1];
+        if (al > pk_l) pk_l = al;
+        if (ar > pk_r) pk_r = ar;
     }
-    const float peak = (float)pk * kInScale;
+    const float peak_l = (float)pk_l * kInScale;
+    const float peak_r = (float)pk_r * kInScale;
 
     portENTER_CRITICAL(&s_stats_mux);
-    if (peak > s_stats.in_peak) s_stats.in_peak = peak;
+    if (peak_l > s_stats.in_peak_l) s_stats.in_peak_l = peak_l;
+    if (peak_r > s_stats.in_peak_r) s_stats.in_peak_r = peak_r;
     if (starved) s_stats.in_starves++;
     portEXIT_CRITICAL(&s_stats_mux);
 
@@ -409,6 +414,7 @@ void audio_io_get_stats(audio_io_stats_t* out) {
     *out = s_stats;
     s_stats.dsp_load_peak_pct = 0.0f;
     s_stats.out_peak = 0.0f;
-    s_stats.in_peak = 0.0f;
+    s_stats.in_peak_l = 0.0f;
+    s_stats.in_peak_r = 0.0f;
     portEXIT_CRITICAL(&s_stats_mux);
 }

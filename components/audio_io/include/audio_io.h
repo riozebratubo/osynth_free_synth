@@ -66,12 +66,19 @@ typedef struct {
      * There is deliberately no fourth stage percentage to go with these: the
      * input costs a fixed ~0.7% that does not vary with anything the player
      * does, so it would never have told anyone anything. These two would. */
-    float in_peak;        /* loudest |sample| captured since the previous
+    float in_peak_l;      /* loudest |sample| captured since the previous
                            * audio_io_get_stats() call (reset on read),
                            * measured *before* in.gain — the ADC clips in the
                            * analogue domain and no firmware gain undoes it,
                            * so a post-gain meter would hide exactly the
-                           * problem you need to see */
+                           * problem you need to see.
+                           *
+                           * Per channel, because a single combined peak
+                           * cannot tell a quiet input from a dead channel:
+                           * one silent side still gives a healthy reading
+                           * from the other, which is precisely the case you
+                           * reach for the meter to diagnose. */
+    float in_peak_r;
     uint32_t in_starves;  /* cumulative blocks where the ADC had no full
                            * block ready; the tail was zero-filled. Should
                            * stay at 0 — a climbing count means the RX side
