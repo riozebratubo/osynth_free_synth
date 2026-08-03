@@ -21,13 +21,29 @@ Bluetooth.
 
 | Engine | What it is |
 | --- | --- |
-| **Subtractive** | 2 PolyBLEP oscillators + noise → trapezoidal SVF filter. The classic. |
+| **Subtractive** | 2 PolyBLEP oscillators + noise → the filter family below. The classic. |
 | **FM** | 2-operator × 2 phase modulation, per-pair index envelopes and feedback. DX-style e-pianos, bells, growling basses. |
 | **Wavetable** | 4 morphing table sets × 8 frames × 8 band-limited mips — basic, hard-sync, vocal formants, FM. No aliasing by construction. |
-| **Additive** | 16 sine partials with drawbars, spectral tilt, even/odd balance and inharmonicity. A filter sweep with no filter. |
+| **Additive** | 16 sine partials with drawbars, spectral tilt, even/odd balance and inharmonicity. A filter sweep with no filter — and now a filter on top of it. |
 
 Switch engines mid-chord — the voice bus fades over ~10 ms, so it never
 clicks and never leaves a note stuck.
+
+### 🎛️ One filter family, everywhere
+
+Five topologies — **12 dB SVF**, **24 dB** (Butterworth Q pair, not two
+squared stages), **Moog ladder** with saturated feedback, **dual/spread**
+(a bandpass whose width is a knob instead of a side effect of Q), and a
+**three-formant vowel** filter morphing a–e–i–o–u — across seven responses
+(lowpass, bandpass, highpass, notch, peak, allpass, normalized bandpass),
+with a **drive** that saturates the resonant integrator rather than just
+the output.
+
+All four engines have one. The modular graph gets each heavy topology as
+its own node, so the patch budget can price it honestly. And the master FX
+bus has one too — the only filter here that reaches the drums and the
+looper, which is what makes a whole-track build-up possible. Every one of
+them has an on/off switch that skips the work when it is off.
 
 ### 🥁 A drum kit that sounds like drums
 

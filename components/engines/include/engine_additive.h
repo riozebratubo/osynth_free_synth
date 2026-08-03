@@ -49,6 +49,21 @@ extern const synth_engine_t g_engine_additive;
 #define ADD_PID_LFO2_RATE    0x0221
 #define ADD_PID_LFO2_WAVE    0x0222
 #define ADD_PID_LFO2_BRIGHT  0x0223
+/* filter (S33) — brightness shapes the spectrum at the source, this shapes
+ * it after the fact, and the two are worth having together: a resonant peak
+ * or a vowel on top of a drawbar spectrum is not something the rolloff can
+ * do. env2 doubles as the filter envelope via flt.env, as in the
+ * subtractive engine. Defaults off, so existing presets are unchanged. */
+#define ADD_PID_FLT_ON       0x0224
+#define ADD_PID_FLT_TYPE     0x0225
+#define ADD_PID_FLT_MODE     0x0226
+#define ADD_PID_FLT_CUTOFF   0x0227
+#define ADD_PID_FLT_RESO     0x0228
+#define ADD_PID_FLT_ENV      0x0229
+#define ADD_PID_FLT_KBD      0x022A
+#define ADD_PID_FLT_DRIVE    0x022B
+#define ADD_PID_FLT_SPREAD   0x022C
+#define ADD_PID_FLT_VOWEL    0x022D
 
 #ifdef __cplusplus
 }

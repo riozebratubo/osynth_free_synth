@@ -1,12 +1,13 @@
 /*
- * osynth — preset system (Session 13): named parameter snapshots on
- * LittleFS. 16 factory presets per engine (const, in flash) + 64 user
- * slots per engine on the 1 MB "storage" partition, plus 8 sequence slots
- * for the S12 recorder's 32 steps.
+ * osynth — preset system (Session 13; banks widened in S33): named parameter
+ * snapshots on LittleFS. 48 factory presets per engine (const, in flash) +
+ * 64 user slots per engine on the 1 MB "storage" partition, plus 8 sequence
+ * slots for the S12 recorder's 32 steps.
  *
- * Addressing is linear: slot = engine * 80 + index, index 0-15 factory /
- * 16-79 user (subtractive 0-79, additive 80-159, fm 160-239, wavetable
- * 240-319). Slot 0 of every bank is the init patch (pure defaults).
+ * Addressing is linear: slot = engine * 112 + index, index 0-47 factory /
+ * 48-111 user (subtractive 0-111, additive 112-223, fm 224-335, wavetable
+ * 336-447, modular 448-559). Slot 0 of every bank is the init patch (pure
+ * defaults).
  *
  * A preset stores sparse {param id, value} overrides on the registered
  * defaults; loading resets the patch ranges first, then applies them, and
@@ -44,8 +45,15 @@
 extern "C" {
 #endif
 
-#define PRESETS_PER_ENGINE    80 /* 0-15 factory, 16-79 user */
-#define PRESETS_FACTORY_SLOTS 16
+/* S33 widened the factory bank from 16 to 48 and moved the user range up to
+ * match, so the 64 user slots are unchanged in *count*. They are not
+ * unchanged in *number*: a user preset is a file named by its slot, and
+ * `p<e>_16.osp` .. `p<e>_79.osp` are all below the new kUserFirst, so the
+ * directory scan drops them. That is a deliberate one-time break — no
+ * migration — and it means presets saved by pre-S33 firmware do not survive
+ * the update. The files stay on flash; nothing reads them. */
+#define PRESETS_PER_ENGINE    112 /* 0-47 factory, 48-111 user */
+#define PRESETS_FACTORY_SLOTS 48
 #define PRESETS_NAME_MAX      24 /* including the terminator */
 #define PRESETS_SEQ_SLOTS     8
 #define PRESETS_SET_SLOTS     8 /* whole-sequencer slots (S27) */
@@ -81,7 +89,7 @@ esp_err_t presets_request_seqset_save(int slot);
 
 /* True if the slot holds a preset; copies its name out (both optional
  * outputs). Served from an in-RAM directory cache, so it is safe to call in a
- * loop from a latency-sensitive task (BLE LIST_PRESETS walks all 80 slots of
+ * loop from a latency-sensitive task (BLE LIST_PRESETS walks all 112 slots of
  * a bank). Only if the cache could not be allocated does it fall back to
  * reading the file header on the caller's task. */
 bool presets_slot_info(int engine, int slot, char name[PRESETS_NAME_MAX],

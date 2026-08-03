@@ -3,8 +3,8 @@ import QtQuick.Controls.Material
 
 import org.osynth.osyntho
 
-// Master FX bus: chorus -> delay -> granular delay -> reverb -> bitcrush,
-// plus the line input that feeds into it (S31). Engine-independent
+// Master FX bus: chorus -> delay -> granular delay -> reverb -> bitcrush ->
+// filter, plus the line input that feeds into it (S31). Engine-independent
 // (registered at boot), so these persist across engine switches.
 Item {
     Flickable {
@@ -25,6 +25,9 @@ Item {
             ParamGroup { title: "Granular delay"; prefix: "fx.grn" }
             ParamGroup { title: "Reverb"; prefix: "fx.rev" }
             ParamGroup { title: "Bitcrush"; prefix: "fx.crush" }
+            // Master filter (S33), last in the chain. Self-hides on older
+            // firmware, same as Line in.
+            ParamGroup { title: "Filter"; prefix: "fx.flt" }
         }
     }
 

@@ -81,6 +81,7 @@ enum class Kind : uint8_t {
     Shaper,
     RingMod,
     /* control rate — one value per block per voice */
+    /* (the S33 filters are appended after Out — see the note there) */
     Env,
     Lfo,
     SampleHold,
@@ -88,6 +89,17 @@ enum class Kind : uint8_t {
     MidiSrc,
     /* sink */
     Out,
+    /* The rest of the filter family (S33), audio rate. Appended here rather
+     * than beside Filter because the value is the on-wire patch format —
+     * inserting one would silently turn every saved node above it into a
+     * different kind. Each heavy topology is its own kind, deliberately: the
+     * compile-time budget check costs a patch from the kind table, and a
+     * `type` parameter inside one Filter kind would let a live edit triple
+     * the real cost of a patch that was checked at one third of it. */
+    Filter24, /* two SVFs in series, Butterworth Q pair */
+    Ladder,   /* 4-pole Moog, saturated feedback */
+    Dual,     /* lowpass + highpass, spread apart */
+    Vowel,    /* three morphing formants */
     Count
 };
 
@@ -108,7 +120,27 @@ enum class Rate : uint8_t { Control = 0, Audio = 1 };
 namespace pidx {
 enum OscP { OSC_WAVE = 0, OSC_SEMI, OSC_FINE, OSC_PW, OSC_FM, OSC_LEVEL, OSC_N };
 enum NoiseP { NOI_LEVEL = 0, NOI_N };
-enum FilterP { FLT_MODE = 0, FLT_CUTOFF, FLT_RESO, FLT_KBD, FLT_CUTAMT, FLT_N };
+/* FLT_ON/FLT_DRIVE appended in S33 — they land after cutamt in the app's
+ * parameter list, which is the price of not moving what came before them.
+ * Filter24 repeats the block so the two are interchangeable in a patch. */
+enum FilterP {
+    FLT_MODE = 0, FLT_CUTOFF, FLT_RESO, FLT_KBD, FLT_CUTAMT, FLT_ON,
+    FLT_DRIVE, FLT_N
+};
+enum LadderP {
+    LAD_ON = 0, LAD_CUTOFF, LAD_RESO, LAD_DRIVE, LAD_KBD, LAD_CUTAMT, LAD_N
+};
+enum DualP {
+    DUA_ON = 0, DUA_CUTOFF, DUA_RESO, DUA_SPREAD, DUA_DRIVE, DUA_KBD,
+    DUA_CUTAMT, DUA_N
+};
+/* The mod input drives the vowel morph here rather than a cutoff: sweeping
+ * a-e-i-o-u is what this node is for, and the formant shift is left to
+ * keyboard tracking. */
+enum VowelP {
+    VOW_ON = 0, VOW_VOWEL, VOW_RESO, VOW_SHIFT, VOW_DRIVE, VOW_KBD,
+    VOW_MODAMT, VOW_N
+};
 enum VcaP { VCA_GAIN = 0, VCA_DEPTH, VCA_N };
 enum MixP { MIX_L0 = 0, MIX_L1, MIX_L2, MIX_L3, MIX_N };
 enum ShaperP { SHP_MODE = 0, SHP_DRIVE, SHP_AMT, SHP_N };

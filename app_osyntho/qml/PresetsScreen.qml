@@ -5,7 +5,7 @@ import QtQuick.Controls.Material
 import org.osynth.osyntho
 
 // Browse / load / save the synth's own preset slots for the active engine
-// (0-15 factory, 16-79 user).
+// (0-47 factory, 48-111 user — S33 widened the factory bank from 16).
 Item {
     id: screen
 
@@ -94,7 +94,7 @@ Item {
             }
         }
 
-        // Tiles rather than one slot per line: 80 slots read far better packed
+        // Tiles rather than one slot per line: 112 slots read far better packed
         // left to right and wrapping downwards, the way PanelFlow lays out a
         // screen's panels. The whole tile is the Load button — a worded one
         // beside it would set the tile's width for no gain.
@@ -218,9 +218,9 @@ Item {
                 Label { text: t.t("Save to slot"); color: Material.foreground }
                 SpinBox {
                     id: slotBox
-                    from: 16
-                    to: 79
-                    value: 16
+                    from: 48
+                    to: 111
+                    value: 48
                 }
                 TextField {
                     id: nameField

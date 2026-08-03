@@ -1,6 +1,6 @@
 /*
  * osynth — master FX bus: chorus -> delay -> granular delay -> reverb
- * -> bitcrush (Sessions 10 + 11; bitcrush S17).
+ * -> bitcrush -> filter (Sessions 10 + 11; bitcrush S17; filter S33).
  *
  * The bus is stereo and global (not per voice) and runs on the audio task:
  * main.cpp chains fx_process() after voice_manager_render() in the render
@@ -41,6 +41,18 @@ extern "C" {
 #define FX_PID_CRUSH_MIX  0x0340
 #define FX_PID_CRUSH_BITS 0x0341
 #define FX_PID_CRUSH_DOWN 0x0342
+/* master filter (S33) — the same filter family the voices use, stereo and
+ * once per block instead of once per voice, so it costs about a quarter of
+ * one voice's filter. fx.flt.on is the dry/wet gate: like every other unit
+ * here, off means the stage returns immediately. */
+#define FX_PID_FLT_ON     0x0350
+#define FX_PID_FLT_TYPE   0x0351
+#define FX_PID_FLT_MODE   0x0352
+#define FX_PID_FLT_CUTOFF 0x0353
+#define FX_PID_FLT_RESO   0x0354
+#define FX_PID_FLT_DRIVE  0x0355
+#define FX_PID_FLT_SPREAD 0x0356
+#define FX_PID_FLT_VOWEL  0x0357
 
 /* Registers the 0x03xx params and allocates the delay lines (PSRAM first,
  * internal RAM fallback; an effect whose lines cannot be allocated is

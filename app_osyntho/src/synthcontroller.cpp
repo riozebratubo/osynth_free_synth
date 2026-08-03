@@ -1260,7 +1260,7 @@ void SynthController::savePreset(int engine, int slot, const QString& name) {
 
 void SynthController::listPresets(int engine) {
   if (!m_connected) return;
-  // 80 slots x 26 B is ~9 frames, so this one is always chunked; a listing
+  // 112 slots x 26 B is ~13 frames, so this one is always chunked; a listing
   // that lost its final frame would leave the accumulator populated and the
   // next Refresh would show every preset twice.
   m_presetsAccum.remove(engine);

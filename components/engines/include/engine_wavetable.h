@@ -3,8 +3,8 @@
  *
  * 2 wavetable oscillators scanning the factory table sets (generated at
  * build time by tools/gen_wavetables.py), position morph modulated by env2
- * and lfo2, SVF filter + amp ADSR from the shared blocks. The IDs live in
- * the engine-specific 0x02xx range: registered by init(), removed by
+ * and lfo2, filter (the S33 family) + amp ADSR from the shared blocks. The
+ * IDs live in the engine-specific 0x02xx range: registered by init(), removed by
  * deinit() on engine switch. Names, ranges and defaults: docs/PARAM_MAP.md.
  */
 #pragma once
@@ -51,6 +51,14 @@ extern const synth_engine_t g_engine_wavetable;
 #define WT_PID_LFO2_RATE    0x0219
 #define WT_PID_LFO2_WAVE    0x021A
 #define WT_PID_LFO2_POS     0x021B
+/* filter, part 2 (S33) — appended rather than placed next to the 0x0209
+ * block, because ids are the on-wire preset format and 0x020E onwards was
+ * already taken. See the same note in engine_subtractive.h. */
+#define WT_PID_FLT_ON       0x021C
+#define WT_PID_FLT_TYPE     0x021D
+#define WT_PID_FLT_DRIVE    0x021E
+#define WT_PID_FLT_SPREAD   0x021F
+#define WT_PID_FLT_VOWEL    0x0220
 
 #ifdef __cplusplus
 }

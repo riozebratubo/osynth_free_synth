@@ -8,8 +8,14 @@
  * feedback on the modulator (fb near 1 goes DX-style noisy — a feature).
  * Pair B is detunable in cents for shimmer. Velocity scales amplitude and,
  * via fm.vel.index, the modulation index (harder = brighter). lfo -> pitch
- * is the vibrato hook (mod wheel); there is no filter — caps declare LFO1
- * only, the first engine to exercise module gating for real.
+ * is the vibrato hook (mod wheel).
+ *
+ * S33 gave the engine a filter (the shared family in synth_dsp.h), switched
+ * off by default so every preset written before it is unchanged. There is
+ * no filter envelope: FM's only block-rate envelopes are the per-pair
+ * modulation-index envelopes, which belong to their operators, so cutoff
+ * modulation comes from keyboard tracking, lfo1, velocity and the matrix.
+ * env2/lfo2 are still gated out — caps declare FILTER and LFO1.
  *
  * Phase convention: everything is in cycles [0, 1). The modulation index
  * parameter is the classic I in radians (y = sin(wc t + I sin(wm t))), so
@@ -57,6 +63,7 @@ struct FmPair {
 
 struct FmVoice {
     FmPair a, b;
+    dsp::Filt filt;
     dsp::Lfo lfo;
     uint8_t note = 60; /* mod-matrix note source */
     float vel = 0.0f;
@@ -73,10 +80,16 @@ enum PIdx {
     B_MENV_A, B_MENV_D, B_MENV_S, B_MENV_R,
     B_DETUNE,
     VEL_INDEX, LFO_RATE, LFO_WAVE, LFO_PITCH,
+    FLT_ON, FLT_TYPE, FLT_MODE, FLT_CUTOFF, FLT_RESO, FLT_KBD,
+    FLT_DRIVE, FLT_SPREAD, FLT_VOWEL,
     P_COUNT
 };
 
 const char* const kLfoWaves[] = {"sine", "triangle", "saw", "square", "s&h"};
+/* Append-only, both: presets store the index, not the name. */
+const char* const kFltModes[] = {"lp",   "bp", "hp", "notch",
+                                 "peak", "ap", "bp norm"};
+const char* const kFltTypes[] = {"svf 12", "svf 24", "ladder", "dual", "vowel"};
 
 /* Default patch: DX-style e-piano — pair A is the 1:1 body (index softens
  * after the strike), pair B a fast-decaying overtone ping two octaves up. */
@@ -143,6 +156,28 @@ const ParamDesc kParams[P_COUNT] = {
      0.0f, 4.0f, 0.0f /* sine */, kLfoWaves, 5},
     {FM_PID_LFO_PITCH, "fm.lfo.pitch", ParamType::Float, ParamCurve::Linear,
      0.0f, 2.0f, 0.0f, nullptr, 0}, /* semitones (a matrix wheel slot raises it) */
+    /* Filter (S33). Named "flt.*" rather than "fm.flt.*" so the app's Filter
+     * card — which groups by name prefix — picks them up like every other
+     * engine's. Off by default: FM presets predate it, and a filter that
+     * silently appeared in the signal path would change all of them. */
+    {FM_PID_FLT_ON, "flt.on", ParamType::Bool, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0},
+    {FM_PID_FLT_TYPE, "flt.type", ParamType::Enum, ParamCurve::Linear,
+     0.0f, 4.0f, 0.0f /* svf 12 */, kFltTypes, 5},
+    {FM_PID_FLT_MODE, "flt.mode", ParamType::Enum, ParamCurve::Linear,
+     0.0f, 6.0f, 0.0f /* lp */, kFltModes, 7},
+    {FM_PID_FLT_CUTOFF, "flt.cutoff", ParamType::Float, ParamCurve::Exp,
+     20.0f, 18000.0f, 6000.0f, nullptr, 0},
+    {FM_PID_FLT_RESO, "flt.reso", ParamType::Float, ParamCurve::Linear,
+     0.0f, 1.0f, 0.1f, nullptr, 0},
+    {FM_PID_FLT_KBD, "flt.kbd", ParamType::Float, ParamCurve::Linear,
+     0.0f, 1.0f, 0.5f, nullptr, 0},
+    {FM_PID_FLT_DRIVE, "flt.drive", ParamType::Float, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0},
+    {FM_PID_FLT_SPREAD, "flt.spread", ParamType::Float, ParamCurve::Linear,
+     0.0f, 6.0f, 2.0f, nullptr, 0}, /* dual: passband width in octaves */
+    {FM_PID_FLT_VOWEL, "flt.vowel", ParamType::Float, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0}, /* vowel: morph a-e-i-o-u */
 };
 
 const std::atomic<float>* s_p[P_COUNT];
@@ -168,6 +203,9 @@ struct BlockCache {
     float lfo_inc;
     dsp::LfoWave lw;
     float lfo_pitch;
+    dsp::SvfMode fmode;
+    dsp::FltType ftype;
+    float cutoff, reso, fkbd, fdrive, fspread, fvowel;
 };
 
 BlockCache s_bc;
@@ -183,6 +221,7 @@ struct PairSmooth {
 struct Smoothers {
     PairSmooth a, b;
     dsp::Smooth bdet, vel_index, lfo_pitch;
+    dsp::Smooth cutoff, reso, fkbd, fdrive, fspread, fvowel;
 };
 
 Smoothers s_sm;
@@ -256,6 +295,15 @@ void SYNTH_RENDER_IRAM fm_begin_block(size_t frames) {
     b.lfo_inc = pv(LFO_RATE) * (float)frames * kInvSr;
     b.lw = (dsp::LfoWave)(int)pv(LFO_WAVE);
     b.lfo_pitch = dsp::smooth_lin(s_sm.lfo_pitch, pv(LFO_PITCH));
+    b.fmode = (dsp::SvfMode)(int)pv(FLT_MODE);
+    b.ftype = (pv(FLT_ON) < 0.5f) ? dsp::FltType::Bypass
+                                  : (dsp::FltType)(int)pv(FLT_TYPE);
+    b.cutoff = dsp::smooth_exp(s_sm.cutoff, pv(FLT_CUTOFF));
+    b.reso = dsp::smooth_lin(s_sm.reso, pv(FLT_RESO));
+    b.fkbd = dsp::smooth_lin(s_sm.fkbd, pv(FLT_KBD));
+    b.fdrive = dsp::smooth_lin(s_sm.fdrive, pv(FLT_DRIVE));
+    b.fspread = dsp::smooth_lin(s_sm.fspread, pv(FLT_SPREAD));
+    b.fvowel = dsp::smooth_lin(s_sm.fvowel, pv(FLT_VOWEL));
 }
 
 void fm_voice_reset(void* vs) {
@@ -330,6 +378,17 @@ void SYNTH_RENDER_IRAM fm_render(void* vs, const synth_voice_frame_t* f,
     const float ib =
         ib_rad * kInv2Pi * dsp::adsr_next(v.b.menv, b.b.mod) * vscale;
 
+    /* Filter (S33). No filter envelope on this engine — the cutoff moves
+     * from keyboard tracking, the matrix, lfo1 and velocity. */
+    const float fcut = synth_mod_apply(FM_PID_FLT_CUTOFF, b.cutoff, &ms);
+    const float freso = synth_mod_apply(FM_PID_FLT_RESO, b.reso, &ms);
+    const float fdrive = synth_mod_apply(FM_PID_FLT_DRIVE, b.fdrive, &ms);
+    const float fvowel = synth_mod_apply(FM_PID_FLT_VOWEL, b.fvowel, &ms);
+    const float foct = b.fkbd * ((float)v.note - 60.0f) * (1.0f / 12.0f);
+    const dsp::FiltCoef fc =
+        dsp::filt_coef(b.ftype, b.fmode, fcut * exp2f(foct), freso, fdrive,
+                       b.fspread, fvowel, kSr);
+
     const float gl = f->gain_l * v.vel;
     const float gr = f->gain_r * v.vel;
 
@@ -369,6 +428,7 @@ void SYNTH_RENDER_IRAM fm_render(void* vs, const synth_voice_frame_t* f,
             v.b.cph += step_cb; if (v.b.cph >= 1.0f) v.b.cph -= 1.0f;
             y += cb * eb * lvl_b;
         }
+        y = dsp::filt_next(v.filt, fc, y);
         out_l[i] += y * gl;
         out_r[i] += y * gr;
     }
@@ -391,8 +451,8 @@ float fm_level(const void* vs) {
 
 extern "C" const synth_engine_t g_engine_fm = {
     "fm",
-    /* no filter/env2/lfo2/mixer: gated out for this engine */
-    SYNTH_CAP_LFO1 | SYNTH_CAP_MODMATRIX,
+    /* filter added S33; no env2/lfo2/mixer: still gated out for this engine */
+    SYNTH_CAP_FILTER | SYNTH_CAP_LFO1 | SYNTH_CAP_MODMATRIX,
     sizeof(FmVoice),
     fm_init,
     fm_deinit,

@@ -50,6 +50,21 @@ extern const synth_engine_t g_engine_fm;
 #define FM_PID_LFO_RATE  0x021C
 #define FM_PID_LFO_WAVE  0x021D
 #define FM_PID_LFO_PITCH 0x021E
+/* filter (S33) — this engine had none until the shared filter family made
+ * one cheap enough to be worth the caps bit. There is no flt.env: FM has no
+ * shared mod envelope to drive it (the per-pair menvs are the index
+ * envelopes and belong to their operators), so cutoff modulation comes from
+ * the mod matrix, lfo1 and velocity. Defaults off — an existing FM preset
+ * sounds exactly as it did. */
+#define FM_PID_FLT_ON     0x021F
+#define FM_PID_FLT_TYPE   0x0220
+#define FM_PID_FLT_MODE   0x0221
+#define FM_PID_FLT_CUTOFF 0x0222
+#define FM_PID_FLT_RESO   0x0223
+#define FM_PID_FLT_KBD    0x0224
+#define FM_PID_FLT_DRIVE  0x0225
+#define FM_PID_FLT_SPREAD 0x0226
+#define FM_PID_FLT_VOWEL  0x0227
 
 #ifdef __cplusplus
 }

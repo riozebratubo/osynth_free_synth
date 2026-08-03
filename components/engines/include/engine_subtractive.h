@@ -49,6 +49,16 @@ extern const synth_engine_t g_engine_subtractive;
 #define SUB_PID_LFO2_RATE    0x0219
 #define SUB_PID_LFO2_WAVE    0x021A
 #define SUB_PID_LFO2_CUTOFF  0x021B
+/* filter, part 2 (S33). Appended here rather than next to the 0x0209 block
+ * because ids are the on-wire preset format: 0x020E onwards was already
+ * spoken for, and moving a parameter is the one thing that breaks a saved
+ * patch. The app groups the Filter card by name prefix, not by id, so these
+ * still land in it — at the end of the card, since it lists in id order. */
+#define SUB_PID_FLT_ON       0x021C
+#define SUB_PID_FLT_TYPE     0x021D
+#define SUB_PID_FLT_DRIVE    0x021E
+#define SUB_PID_FLT_SPREAD   0x021F
+#define SUB_PID_FLT_VOWEL    0x0220
 
 #ifdef __cplusplus
 }

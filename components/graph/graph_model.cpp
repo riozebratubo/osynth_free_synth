@@ -25,7 +25,9 @@ namespace {
 /* ---- enum value names (served over BLE PARAM_INFO) ---- */
 
 const char* const kOscWaves[] = {"sine", "triangle", "saw", "pulse"};
-const char* const kFltModes[] = {"lp", "bp", "hp"};
+/* Append-only: the index is what a saved patch stores. */
+const char* const kFltModes[] = {"lp",   "bp", "hp", "notch",
+                                 "peak", "ap", "bp norm"};
 const char* const kLfoWaves[] = {"sine", "triangle", "saw", "square", "s&h"};
 const char* const kShaperModes[] = {"tanh", "fold", "clip"};
 const char* const kMidiSources[] = {"vel", "note", "gate", "bend", "wheel",
@@ -35,6 +37,7 @@ const char* const kMidiSources[] = {"vel", "note", "gate", "bend", "wheel",
 
 const char* const kInOsc[] = {"fm", "pitch"};
 const char* const kInFilter[] = {"in", "cut"};
+const char* const kInVowel[] = {"in", "vowel"};
 const char* const kInVca[] = {"in", "gain"};
 const char* const kInMix[] = {"in1", "in2", "in3", "in4"};
 const char* const kInShaper[] = {"in", "drive"};
@@ -68,14 +71,56 @@ const ParamSpec kPNoise[] = {
     {"level", ParamType::Float, ParamCurve::Linear, 0, 1, 1, nullptr, 0},
 };
 
+/* The S33 filter block, shared by "filter" (12 dB) and "filter24" (24 dB):
+ * identical parameters, so swapping one for the other in a patch keeps every
+ * setting. `on` bypasses the node — the render path copies its input through
+ * and skips the sample loop entirely, which is the point of having it. */
 const ParamSpec kPFilter[] = {
-    {"mode", ParamType::Enum, ParamCurve::Linear, 0, 2, 0 /*lp*/, kFltModes, 3},
+    {"mode", ParamType::Enum, ParamCurve::Linear, 0, 6, 0 /*lp*/, kFltModes, 7},
     {"cutoff", ParamType::Float, ParamCurve::Exp, 20, 18000, 1200, nullptr, 0},
     {"reso", ParamType::Float, ParamCurve::Linear, 0, 1, 0.15f, nullptr, 0},
     {"kbd", ParamType::Float, ParamCurve::Linear, 0, 1, 0.5f, nullptr, 0},
     /* how far the "cut" input moves the cutoff, in octaves — the cable
      * carries a normalized signal, this sets its depth */
     {"cutamt", ParamType::Float, ParamCurve::Linear, -8, 8, 2.5f, nullptr, 0},
+    {"on", ParamType::Bool, ParamCurve::Linear, 0, 1, 1, nullptr, 0},
+    {"drive", ParamType::Float, ParamCurve::Linear, 0, 1, 0, nullptr, 0},
+};
+
+const ParamSpec kPLadder[] = {
+    {"on", ParamType::Bool, ParamCurve::Linear, 0, 1, 1, nullptr, 0},
+    {"cutoff", ParamType::Float, ParamCurve::Exp, 20, 18000, 1200, nullptr, 0},
+    /* reso reaches self-oscillation at 1; the ladder's own saturation is
+     * what stops that from being a runaway rather than a note */
+    {"reso", ParamType::Float, ParamCurve::Linear, 0, 1, 0.3f, nullptr, 0},
+    {"drive", ParamType::Float, ParamCurve::Linear, 0, 1, 0, nullptr, 0},
+    {"kbd", ParamType::Float, ParamCurve::Linear, 0, 1, 0.5f, nullptr, 0},
+    {"cutamt", ParamType::Float, ParamCurve::Linear, -8, 8, 2.5f, nullptr, 0},
+};
+
+const ParamSpec kPDual[] = {
+    {"on", ParamType::Bool, ParamCurve::Linear, 0, 1, 1, nullptr, 0},
+    {"cutoff", ParamType::Float, ParamCurve::Exp, 20, 18000, 1200, nullptr, 0},
+    {"reso", ParamType::Float, ParamCurve::Linear, 0, 1, 0.15f, nullptr, 0},
+    /* passband width in octaves: 0 is a razor, 6 is most of the spectrum */
+    {"spread", ParamType::Float, ParamCurve::Linear, 0, 6, 2, nullptr, 0},
+    {"drive", ParamType::Float, ParamCurve::Linear, 0, 1, 0, nullptr, 0},
+    {"kbd", ParamType::Float, ParamCurve::Linear, 0, 1, 0.5f, nullptr, 0},
+    {"cutamt", ParamType::Float, ParamCurve::Linear, -8, 8, 2.5f, nullptr, 0},
+};
+
+const ParamSpec kPVowel[] = {
+    {"on", ParamType::Bool, ParamCurve::Linear, 0, 1, 1, nullptr, 0},
+    /* morph a-e-i-o-u; the "vowel" input adds to this */
+    {"vowel", ParamType::Float, ParamCurve::Linear, 0, 1, 0, nullptr, 0},
+    /* formant bandwidth: low is breathy, high is a talking robot */
+    {"reso", ParamType::Float, ParamCurve::Linear, 0, 1, 0.5f, nullptr, 0},
+    /* vocal-tract shift, neutral at 1 kHz — the cutoff of this node */
+    {"shift", ParamType::Float, ParamCurve::Exp, 100, 8000, 1000, nullptr, 0},
+    {"drive", ParamType::Float, ParamCurve::Linear, 0, 1, 0, nullptr, 0},
+    {"kbd", ParamType::Float, ParamCurve::Linear, 0, 1, 0, nullptr, 0},
+    /* how far the "vowel" input moves the morph, over the whole a..u range */
+    {"modamt", ParamType::Float, ParamCurve::Linear, -1, 1, 1, nullptr, 0},
 };
 
 const ParamSpec kPVca[] = {
@@ -144,9 +189,11 @@ const ParamSpec kPOut[] = {
  * Costs are in units where 1000 is the whole per-block budget at full
  * polyphony. **Calibrated against hardware** (S28, ESP32-S3 at 240 MHz, 8
  * voices, block 64): the factory patch — osc + filter + vca + out, two
- * envelopes and a velocity source — totals 307 here and measures `voi`
+ * envelopes and a velocity source — totalled 307 here and measured `voi`
  * 30.58%, so one unit is 0.1% of the block, which is what the scale is
- * supposed to mean.
+ * supposed to mean. (S33 raised `filter` by 8 for its drive path, so the
+ * same patch now prices at 315 against an unchanged measurement — the
+ * calibration anchor is the 92, not the 307.)
  *
  * The first cut of these numbers was 25% higher, because each audio-rate
  * entry carried a flat allowance for buffer traffic — the store and load
@@ -168,7 +215,7 @@ const KindDesc kKinds[(int)Kind::Count] = {
     /* Noise */
     {"noise", Rate::Audio, 0, nullptr, pidx::NOI_N, kPNoise, 28},
     /* Filter */
-    {"filter", Rate::Audio, 2, kInFilter, pidx::FLT_N, kPFilter, 92},
+    {"filter", Rate::Audio, 2, kInFilter, pidx::FLT_N, kPFilter, 100},
     /* Vca */
     {"vca", Rate::Audio, 2, kInVca, pidx::VCA_N, kPVca, 36},
     /* Mix */
@@ -189,6 +236,29 @@ const KindDesc kKinds[(int)Kind::Count] = {
     {"midi", Rate::Control, 0, nullptr, pidx::MS_N, kPMidi, 1},
     /* Out */
     {"out", Rate::Audio, 2, kInOut, pidx::OUT_N, kPOut, 44},
+    /* ---- the S33 filters ----
+     *
+     * Separate kinds so each carries its own honest number. These four are
+     * *estimates*, scaled off the measured 92 for one SVF and not yet
+     * confirmed on hardware — unlike every figure above them, which came
+     * from the S28 calibration run. Re-measure with `voi` at 8 voices and
+     * correct them here; the ratios are the part worth trusting.
+     *
+     *   filter    one SVF, +8 over the S28 figure for the drive path's two
+     *             soft_clips (a parameter, so it is priced in, not costed)
+     *   filter24  two SVFs in series, so twice the work
+     *   ladder    four one-poles + feedback + one clip, ~1.3x an SVF
+     *   dual      two SVFs, same as filter24
+     *   vowel     three SVFs plus the gain sum, ~3x
+     *
+     * Bypass (`on` = 0) is not modelled: the check has to hold whatever the
+     * switch is set to later, and reserving for the on case is the safe
+     * direction — same argument as kCostBudget reserving against worst-case
+     * FX in graph_compile.h. */
+    {"filter24", Rate::Audio, 2, kInFilter, pidx::FLT_N, kPFilter, 190},
+    {"ladder", Rate::Audio, 2, kInFilter, pidx::LAD_N, kPLadder, 120},
+    {"dual", Rate::Audio, 2, kInFilter, pidx::DUA_N, kPDual, 190},
+    {"vowel", Rate::Audio, 2, kInVowel, pidx::VOW_N, kPVowel, 280},
 };
 
 /* ---- registered parameter names ----

@@ -179,8 +179,13 @@ const char* engine_name(int engine) {
     return e != nullptr ? e->name : "?";
 }
 
+/* %03d since S33: user slots run to 111, and a mix of two- and three-digit
+ * names in one directory sorts badly and reads worse. parse_preset_name()
+ * uses strtol, so it accepts either width — but nothing writes the old one
+ * any more, and the pre-S33 files it would match are below kUserFirst and
+ * rejected on slot range regardless. */
 void preset_path(char* out, size_t n, int engine, int slot) {
-    snprintf(out, n, "%s/p%d_%02d.osp", kBasePath, engine, slot);
+    snprintf(out, n, "%s/p%d_%03d.osp", kBasePath, engine, slot);
 }
 
 void seq_path(char* out, size_t n, int slot) {

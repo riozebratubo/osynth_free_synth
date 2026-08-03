@@ -1,8 +1,8 @@
 /*
- * osynth — additive engine (Session 8).
+ * osynth — additive engine (Session 8; filter added Session 33).
  *
- * 16 sine partials per voice, summed straight from the shared LUT — no
- * filter, the spectrum is the patch. Per block (global): drawbar levels ×
+ * 16 sine partials per voice, summed straight from the shared LUT: the
+ * spectrum is the patch. Per block (global): drawbar levels ×
  * spectral tilt (dB/oct, referenced so it only attenuates) × even/odd
  * balance give the base spectrum; inharmonicity stretches the partial
  * ratios (n·sqrt(1 + B·n²), renormalized so the fundamental stays put).
@@ -17,8 +17,13 @@
  *
  * Render shape: a partial-outer loop accumulates into a mono scratch buffer
  * (each partial's phase stays in a register), then one pass applies the
- * per-sample amp env and the voice gains. Culled partials keep their phase;
- * they rejoin below −60 dB, so the step is inaudible.
+ * filter, the per-sample amp env and the voice gains. Culled partials keep
+ * their phase; they rejoin below −60 dB, so the step is inaudible.
+ *
+ * The S33 filter sits in that final pass, off by default. It does something
+ * the brightness rolloff cannot: the rolloff attenuates partial by partial
+ * and can only ever get darker, where a resonant peak, a notch or a vowel
+ * imposes a shape the drawbars never contained. env2 drives both.
  *
  * Gain staging: tilt / even-odd / brightness only attenuate, so the
  * worst-case sum is the drawbar sum. The default 1/n drawbars sum to 1.0 —
@@ -58,8 +63,9 @@ constexpr int kPartials = ADD_PARTIALS;
 
 struct AddVoice {
     float phase[kPartials]; /* cycles, [0, 1) */
+    dsp::Filt filt;         /* S33; off unless flt.on */
     dsp::Adsr env1;         /* amplitude, per sample */
-    dsp::Adsr env2;         /* brightness, block rate */
+    dsp::Adsr env2;         /* brightness + filter, block rate */
     dsp::Lfo lfo1, lfo2;
     uint8_t note = 60; /* mod-matrix note source */
     float vel = 0.0f;
@@ -75,10 +81,16 @@ enum PIdx {
     ENV2_A, ENV2_D, ENV2_S, ENV2_R,
     LFO1_RATE, LFO1_WAVE, LFO1_PITCH,
     LFO2_RATE, LFO2_WAVE, LFO2_BRIGHT,
+    FLT_ON, FLT_TYPE, FLT_MODE, FLT_CUTOFF, FLT_RESO, FLT_ENV, FLT_KBD,
+    FLT_DRIVE, FLT_SPREAD, FLT_VOWEL,
     P_COUNT
 };
 
 const char* const kLfoWaves[] = {"sine", "triangle", "saw", "square", "s&h"};
+/* Append-only, both: presets store the index, not the name. */
+const char* const kFltModes[] = {"lp",   "bp", "hp", "notch",
+                                 "peak", "ap", "bp norm"};
+const char* const kFltTypes[] = {"svf 12", "svf 24", "ladder", "dual", "vowel"};
 
 #define ADD_DRAWBAR(n, def)                                                \
     {(uint16_t)(ADD_PID_P1_LEVEL + (n) - 1), "add.p" #n ".level",          \
@@ -143,6 +155,28 @@ const ParamDesc kParams[P_COUNT] = {
      0.0f, 4.0f, 1.0f /* triangle */, kLfoWaves, 5},
     {ADD_PID_LFO2_BRIGHT, "lfo2.bright", ParamType::Float, ParamCurve::Linear,
      0.0f, 1.0f, 0.0f, nullptr, 0}, /* brightness wobble depth */
+    /* Filter (S33), off by default — this engine shaped its spectrum with
+     * brightness alone until now, and every preset assumes that. */
+    {ADD_PID_FLT_ON, "flt.on", ParamType::Bool, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0},
+    {ADD_PID_FLT_TYPE, "flt.type", ParamType::Enum, ParamCurve::Linear,
+     0.0f, 4.0f, 0.0f /* svf 12 */, kFltTypes, 5},
+    {ADD_PID_FLT_MODE, "flt.mode", ParamType::Enum, ParamCurve::Linear,
+     0.0f, 6.0f, 0.0f /* lp */, kFltModes, 7},
+    {ADD_PID_FLT_CUTOFF, "flt.cutoff", ParamType::Float, ParamCurve::Exp,
+     20.0f, 18000.0f, 8000.0f, nullptr, 0},
+    {ADD_PID_FLT_RESO, "flt.reso", ParamType::Float, ParamCurve::Linear,
+     0.0f, 1.0f, 0.1f, nullptr, 0},
+    {ADD_PID_FLT_ENV, "flt.env", ParamType::Float, ParamCurve::Linear,
+     -4.0f, 4.0f, 0.0f, nullptr, 0}, /* octaves; env2 doubles as filter env */
+    {ADD_PID_FLT_KBD, "flt.kbd", ParamType::Float, ParamCurve::Linear,
+     0.0f, 1.0f, 0.5f, nullptr, 0},
+    {ADD_PID_FLT_DRIVE, "flt.drive", ParamType::Float, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0},
+    {ADD_PID_FLT_SPREAD, "flt.spread", ParamType::Float, ParamCurve::Linear,
+     0.0f, 6.0f, 2.0f, nullptr, 0}, /* dual: passband width in octaves */
+    {ADD_PID_FLT_VOWEL, "flt.vowel", ParamType::Float, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0}, /* vowel: morph a-e-i-o-u */
 };
 
 const std::atomic<float>* s_p[P_COUNT];
@@ -160,6 +194,9 @@ struct BlockCache {
     float lfo1_inc, lfo2_inc;
     dsp::LfoWave lw1, lw2;
     float l1_pitch, l2_bright;
+    dsp::SvfMode fmode;
+    dsp::FltType ftype;
+    float cutoff, reso, fenv_oct, fkbd, fdrive, fspread, fvowel;
 };
 
 BlockCache s_bc;
@@ -175,6 +212,7 @@ struct Smoothers {
     dsp::Smooth base[kPartials];
     dsp::Smooth inharm, bright, env_bright, vel_bright;
     dsp::Smooth l1_pitch, l2_bright;
+    dsp::Smooth cutoff, reso, fenv, fkbd, fdrive, fspread, fvowel;
 };
 
 Smoothers s_sm;
@@ -256,6 +294,16 @@ void SYNTH_RENDER_IRAM add_begin_block(size_t frames) {
     b.lfo2_inc = pv(LFO2_RATE) * (float)frames * kInvSr;
     b.lw2 = (dsp::LfoWave)(int)pv(LFO2_WAVE);
     b.l2_bright = dsp::smooth_lin(s_sm.l2_bright, pv(LFO2_BRIGHT));
+    b.fmode = (dsp::SvfMode)(int)pv(FLT_MODE);
+    b.ftype = (pv(FLT_ON) < 0.5f) ? dsp::FltType::Bypass
+                                  : (dsp::FltType)(int)pv(FLT_TYPE);
+    b.cutoff = dsp::smooth_exp(s_sm.cutoff, pv(FLT_CUTOFF));
+    b.reso = dsp::smooth_lin(s_sm.reso, pv(FLT_RESO));
+    b.fenv_oct = dsp::smooth_lin(s_sm.fenv, pv(FLT_ENV));
+    b.fkbd = dsp::smooth_lin(s_sm.fkbd, pv(FLT_KBD));
+    b.fdrive = dsp::smooth_lin(s_sm.fdrive, pv(FLT_DRIVE));
+    b.fspread = dsp::smooth_lin(s_sm.fspread, pv(FLT_SPREAD));
+    b.fvowel = dsp::smooth_lin(s_sm.fvowel, pv(FLT_VOWEL));
 }
 
 void add_voice_reset(void* vs) {
@@ -309,6 +357,11 @@ void SYNTH_RENDER_IRAM add_render(void* vs, const synth_voice_frame_t* f,
         synth_mod_apply(ADD_PID_ENV_BRIGHT, b.env_bright, &ms);
     const float m_l2bright =
         synth_mod_apply(ADD_PID_LFO2_BRIGHT, b.l2_bright, &ms);
+    const float fcut = synth_mod_apply(ADD_PID_FLT_CUTOFF, b.cutoff, &ms);
+    const float freso = synth_mod_apply(ADD_PID_FLT_RESO, b.reso, &ms);
+    const float fenv_oct = synth_mod_apply(ADD_PID_FLT_ENV, b.fenv_oct, &ms);
+    const float fdrive = synth_mod_apply(ADD_PID_FLT_DRIVE, b.fdrive, &ms);
+    const float fvowel = synth_mod_apply(ADD_PID_FLT_VOWEL, b.fvowel, &ms);
 
     const float pitch_mul =
         (l1_pitch != 0.0f) ? exp2f(l1 * l1_pitch * (1.0f / 12.0f)) : 1.0f;
@@ -361,12 +414,20 @@ void SYNTH_RENDER_IRAM add_render(void* vs, const synth_voice_frame_t* f,
         v.phase[idx[k]] = ph;
     }
 
+    /* Filter (S33) — env2 drives it as well as the brightness rolloff, so
+     * one envelope opens the spectrum from both ends. */
+    const float foct = fenv_oct * menv +
+                       b.fkbd * ((float)v.note - 60.0f) * (1.0f / 12.0f);
+    const dsp::FiltCoef fc =
+        dsp::filt_coef(b.ftype, b.fmode, fcut * exp2f(foct), freso, fdrive,
+                       b.fspread, fvowel, kSr);
+
     const float gl = f->gain_l * v.vel;
     const float gr = f->gain_r * v.vel;
     float a = ar.base;
     for (size_t i = 0; i < frames; ++i) {
         a += ar.step;
-        const float y = s_acc[i] * a;
+        const float y = dsp::filt_next(v.filt, fc, s_acc[i]) * a;
         out_l[i] += y * gl;
         out_r[i] += y * gr;
     }
@@ -384,7 +445,8 @@ float add_level(const void* vs) {
 
 extern "C" const synth_engine_t g_engine_additive = {
     "additive",
-    SYNTH_CAP_ENV2 | SYNTH_CAP_LFO1 | SYNTH_CAP_LFO2 | SYNTH_CAP_MODMATRIX,
+    SYNTH_CAP_FILTER | SYNTH_CAP_ENV2 | SYNTH_CAP_LFO1 | SYNTH_CAP_LFO2 |
+        SYNTH_CAP_MODMATRIX,
     sizeof(AddVoice),
     add_init,
     add_deinit,

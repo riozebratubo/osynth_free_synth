@@ -2,9 +2,10 @@
  * osynth — shared DSP blocks (Session 5).
  *
  * Small, allocation-free building blocks composed by the engines: band-limited
- * oscillator (PolyBLEP saw/pulse), trapezoidal state-variable filter, ADSR
- * with linear attack + one-pole exponential decay/release, block-rate LFO,
- * xorshift white noise.
+ * oscillator (PolyBLEP saw/pulse), a family of filters built on a trapezoidal
+ * state-variable core (S33: 12/24 dB, seven responses, drive, Moog ladder,
+ * dual/spread, formant), ADSR with linear attack + one-pole exponential
+ * decay/release, block-rate LFO, xorshift white noise.
  *
  * Conventions:
  *  - Blocks hold state only, never parameters: engines read ParamStore once
@@ -145,19 +146,66 @@ inline float osc_next(Osc& o, OscWave w, float step, float pw) {
 
 /* ---- state-variable filter (trapezoidal integrators, Cytomic form) ---- */
 
-enum class SvfMode : uint8_t { Lp = 0, Bp, Hp };
+/* Every response below is a linear combination of the three values the core
+ * already computes (v0 = input, v1 = bandpass, v2 = lowpass), so the four
+ * modes added in S33 cost one more switch arm and no arithmetic at all.
+ * Appended, never reordered: the value is what presets store. */
+enum class SvfMode : uint8_t {
+    Lp = 0,
+    Bp,
+    Hp,
+    Notch, /* lp + hp */
+    Peak,  /* lp - hp */
+    Ap,    /* flat magnitude, swept phase */
+    BpN,   /* bandpass at constant peak gain (plain Bp rises with resonance) */
+};
 
 struct SvfCoef {
     float k, a1, a2, a3;
+    /* Drive (S33): input pre-gain into a soft-clipped resonant state, then an
+     * output trim. 1/1 is the linear filter, and svf_next() ignores both —
+     * only svf_next_drive() reads them, so the clean path is untouched. */
+    float pre = 1.0f, post = 1.0f;
 };
 
 struct Svf {
     float ic1 = 0.0f, ic2 = 0.0f;
 };
 
-/* Per block (one tanf). cutoff_hz is clamped to [20, 0.45*sr]; res01 0..1
- * approaches self-oscillation near 1 (clamped so damping never reaches 0). */
+/* Damping floor. k = 1/Q, so this is Q = 25: high enough to ring for a long
+ * time, low enough that the integrators can never lose their grip. */
+inline constexpr float kSvfMinK = 0.04f;
+
+/* Per block (one tanf). cutoff_hz is clamped to [20, 0.45*sr].
+ *
+ * svf_coef_k() takes damping directly (k = 1/Q) because the cascades below
+ * need per-stage Q values that no 0..1 "resonance" mapping can express;
+ * svf_coef() is the musician-facing wrapper, where res01 0..1 approaches
+ * self-oscillation near 1 (clamped so damping never reaches 0). */
+SvfCoef svf_coef_k(float cutoff_hz, float k, float sample_rate);
 SvfCoef svf_coef(float cutoff_hz, float res01, float sample_rate);
+SvfCoef svf_coef_drive(float cutoff_hz, float res01, float drive01,
+                       float sample_rate);
+
+/* Pre/post gains for a 0..1 drive amount. Split out because every filter
+ * type below drives its input the same way. */
+void svf_drive_gains(float drive01, float* pre, float* post);
+
+/* Response pick, shared by the clean and driven paths. v0 is the filter's
+ * input *after* any drive pre-gain — the Hp/Notch/Peak/Ap sums are only
+ * correct against the same signal the integrators saw. */
+inline float svf_out(SvfMode m, const SvfCoef& c, float v0, float v1,
+                     float v2) {
+    switch (m) {
+        case SvfMode::Lp:    return v2;
+        case SvfMode::Bp:    return v1;
+        case SvfMode::Hp:    return v0 - c.k * v1 - v2;
+        case SvfMode::Notch: return v0 - c.k * v1;
+        case SvfMode::Peak:  return 2.0f * v2 - v0 + c.k * v1;
+        case SvfMode::Ap:    return v0 - 2.0f * c.k * v1;
+        default:             return c.k * v1; /* BpN */
+    }
+}
 
 inline float svf_next(Svf& f, const SvfCoef& c, SvfMode m, float x) {
     const float v3 = x - f.ic2;
@@ -165,10 +213,222 @@ inline float svf_next(Svf& f, const SvfCoef& c, SvfMode m, float x) {
     const float v2 = f.ic2 + c.a2 * f.ic1 + c.a3 * v3;
     f.ic1 = 2.0f * v1 - f.ic1;
     f.ic2 = 2.0f * v2 - f.ic2;
-    switch (m) {
-        case SvfMode::Lp: return v2;
-        case SvfMode::Bp: return v1;
-        default:          return x - c.k * v1 - v2; /* Hp */
+    return svf_out(m, c, x, v1, v2);
+}
+
+/* Saturating variant: the input stage clips, and so does the bandpass
+ * integrator — which is the resonant one, so this is what turns a screaming
+ * digital self-oscillation into something that compresses and growls instead.
+ * soft_clip() is the identity below 0.8, so at low levels the only difference
+ * from svf_next() is the pre/post gain pair. */
+inline float svf_next_drive(Svf& f, const SvfCoef& c, SvfMode m, float x) {
+    const float v0 = soft_clip(x * c.pre);
+    const float v3 = v0 - f.ic2;
+    const float v1 = c.a1 * f.ic1 + c.a2 * v3;
+    const float v2 = f.ic2 + c.a2 * f.ic1 + c.a3 * v3;
+    f.ic1 = soft_clip(2.0f * v1 - f.ic1);
+    f.ic2 = 2.0f * v2 - f.ic2;
+    return svf_out(m, c, v0, v1, v2) * c.post;
+}
+
+/* ---- 24 dB/oct: two SVFs in series (S33) ----
+ *
+ * Also the state for the dual/spread filter, which is the same two SVFs at
+ * different cutoffs — a pair of state-variable filters is a pair of state-
+ * variable filters, so there is one struct for it. */
+
+struct Svf2 {
+    Svf a, b;
+};
+
+struct Svf2Coef {
+    SvfCoef s1, s2;
+};
+
+/* Butterworth-split cascade: stage 1 is pinned at Q = 0.5412 and stage 2
+ * carries the user's resonance from Q = 1.3065 up to self-oscillation. Two
+ * *identical* stages would square the passband response and put a 6 dB bump
+ * where flat is wanted; splitting the Q pair keeps reso 0 genuinely flat. */
+Svf2Coef svf2_coef(float cutoff_hz, float res01, float drive01,
+                   float sample_rate);
+
+/* Both stages run the same response, so "lp 24" is two lowpasses, "notch 24"
+ * is two notches, and so on. */
+inline float svf2_next(Svf2& f, const Svf2Coef& c, SvfMode m, float x) {
+    return svf_next(f.b, c.s2, m, svf_next(f.a, c.s1, m, x));
+}
+
+inline float svf2_next_drive(Svf2& f, const Svf2Coef& c, SvfMode m, float x) {
+    return svf_next_drive(f.b, c.s2, m, svf_next_drive(f.a, c.s1, m, x));
+}
+
+/* ---- dual / spread: lowpass and highpass in series (S33) ----
+ *
+ * A bandpass whose width is a parameter instead of a side effect of Q: the
+ * lowpass sits half a `spread` above the cutoff and the highpass half below,
+ * so spread is the passband width in octaves and resonance still peaks both
+ * edges independently. Reuses Svf2 for state. */
+
+Svf2Coef dual_coef(float cutoff_hz, float res01, float spread_oct,
+                   float drive01, float sample_rate);
+
+inline float dual_next(Svf2& f, const Svf2Coef& c, float x) {
+    return svf_next(f.b, c.s2, SvfMode::Hp, svf_next(f.a, c.s1, SvfMode::Lp, x));
+}
+
+inline float dual_next_drive(Svf2& f, const Svf2Coef& c, float x) {
+    return svf_next_drive(f.b, c.s2, SvfMode::Hp,
+                          svf_next_drive(f.a, c.s1, SvfMode::Lp, x));
+}
+
+/* ---- Moog ladder, 4-pole lowpass (S33) ----
+ *
+ * Four TPT one-poles with a saturated resonance feedback. Deliberately *not*
+ * the zero-delay-feedback solve: a one-sample-delayed feedback costs one
+ * multiply where the implicit solve costs a division per sample, and the
+ * price is some cutoff/resonance detuning up near Nyquist that nobody plays.
+ * No tanh either — soft_clip() is the saturator, which is what bounds the
+ * self-oscillation instead of letting it run away.
+ *
+ * The 0.5 * x term inside the feedback is the classic passband compensation:
+ * without it the ladder's low end drains away as resonance rises, which is
+ * authentic and also unusable. */
+
+struct Ladder {
+    float s[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float fb = 0.0f;
+};
+
+struct LadderCoef {
+    float g;    /* one-pole TPT coefficient */
+    float k;    /* resonance feedback, 0..4 (self-oscillates near 4) */
+    float pre, post;
+};
+
+LadderCoef ladder_coef(float cutoff_hz, float res01, float drive01,
+                       float sample_rate);
+
+inline float ladder_next(Ladder& f, const LadderCoef& c, float x) {
+    float u = soft_clip((x - c.k * (f.fb - 0.5f * x)) * c.pre);
+    for (int i = 0; i < 4; ++i) {
+        const float v = (u - f.s[i]) * c.g;
+        const float y = v + f.s[i];
+        f.s[i] = y + v;
+        u = y;
+    }
+    f.fb = u;
+    return u * c.post;
+}
+
+/* ---- formant / vowel filter (S33) ----
+ *
+ * Three constant-gain bandpasses on the first three formants, morphing
+ * a -> e -> i -> o -> u. Frequencies interpolate in the log domain (a linear
+ * morph between 270 Hz and 2290 Hz sweeps through everything in between and
+ * sounds like a siren, not a vowel); gains interpolate linearly.
+ *
+ * The cutoff parameter becomes a formant shift, neutral at 1 kHz — so filter
+ * envelope, keyboard tracking and every cutoff modulation route already in
+ * the patch move the whole vocal tract, which is the useful thing to do
+ * with them here. */
+
+struct Vowel {
+    Svf f1, f2, f3;
+};
+
+struct VowelCoef {
+    SvfCoef c1, c2, c3;
+    float g1, g2, g3;
+    float pre, post;
+};
+
+VowelCoef vowel_coef(float morph01, float shift_hz, float res01, float drive01,
+                     float sample_rate);
+
+inline float vowel_next(Vowel& f, const VowelCoef& c, float x) {
+    return (c.g1 * svf_next(f.f1, c.c1, SvfMode::BpN, x) +
+            c.g2 * svf_next(f.f2, c.c2, SvfMode::BpN, x) +
+            c.g3 * svf_next(f.f3, c.c3, SvfMode::BpN, x)) *
+           c.post;
+}
+
+inline float vowel_next_drive(Vowel& f, const VowelCoef& c, float x) {
+    const float xd = soft_clip(x * c.pre);
+    return (c.g1 * svf_next(f.f1, c.c1, SvfMode::BpN, xd) +
+            c.g2 * svf_next(f.f2, c.c2, SvfMode::BpN, xd) +
+            c.g3 * svf_next(f.f3, c.c3, SvfMode::BpN, xd)) *
+           c.post;
+}
+
+/* ---- the filter family behind one dispatch (S33) ----
+ *
+ * The fixed engines each own one filter whose *type* is a parameter, so they
+ * need a state blob wide enough for whichever type is selected and a single
+ * call that routes to it. (The modular graph does not use this: there, each
+ * heavy type is its own node kind, so the compiler can cost it honestly —
+ * see the kind table in graph_model.cpp.)
+ *
+ * Bypass is a type rather than a branch in the render loop. `flt.on` is a
+ * switch in the app, but by the time the sample loop sees it, "off" is just
+ * another arm of a switch it was already going to execute — no second loop,
+ * no per-sample test that every other patch has to pay for.
+ *
+ * The type switch is per sample. It is loop-invariant, so it predicts
+ * perfectly and costs an indirect jump; the alternative — templating the
+ * whole render loop on the type — was rejected because it multiplies the
+ * IRAM-resident render path by five, and IRAM is the scarcer resource here.
+ * Values are stored in presets: append only. */
+enum class FltType : uint8_t {
+    Svf12 = 0,
+    Svf24,
+    Ladder,
+    Dual,
+    Vowel,
+    /* Not a selectable value — `flt.on == 0` substitutes it per block. Keep
+     * it last so the five above keep matching the parameter's enum names. */
+    Bypass,
+};
+
+struct Filt {
+    Svf2 svf;      /* Svf12 uses .a alone; Svf24 and Dual use both */
+    Ladder ladder;
+    Vowel vowel;
+};
+
+struct FiltCoef {
+    FltType type = FltType::Svf12;
+    SvfMode mode = SvfMode::Lp; /* Svf12/Svf24 only; the rest fix their own */
+    bool drive = false;         /* selects the saturating path */
+    Svf2Coef svf;
+    LadderCoef ladder;
+    VowelCoef vowel;
+};
+
+/* Builds only the member the type needs — a voice's cutoff differs from its
+ * neighbour's (keyboard tracking, envelope), so this runs per voice per
+ * block and there is no sense paying for coefficients nothing will read. */
+FiltCoef filt_coef(FltType type, SvfMode mode, float cutoff_hz, float res01,
+                   float drive01, float spread_oct, float vowel01,
+                   float sample_rate);
+
+inline float filt_next(Filt& f, const FiltCoef& c, float x) {
+    if (c.drive) {
+        switch (c.type) {
+            case FltType::Svf12:  return svf_next_drive(f.svf.a, c.svf.s1, c.mode, x);
+            case FltType::Svf24:  return svf2_next_drive(f.svf, c.svf, c.mode, x);
+            case FltType::Ladder: return ladder_next(f.ladder, c.ladder, x);
+            case FltType::Dual:   return dual_next_drive(f.svf, c.svf, x);
+            case FltType::Vowel:  return vowel_next_drive(f.vowel, c.vowel, x);
+            default:              return x; /* Bypass */
+        }
+    }
+    switch (c.type) {
+        case FltType::Svf12:  return svf_next(f.svf.a, c.svf.s1, c.mode, x);
+        case FltType::Svf24:  return svf2_next(f.svf, c.svf, c.mode, x);
+        case FltType::Ladder: return ladder_next(f.ladder, c.ladder, x);
+        case FltType::Dual:   return dual_next(f.svf, c.svf, x);
+        case FltType::Vowel:  return vowel_next(f.vowel, c.vowel, x);
+        default:              return x; /* Bypass */
     }
 }
 

@@ -163,7 +163,14 @@ struct OscBlk {
 };
 struct FiltBlk {
     dsp::SvfMode mode;
-    float cutoff, reso, kbd, cutamt;
+    float cutoff, reso, kbd, cutamt, drive;
+    bool on;
+};
+/* Ladder and Dual read the same shape; Vowel swaps cutoff for a morph and
+ * its mod input drives that instead. */
+struct VowelBlk {
+    float vowel, reso, shift, drive, kbd, modamt;
+    bool on;
 };
 struct EnvBlk {
     dsp::AdsrCoef coef;
@@ -276,19 +283,25 @@ uint16_t live_cost() { return s_live_cost.load(std::memory_order_relaxed); }
 
 /* ---- per-voice hooks ---- */
 
+/* Clears one slot's state and re-seeds it. Zeroing alone is not enough: the
+ * union overlaps the xorshift word, and xorshift(0) is 0 forever — a slot
+ * left with a zero seed would be a silent Noise node. Distinct per slot and
+ * per voice, so a Noise and an S&H in the same patch cannot correlate
+ * audibly. Shared with the kind-change path in render_block() (S33) so the
+ * two can never drift apart. */
+void slot_reset(VoiceState& v, int slot) {
+    memset(&v.n[slot], 0, sizeof(v.n[slot]));
+    v.n[slot].noise.s = 0x9E3779B9u ^ (uint32_t)(slot * 2654435761u) ^
+                        (uint32_t)(uintptr_t)&v;
+    if (v.n[slot].noise.s == 0) v.n[slot].noise.s = 0x9E3779B9u;
+}
+
 void voice_reset(VoiceState& v) {
-    memset(&v.n, 0, sizeof(v.n));
     v.note = 60;
     v.vel = 0.0f;
     v.gate = 0.0f;
     v.rnd = 0.0f;
-    /* Give every node slot a distinct noise seed: a Noise and an S&H in the
-     * same patch sharing a sequence would correlate audibly. */
-    for (int i = 0; i < kMaxNodes; ++i) {
-        v.n[i].noise.s = 0x9E3779B9u ^ (uint32_t)(i * 2654435761u) ^
-                         (uint32_t)(uintptr_t)&v;
-        if (v.n[i].noise.s == 0) v.n[i].noise.s = 0x9E3779B9u;
-    }
+    for (int i = 0; i < kMaxNodes; ++i) slot_reset(v, i);
 }
 
 void note_on(VoiceState& v, uint8_t note, float vel01, bool was_sounding) {
@@ -416,6 +429,19 @@ void SYNTH_RENDER_IRAM render_block(void* const* states,
          * and be a decay time in seconds now. */
         if (s_sm_kind[slot] != node.kind) {
             for (int p = 0; p < kNodeParams; ++p) s_sm[slot][p] = dsp::Smooth{};
+            /* And the node state, which is a union: the incoming kind would
+             * otherwise read the outgoing kind's bytes as its own. Mostly
+             * that just means an odd first block, but not always — a Noise
+             * node leaves a raw xorshift word where a filter expects an
+             * integrator, and roughly one word in 250 is a NaN bit pattern.
+             * A NaN in a recursive filter never decays: the slot would stay
+             * silent until something reset it. Costs one slot per voice on a
+             * kind change and nothing at all in steady state. (S33 — the
+             * hazard predates it, but four filter kinds aliasing each other
+             * is what made it worth closing.) */
+            for (int v = 0; v < nv; ++v) {
+                slot_reset(*(VoiceState*)states[v], slot);
+            }
             s_sm_kind[slot] = node.kind;
         }
 
@@ -484,29 +510,172 @@ void SYNTH_RENDER_IRAM render_block(void* const* states,
             break;
         }
 
-        case Kind::Filter: {
+        /* The four filter kinds share this shape: read the block once, then
+         * per voice resolve the cutoff, build coefficients, run the loop.
+         * Cutoff modulation is resolved once per voice per block — the
+         * coefficient build is a tanf, which is exactly why the fixed
+         * engines do the same thing (S5). Per-sample cutoff would cost more
+         * than the filter.
+         *
+         * `on` is checked outside the sample loop, where a bypass can copy
+         * the input through and cost nothing. (The fixed engines fold bypass
+         * into a filter type instead — they have no buffer to copy, only a
+         * sample in hand.) */
+
+        case Kind::Filter:
+        case Kind::Filter24: {
+            const bool wide = node.kind == Kind::Filter24;
             FiltBlk b;
             b.mode = (dsp::SvfMode)(int)pval(*pl, slot, pidx::FLT_MODE, 0.0f);
             b.cutoff = psm_exp(*pl, slot, pidx::FLT_CUTOFF, 1200.0f);
             b.reso = psm(*pl, slot, pidx::FLT_RESO, 0.15f);
             b.kbd = psm(*pl, slot, pidx::FLT_KBD, 0.5f);
             b.cutamt = psm(*pl, slot, pidx::FLT_CUTAMT, 2.5f);
+            b.drive = psm(*pl, slot, pidx::FLT_DRIVE, 0.0f);
+            b.on = pval(*pl, slot, pidx::FLT_ON, 1.0f) >= 0.5f;
 
             for (int v = 0; v < nv; ++v) {
                 VoiceState& vs = *(VoiceState*)states[v];
                 const float* src = audio_in(node, 0, v);
                 float* dst = buf_row(node.out_buf, v);
-                /* Cutoff modulation is resolved once per voice per block —
-                 * the coefficient build is a tanf, which is exactly why the
-                 * fixed engines do the same thing (S5). Per-sample cutoff
-                 * would cost more than the filter. */
+                if (!b.on) {
+                    memcpy(dst, src, nf * sizeof(float));
+                    continue;
+                }
                 const float oct = b.cutamt * mod_in(node, 1, v, nf, 0.0f) +
                                   b.kbd * ((float)vs.note - 60.0f) * (1.0f / 12.0f);
-                const dsp::SvfCoef fc =
-                    dsp::svf_coef(b.cutoff * exp2f(oct), b.reso, kSr);
-                dsp::Svf& f = vs.n[slot].svf;
+                const float hz = b.cutoff * exp2f(oct);
+                if (wide) {
+                    const dsp::Svf2Coef fc =
+                        dsp::svf2_coef(hz, b.reso, b.drive, kSr);
+                    dsp::Svf2& f = vs.n[slot].svf2;
+                    if (b.drive > 0.0f) {
+                        for (size_t i = 0; i < nf; ++i) {
+                            dst[i] = dsp::svf2_next_drive(f, fc, b.mode, src[i]);
+                        }
+                    } else {
+                        for (size_t i = 0; i < nf; ++i) {
+                            dst[i] = dsp::svf2_next(f, fc, b.mode, src[i]);
+                        }
+                    }
+                } else {
+                    dsp::Svf& f = vs.n[slot].svf;
+                    if (b.drive > 0.0f) {
+                        const dsp::SvfCoef fc =
+                            dsp::svf_coef_drive(hz, b.reso, b.drive, kSr);
+                        for (size_t i = 0; i < nf; ++i) {
+                            dst[i] = dsp::svf_next_drive(f, fc, b.mode, src[i]);
+                        }
+                    } else {
+                        const dsp::SvfCoef fc = dsp::svf_coef(hz, b.reso, kSr);
+                        for (size_t i = 0; i < nf; ++i) {
+                            dst[i] = dsp::svf_next(f, fc, b.mode, src[i]);
+                        }
+                    }
+                }
+            }
+            break;
+        }
+
+        case Kind::Ladder: {
+            FiltBlk b;
+            b.cutoff = psm_exp(*pl, slot, pidx::LAD_CUTOFF, 1200.0f);
+            b.reso = psm(*pl, slot, pidx::LAD_RESO, 0.3f);
+            b.drive = psm(*pl, slot, pidx::LAD_DRIVE, 0.0f);
+            b.kbd = psm(*pl, slot, pidx::LAD_KBD, 0.5f);
+            b.cutamt = psm(*pl, slot, pidx::LAD_CUTAMT, 2.5f);
+            b.on = pval(*pl, slot, pidx::LAD_ON, 1.0f) >= 0.5f;
+
+            for (int v = 0; v < nv; ++v) {
+                VoiceState& vs = *(VoiceState*)states[v];
+                const float* src = audio_in(node, 0, v);
+                float* dst = buf_row(node.out_buf, v);
+                if (!b.on) {
+                    memcpy(dst, src, nf * sizeof(float));
+                    continue;
+                }
+                const float oct = b.cutamt * mod_in(node, 1, v, nf, 0.0f) +
+                                  b.kbd * ((float)vs.note - 60.0f) * (1.0f / 12.0f);
+                const dsp::LadderCoef fc = dsp::ladder_coef(
+                    b.cutoff * exp2f(oct), b.reso, b.drive, kSr);
+                dsp::Ladder& f = vs.n[slot].ladder;
                 for (size_t i = 0; i < nf; ++i) {
-                    dst[i] = dsp::svf_next(f, fc, b.mode, src[i]);
+                    dst[i] = dsp::ladder_next(f, fc, src[i]);
+                }
+            }
+            break;
+        }
+
+        case Kind::Dual: {
+            FiltBlk b;
+            b.cutoff = psm_exp(*pl, slot, pidx::DUA_CUTOFF, 1200.0f);
+            b.reso = psm(*pl, slot, pidx::DUA_RESO, 0.15f);
+            b.drive = psm(*pl, slot, pidx::DUA_DRIVE, 0.0f);
+            b.kbd = psm(*pl, slot, pidx::DUA_KBD, 0.5f);
+            b.cutamt = psm(*pl, slot, pidx::DUA_CUTAMT, 2.5f);
+            b.on = pval(*pl, slot, pidx::DUA_ON, 1.0f) >= 0.5f;
+            const float spread = psm(*pl, slot, pidx::DUA_SPREAD, 2.0f);
+
+            for (int v = 0; v < nv; ++v) {
+                VoiceState& vs = *(VoiceState*)states[v];
+                const float* src = audio_in(node, 0, v);
+                float* dst = buf_row(node.out_buf, v);
+                if (!b.on) {
+                    memcpy(dst, src, nf * sizeof(float));
+                    continue;
+                }
+                const float oct = b.cutamt * mod_in(node, 1, v, nf, 0.0f) +
+                                  b.kbd * ((float)vs.note - 60.0f) * (1.0f / 12.0f);
+                const dsp::Svf2Coef fc = dsp::dual_coef(
+                    b.cutoff * exp2f(oct), b.reso, spread, b.drive, kSr);
+                dsp::Svf2& f = vs.n[slot].svf2;
+                if (b.drive > 0.0f) {
+                    for (size_t i = 0; i < nf; ++i) {
+                        dst[i] = dsp::dual_next_drive(f, fc, src[i]);
+                    }
+                } else {
+                    for (size_t i = 0; i < nf; ++i) {
+                        dst[i] = dsp::dual_next(f, fc, src[i]);
+                    }
+                }
+            }
+            break;
+        }
+
+        case Kind::Vowel: {
+            VowelBlk b;
+            b.vowel = psm(*pl, slot, pidx::VOW_VOWEL, 0.0f);
+            b.reso = psm(*pl, slot, pidx::VOW_RESO, 0.5f);
+            b.shift = psm_exp(*pl, slot, pidx::VOW_SHIFT, 1000.0f);
+            b.drive = psm(*pl, slot, pidx::VOW_DRIVE, 0.0f);
+            b.kbd = psm(*pl, slot, pidx::VOW_KBD, 0.0f);
+            b.modamt = psm(*pl, slot, pidx::VOW_MODAMT, 1.0f);
+            b.on = pval(*pl, slot, pidx::VOW_ON, 1.0f) >= 0.5f;
+
+            for (int v = 0; v < nv; ++v) {
+                VoiceState& vs = *(VoiceState*)states[v];
+                const float* src = audio_in(node, 0, v);
+                float* dst = buf_row(node.out_buf, v);
+                if (!b.on) {
+                    memcpy(dst, src, nf * sizeof(float));
+                    continue;
+                }
+                /* The cable moves the morph, not the cutoff — vowel_coef()
+                 * clamps it, so an over-driven cable parks on "u" instead of
+                 * wrapping round to "a". */
+                const float morph = b.vowel + b.modamt * mod_in(node, 1, v, nf, 0.0f);
+                const float oct = b.kbd * ((float)vs.note - 60.0f) * (1.0f / 12.0f);
+                const dsp::VowelCoef fc = dsp::vowel_coef(
+                    morph, b.shift * exp2f(oct), b.reso, b.drive, kSr);
+                dsp::Vowel& f = vs.n[slot].vowel;
+                if (b.drive > 0.0f) {
+                    for (size_t i = 0; i < nf; ++i) {
+                        dst[i] = dsp::vowel_next_drive(f, fc, src[i]);
+                    }
+                } else {
+                    for (size_t i = 0; i < nf; ++i) {
+                        dst[i] = dsp::vowel_next(f, fc, src[i]);
+                    }
                 }
             }
             break;

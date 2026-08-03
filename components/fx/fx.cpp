@@ -1,6 +1,6 @@
 /*
- * osynth — master FX bus (Sessions 10 + 11; bitcrush S17):
- * chorus -> delay -> granular delay -> reverb -> bitcrush.
+ * osynth — master FX bus (Sessions 10 + 11; bitcrush S17; filter S33):
+ * chorus -> delay -> granular delay -> reverb -> bitcrush -> filter.
  *
  * Runs on the audio task, chained after the voice sum (main.cpp calls
  * fx_process() from the render callback; audio_io applies master volume and
@@ -46,6 +46,7 @@
 #include "sdkconfig.h"
 
 #include "synth_config.h"
+#include "synth_dsp.h"
 #include "synth_params.h"
 #include "synth_smooth.h"
 
@@ -89,8 +90,16 @@ enum PIdx {
     GRN_MIX, GRN_SIZE, GRN_DENS, GRN_PITCH, GRN_FB, GRN_SPRAY,
     REV_MIX, REV_SIZE, REV_DAMP,
     CRUSH_MIX, CRUSH_BITS, CRUSH_DOWN,
+    FLT_ON, FLT_TYPE, FLT_MODE, FLT_CUTOFF, FLT_RESO, FLT_DRIVE, FLT_SPREAD,
+    FLT_VOWEL,
     P_COUNT
 };
+
+/* Same lists the engines register, same order — a filter should not mean
+ * something different because it is on the master bus. Append-only. */
+const char* const kFltModes[] = {"lp",   "bp", "hp", "notch",
+                                 "peak", "ap", "bp norm"};
+const char* const kFltTypes[] = {"svf 12", "svf 24", "ladder", "dual", "vowel"};
 
 const ParamDesc kParams[P_COUNT] = {
     {FX_PID_CHO_MIX, "fx.cho.mix", ParamType::Float, ParamCurve::Linear,
@@ -133,6 +142,26 @@ const ParamDesc kParams[P_COUNT] = {
      2.0f, 16.0f, 8.0f, nullptr, 0}, /* fractional bits allowed */
     {FX_PID_CRUSH_DOWN, "fx.crush.down", ParamType::Int, ParamCurve::Linear,
      1.0f, 32.0f, 1.0f, nullptr, 0}, /* sample-rate divider (hold) */
+    /* The switch doubles as this unit's dry/wet: unit_gate() ramps it, so
+     * toggling crossfades over a few blocks instead of stepping, and fully
+     * off skips the stage. */
+    {FX_PID_FLT_ON, "fx.flt.on", ParamType::Bool, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0},
+    {FX_PID_FLT_TYPE, "fx.flt.type", ParamType::Enum, ParamCurve::Linear,
+     0.0f, 4.0f, 0.0f /* svf 12 */, kFltTypes, 5},
+    {FX_PID_FLT_MODE, "fx.flt.mode", ParamType::Enum, ParamCurve::Linear,
+     0.0f, 6.0f, 0.0f /* lp */, kFltModes, 7},
+    {FX_PID_FLT_CUTOFF, "fx.flt.cutoff", ParamType::Float, ParamCurve::Exp,
+     20.0f, 18000.0f, 18000.0f, nullptr, 0}, /* wide open: switching it on
+                                                should not mute the mix */
+    {FX_PID_FLT_RESO, "fx.flt.reso", ParamType::Float, ParamCurve::Linear,
+     0.0f, 1.0f, 0.1f, nullptr, 0},
+    {FX_PID_FLT_DRIVE, "fx.flt.drive", ParamType::Float, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0},
+    {FX_PID_FLT_SPREAD, "fx.flt.spread", ParamType::Float, ParamCurve::Linear,
+     0.0f, 6.0f, 2.0f, nullptr, 0}, /* dual: passband width in octaves */
+    {FX_PID_FLT_VOWEL, "fx.flt.vowel", ParamType::Float, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0}, /* vowel: morph a-e-i-o-u */
 };
 
 const std::atomic<float>* s_p[P_COUNT];
@@ -639,6 +668,59 @@ void SYNTH_RENDER_IRAM crush_process(float* __restrict__ bl,
     }
 }
 
+/* ---- master filter (S33): the voice filter family, run on the bus ----
+ *
+ * Everything the engines can do to one voice, applied to the finished mix —
+ * which means it also filters the drums and the looper, neither of which
+ * goes anywhere near a voice filter. That is the reason it exists: a
+ * build-up that closes down the *whole* track was not previously expressible
+ * anywhere in this synth.
+ *
+ * Cheap by construction: two channels once per block, against eight voices
+ * once per block upstream. One coefficient build serves both channels —
+ * they share every parameter and differ only in their filter state, so
+ * there is no per-voice cutoff spread to pay for here.
+ *
+ * Placed last in the chain, after the reverb and the crusher, so the sweep
+ * takes the tails and the quantization noise with it. A filter before the
+ * reverb leaves a bright tail hanging over a closed filter, which sounds
+ * like a mistake rather than an effect. */
+
+struct FilterFx {
+    osynth::dsp::Filt l, r;
+    osynth::dsp::Smooth s_cut, s_reso, s_drive, s_spread, s_vowel;
+    UnitState u;
+};
+
+FilterFx s_flt;
+
+void SYNTH_RENDER_IRAM filter_process(float* __restrict__ bl,
+                                      float* __restrict__ br, size_t frames) {
+    FilterFx& c = s_flt;
+    const float m = unit_gate(c.u, pv(FLT_ON), nullptr, 0);
+    if (m < 0.0f) {
+        /* Off: drop the filter states so switching back on cannot replay a
+         * resonant ring from whatever was playing minutes ago. */
+        c.l = osynth::dsp::Filt{};
+        c.r = osynth::dsp::Filt{};
+        return;
+    }
+
+    const osynth::dsp::FiltCoef fc = osynth::dsp::filt_coef(
+        (osynth::dsp::FltType)(int)pv(FLT_TYPE),
+        (osynth::dsp::SvfMode)(int)pv(FLT_MODE),
+        osynth::dsp::smooth_exp(c.s_cut, pv(FLT_CUTOFF)),
+        osynth::dsp::smooth_lin(c.s_reso, pv(FLT_RESO)),
+        osynth::dsp::smooth_lin(c.s_drive, pv(FLT_DRIVE)),
+        osynth::dsp::smooth_lin(c.s_spread, pv(FLT_SPREAD)),
+        osynth::dsp::smooth_lin(c.s_vowel, pv(FLT_VOWEL)), kSr);
+
+    for (size_t i = 0; i < frames; ++i) {
+        bl[i] += m * (osynth::dsp::filt_next(c.l, fc, bl[i]) - bl[i]);
+        br[i] += m * (osynth::dsp::filt_next(c.r, fc, br[i]) - br[i]);
+    }
+}
+
 bool s_up = false;
 
 } // namespace
@@ -701,4 +783,5 @@ void SYNTH_RENDER_IRAM fx_process(float* l, float* r, size_t frames) {
     granular_process(l, r, frames);
     reverb_process(l, r, frames);
     crush_process(l, r, frames);
+    filter_process(l, r, frames);
 }

@@ -49,12 +49,17 @@
 namespace osynth::graph {
 
 /* Per-node, per-voice state. A union because a slot holds one kind at a
- * time; sized by the widest member, which keeps a twelve-node voice under
- * 200 bytes and the whole pool under 2 KB at full polyphony. */
+ * time; sized by the widest member. The S33 filters widened it from 12 to
+ * 24 bytes (dsp::Vowel, three SVFs), so a twelve-node voice is now under
+ * 300 bytes and the whole pool ~2.3 KB at full polyphony — the cost is paid
+ * by every patch whether or not it uses one, which is what a union means. */
 union NodeState {
     dsp::Osc osc;
     dsp::Noise noise;
     dsp::Svf svf;
+    dsp::Svf2 svf2; /* Filter24 and Dual: two SVFs either way */
+    dsp::Ladder ladder;
+    dsp::Vowel vowel;
     dsp::Adsr adsr;
     dsp::Lfo lfo;
     struct {

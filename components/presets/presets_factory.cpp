@@ -1,15 +1,32 @@
 /*
- * osynth — factory presets (Session 13): 16 per engine, const in flash.
+ * osynth — factory presets (Session 13; widened to 48 in S33): 48 per
+ * engine, const in flash. The whole table is ~20 KB of .rodata against 2 MB
+ * of free app partition, so the bank size is a question of how many sounds
+ * are worth writing, not of space.
  *
  * Each preset is a sparse list of {param id, value} overrides on the
  * engine-default patch: loading resets the patch ranges to their defaults
  * first (minus the skip list — presets.cpp), so anything not listed here
  * is the PARAM_MAP.md default. Slot 0 of every bank is "init", the pure
  * default patch. Enum values are numeric: osc waves 0 sine / 1 tri /
- * 2 saw / 3 pulse; filter modes 0 lp / 1 bp / 2 hp; lfo waves 0 sine /
- * 1 tri / 2 saw / 3 square / 4 s&h; wavetable sets 0 basic / 1 sync /
- * 2 vocal / 3 fm; arp modes 0 off / 1 up / 2 down / 3 updown / 4 random /
- * 5 played; seq divisions 0 1/4 … 5 1/32.
+ * 2 saw / 3 pulse; filter modes 0 lp / 1 bp / 2 hp / 3 notch / 4 peak /
+ * 5 ap / 6 bp-norm (S33 appended 3-6); filter types 0 svf12 / 1 svf24 /
+ * 2 ladder / 3 dual / 4 vowel; lfo waves 0 sine / 1 tri / 2 saw /
+ * 3 square / 4 s&h; wavetable sets 0 basic / 1 sync / 2 vocal / 3 fm;
+ * arp modes 0 off / 1 up / 2 down / 3 updown / 4 random / 5 played;
+ * seq divisions 0 1/4 … 5 1/32.
+ *
+ * Slots 0-15 of each bank are the original S13 sixteen, untouched: their
+ * defaults were chosen so they render exactly as they did before S33
+ * (flt.type svf12, flt.drive 0, flt.on 1 where a filter already existed,
+ * 0 on fm/additive, which had none). Slots 16-47 are the S33 additions,
+ * and those do use the new filters.
+ *
+ * Two range notes, both pre-S33 and both harmless: "glide lead" asks for a
+ * 0.48 s delay and "shimmer pad" for a 0.3 s grain, which are legal on the
+ * S3 and clamp to the classic ESP32's smaller ceilings. tools/
+ * check_preset_ranges.py reports those as warnings and everything else as
+ * an error.
  *
  * Mix/level/drawbar sums are kept near 1.0 so full 8-voice polyphony
  * cannot clip (the engines' gain-staging convention since S4).
@@ -35,7 +52,7 @@
     P(SYNTH_PID_MOD_DEST(k), (dest)),       \
     P(SYNTH_PID_MOD_AMOUNT(k), (amt))
 
-/* ---- subtractive (bank 0, slots 0-79) ------------------------------- */
+/* ---- subtractive (bank 0, linear slots 0-111) ------------------------------- */
 
 /* two detuned saws + light unison, mostly-open filter, wheel = vibrato */
 static const preset_pair_t kSubFatSaw[] = {
@@ -221,7 +238,399 @@ static const preset_pair_t kSubSoftKeys[] = {
     P(FX_PID_CHO_MIX, 0.2f), P(FX_PID_REV_MIX, 0.25f),
 };
 
-/* ---- additive (bank 1, slots 80-159) -------------------------------- */
+/* ---- subtractive, slots 16-47 (S33) ---------------------------------
+ *
+ * The first twelve are here to show what the S33 filter family does, one
+ * idea each — the rest are the bread-and-butter sounds the original sixteen
+ * had no room for. Filter types: 0 svf12, 1 svf24, 2 ladder, 3 dual,
+ * 4 vowel. Modes: 0 lp, 1 bp, 2 hp, 3 notch, 4 peak, 5 ap, 6 bp-norm. */
+
+/* the ladder's bass loss is compensated, so this stays fat as reso climbs */
+static const preset_pair_t kSubLadderBass[] = {
+    P(SUB_PID_FLT_TYPE, 2), P(SUB_PID_FLT_CUTOFF, 260.0f),
+    P(SUB_PID_FLT_RESO, 0.55f), P(SUB_PID_FLT_ENV, 2.2f),
+    P(SUB_PID_FLT_KBD, 0.35f), P(SUB_PID_FLT_DRIVE, 0.25f),
+    P(SUB_PID_OSC2_SEMI, -12), P(SUB_PID_MIX_OSC2, 0.45f),
+    P(SUB_PID_ENV2_DECAY, 0.22f), P(SUB_PID_ENV2_SUSTAIN, 0.0f),
+    P(SUB_PID_ENV1_DECAY, 0.4f), P(SUB_PID_ENV1_SUSTAIN, 0.55f),
+    P(SUB_PID_ENV1_RELEASE, 0.12f),
+};
+
+/* 24 dB of slope under the fingers: kbd tracking full, glide on */
+static const preset_pair_t kSubLadderLead[] = {
+    P(SUB_PID_FLT_TYPE, 2), P(SUB_PID_FLT_CUTOFF, 900.0f),
+    P(SUB_PID_FLT_RESO, 0.62f), P(SUB_PID_FLT_ENV, 1.6f),
+    P(SUB_PID_FLT_KBD, 1.0f), P(SUB_PID_FLT_DRIVE, 0.3f),
+    P(SUB_PID_OSC2_FINE, -7.0f), P(SUB_PID_MIX_OSC2, 0.5f),
+    P(SUB_PID_ENV1_SUSTAIN, 0.8f), P(SUB_PID_ENV1_RELEASE, 0.2f),
+    P(SYNTH_PID_COMMON_GLIDE, 0.06f),
+    MOD(0, SYNTH_MOD_SRC_WHEEL, SUB_PID_LFO1_PITCH, 0.4f),
+    P(FX_PID_DLY_MIX, 0.18f), P(FX_PID_DLY_TIME, 0.28f),
+};
+
+/* ladder + drive at the edge of self-oscillation — the classic squelch */
+static const preset_pair_t kSubLadderAcid[] = {
+    P(SUB_PID_FLT_TYPE, 2), P(SUB_PID_FLT_CUTOFF, 300.0f),
+    P(SUB_PID_FLT_RESO, 0.9f), P(SUB_PID_FLT_ENV, 3.0f),
+    P(SUB_PID_FLT_DRIVE, 0.55f), P(SUB_PID_FLT_KBD, 0.3f),
+    P(SUB_PID_ENV2_ATTACK, 0.001f), P(SUB_PID_ENV2_DECAY, 0.13f),
+    P(SUB_PID_ENV2_SUSTAIN, 0.0f),
+    P(SUB_PID_ENV1_DECAY, 0.25f), P(SUB_PID_ENV1_SUSTAIN, 0.3f),
+    P(SUB_PID_ENV1_RELEASE, 0.06f),
+    P(SYNTH_PID_COMMON_GLIDE, 0.05f),
+    P(FX_PID_DLY_MIX, 0.22f), P(FX_PID_DLY_FB, 0.4f),
+};
+
+/* the whole vocal tract on one envelope; wheel morphs a -> u */
+static const preset_pair_t kSubVowelPad[] = {
+    P(SUB_PID_FLT_TYPE, 4), P(SUB_PID_FLT_VOWEL, 0.15f),
+    P(SUB_PID_FLT_CUTOFF, 1000.0f), P(SUB_PID_FLT_RESO, 0.45f),
+    P(SUB_PID_FLT_ENV, 0.6f),
+    P(SUB_PID_OSC2_FINE, -11.0f), P(SUB_PID_MIX_OSC2, 0.6f),
+    P(SUB_PID_ENV1_ATTACK, 0.5f), P(SUB_PID_ENV1_SUSTAIN, 0.9f),
+    P(SUB_PID_ENV1_RELEASE, 1.2f),
+    MOD(0, SYNTH_MOD_SRC_WHEEL, SUB_PID_FLT_VOWEL, 0.7f),
+    P(FX_PID_REV_MIX, 0.4f), P(FX_PID_REV_SIZE, 0.7f),
+};
+
+/* an LFO on the morph is the whole trick — it talks on its own */
+static const preset_pair_t kSubTalkingLead[] = {
+    P(SUB_PID_FLT_TYPE, 4), P(SUB_PID_FLT_VOWEL, 0.3f),
+    P(SUB_PID_FLT_CUTOFF, 1100.0f), P(SUB_PID_FLT_RESO, 0.7f),
+    P(SUB_PID_FLT_DRIVE, 0.2f),
+    P(SUB_PID_OSC1_WAVE, 3), P(SUB_PID_OSC1_PW, 0.35f),
+    P(SUB_PID_ENV1_SUSTAIN, 0.85f), P(SUB_PID_ENV1_RELEASE, 0.15f),
+    P(SUB_PID_LFO2_RATE, 3.2f), P(SUB_PID_LFO2_WAVE, 1),
+    MOD(0, SYNTH_MOD_SRC_LFO2, SUB_PID_FLT_VOWEL, 0.5f),
+    MOD(1, SYNTH_MOD_SRC_VEL, SUB_PID_FLT_VOWEL, 0.3f),
+    P(FX_PID_DLY_MIX, 0.2f),
+};
+
+/* short, hard formant hit — the vowel filter as a percussion voice */
+static const preset_pair_t kSubFormantStab[] = {
+    P(SUB_PID_FLT_TYPE, 4), P(SUB_PID_FLT_VOWEL, 0.0f),
+    P(SUB_PID_FLT_CUTOFF, 1400.0f), P(SUB_PID_FLT_RESO, 0.8f),
+    P(SUB_PID_FLT_ENV, 1.2f), P(SUB_PID_FLT_DRIVE, 0.35f),
+    P(SUB_PID_MIX_NOISE, 0.15f),
+    P(SUB_PID_ENV2_DECAY, 0.09f), P(SUB_PID_ENV2_SUSTAIN, 0.0f),
+    P(SUB_PID_ENV1_ATTACK, 0.002f), P(SUB_PID_ENV1_DECAY, 0.18f),
+    P(SUB_PID_ENV1_SUSTAIN, 0.0f), P(SUB_PID_ENV1_RELEASE, 0.1f),
+    P(FX_PID_REV_MIX, 0.22f),
+};
+
+/* notch on a slow LFO: a phaser that lives inside the filter */
+static const preset_pair_t kSubNotchSweep[] = {
+    P(SUB_PID_FLT_MODE, 3), P(SUB_PID_FLT_CUTOFF, 800.0f),
+    P(SUB_PID_FLT_RESO, 0.5f), P(SUB_PID_FLT_ENV, 0.0f),
+    P(SUB_PID_OSC2_FINE, 8.0f), P(SUB_PID_MIX_OSC2, 0.6f),
+    P(SUB_PID_LFO2_RATE, 0.35f), P(SUB_PID_LFO2_CUTOFF, 2.2f),
+    P(SUB_PID_ENV1_ATTACK, 0.15f), P(SUB_PID_ENV1_SUSTAIN, 0.9f),
+    P(SUB_PID_ENV1_RELEASE, 0.5f),
+    P(FX_PID_REV_MIX, 0.25f),
+};
+
+/* allpass: flat magnitude, swept phase — motion with no tone change */
+static const preset_pair_t kSubPhaseKeys[] = {
+    P(SUB_PID_FLT_MODE, 5), P(SUB_PID_FLT_CUTOFF, 1100.0f),
+    P(SUB_PID_FLT_RESO, 0.7f), P(SUB_PID_FLT_ENV, 0.0f),
+    P(SUB_PID_OSC1_WAVE, 1), P(SUB_PID_OSC2_WAVE, 2),
+    P(SUB_PID_MIX_OSC2, 0.35f),
+    P(SUB_PID_LFO2_RATE, 0.6f), P(SUB_PID_LFO2_CUTOFF, 3.0f),
+    P(SUB_PID_ENV1_DECAY, 1.2f), P(SUB_PID_ENV1_SUSTAIN, 0.45f),
+    P(SUB_PID_ENV1_RELEASE, 0.7f),
+    P(FX_PID_CHO_MIX, 0.25f), P(FX_PID_REV_MIX, 0.3f),
+};
+
+/* peak mode is lp - hp: a resonant hump you can sweep without losing ends */
+static const preset_pair_t kSubPeakSweep[] = {
+    P(SUB_PID_FLT_MODE, 4), P(SUB_PID_FLT_CUTOFF, 500.0f),
+    P(SUB_PID_FLT_RESO, 0.75f), P(SUB_PID_FLT_ENV, 3.2f),
+    P(SUB_PID_FLT_KBD, 0.2f),
+    P(SUB_PID_ENV2_DECAY, 0.7f), P(SUB_PID_ENV2_SUSTAIN, 0.25f),
+    P(SUB_PID_ENV1_SUSTAIN, 0.75f), P(SUB_PID_ENV1_RELEASE, 0.35f),
+    MOD(0, SYNTH_MOD_SRC_WHEEL, SUB_PID_FLT_CUTOFF, 0.5f),
+    P(FX_PID_DLY_MIX, 0.15f),
+};
+
+/* dual: width is a knob, not a consequence of Q — a real bandpass stab */
+static const preset_pair_t kSubDualStab[] = {
+    P(SUB_PID_FLT_TYPE, 3), P(SUB_PID_FLT_SPREAD, 1.2f),
+    P(SUB_PID_FLT_CUTOFF, 900.0f), P(SUB_PID_FLT_RESO, 0.4f),
+    P(SUB_PID_FLT_ENV, 1.8f), P(SUB_PID_FLT_DRIVE, 0.2f),
+    P(SUB_PID_OSC2_SEMI, 7), P(SUB_PID_MIX_OSC2, 0.5f),
+    P(SUB_PID_ENV2_DECAY, 0.2f), P(SUB_PID_ENV2_SUSTAIN, 0.0f),
+    P(SUB_PID_ENV1_DECAY, 0.3f), P(SUB_PID_ENV1_SUSTAIN, 0.25f),
+    P(SUB_PID_ENV1_RELEASE, 0.18f),
+    P(FX_PID_REV_MIX, 0.2f),
+};
+
+/* the same filter closed to a slit — nasal, telephone-ish lead */
+static const preset_pair_t kSubNarrowLead[] = {
+    P(SUB_PID_FLT_TYPE, 3), P(SUB_PID_FLT_SPREAD, 0.35f),
+    P(SUB_PID_FLT_CUTOFF, 1300.0f), P(SUB_PID_FLT_RESO, 0.55f),
+    P(SUB_PID_FLT_KBD, 0.8f), P(SUB_PID_FLT_DRIVE, 0.4f),
+    P(SUB_PID_OSC1_WAVE, 3), P(SUB_PID_OSC1_PW, 0.25f),
+    P(SUB_PID_ENV1_SUSTAIN, 0.85f), P(SUB_PID_ENV1_RELEASE, 0.12f),
+    P(SYNTH_PID_COMMON_GLIDE, 0.04f),
+    P(FX_PID_DLY_MIX, 0.25f), P(FX_PID_DLY_FB, 0.35f),
+};
+
+/* drive into a 24 dB slope: saturates before it gets shrill */
+static const preset_pair_t kSubDrivenSaw[] = {
+    P(SUB_PID_FLT_TYPE, 1), P(SUB_PID_FLT_CUTOFF, 1500.0f),
+    P(SUB_PID_FLT_RESO, 0.35f), P(SUB_PID_FLT_ENV, 2.0f),
+    P(SUB_PID_FLT_DRIVE, 0.7f),
+    P(SUB_PID_OSC2_FINE, -14.0f), P(SUB_PID_MIX_OSC1, 0.6f),
+    P(SUB_PID_MIX_OSC2, 0.6f),
+    P(SUB_PID_ENV1_SUSTAIN, 0.8f), P(SUB_PID_ENV1_RELEASE, 0.25f),
+    P(SYNTH_PID_COMMON_UNISON, 2), P(SYNTH_PID_COMMON_UNI_DETUNE, 14.0f),
+    P(FX_PID_REV_MIX, 0.2f),
+};
+
+/* two saws a hair apart under a 24 dB lowpass — the jungle staple */
+static const preset_pair_t kSubReeseBass[] = {
+    P(SUB_PID_FLT_TYPE, 1), P(SUB_PID_FLT_CUTOFF, 420.0f),
+    P(SUB_PID_FLT_RESO, 0.2f), P(SUB_PID_FLT_ENV, 0.8f),
+    P(SUB_PID_FLT_KBD, 0.25f),
+    P(SUB_PID_OSC2_FINE, -18.0f), P(SUB_PID_MIX_OSC1, 0.6f),
+    P(SUB_PID_MIX_OSC2, 0.6f),
+    P(SUB_PID_ENV1_ATTACK, 0.01f), P(SUB_PID_ENV1_SUSTAIN, 0.95f),
+    P(SUB_PID_ENV1_RELEASE, 0.15f),
+    P(SUB_PID_LFO2_RATE, 0.25f), P(SUB_PID_LFO2_CUTOFF, 0.7f),
+};
+
+/* four detuned voices, spread wide, filter mostly out of the way */
+static const preset_pair_t kSubSuperSaw[] = {
+    P(SUB_PID_FLT_TYPE, 1), P(SUB_PID_FLT_CUTOFF, 6000.0f),
+    P(SUB_PID_FLT_RESO, 0.12f), P(SUB_PID_FLT_ENV, 1.0f),
+    P(SUB_PID_OSC2_FINE, 12.0f), P(SUB_PID_MIX_OSC2, 0.55f),
+    P(SUB_PID_ENV1_ATTACK, 0.02f), P(SUB_PID_ENV1_SUSTAIN, 0.9f),
+    P(SUB_PID_ENV1_RELEASE, 0.6f),
+    P(SYNTH_PID_COMMON_UNISON, 4), P(SYNTH_PID_COMMON_UNI_DETUNE, 22.0f),
+    P(SYNTH_PID_COMMON_UNI_SPREAD, 1.0f),
+    P(FX_PID_REV_MIX, 0.3f), P(FX_PID_DLY_MIX, 0.15f),
+};
+
+/* pulse + saw, filter opening on a long sweep — the rave siren */
+static const preset_pair_t kSubHoover[] = {
+    P(SUB_PID_OSC1_WAVE, 3), P(SUB_PID_OSC1_PW, 0.2f),
+    P(SUB_PID_OSC2_WAVE, 2), P(SUB_PID_OSC2_SEMI, -12),
+    P(SUB_PID_MIX_OSC1, 0.55f), P(SUB_PID_MIX_OSC2, 0.55f),
+    P(SUB_PID_FLT_TYPE, 1), P(SUB_PID_FLT_CUTOFF, 700.0f),
+    P(SUB_PID_FLT_RESO, 0.45f), P(SUB_PID_FLT_ENV, 3.0f),
+    P(SUB_PID_FLT_DRIVE, 0.3f),
+    P(SUB_PID_ENV2_ATTACK, 0.25f), P(SUB_PID_ENV2_DECAY, 1.5f),
+    P(SUB_PID_ENV2_SUSTAIN, 0.5f),
+    P(SUB_PID_ENV1_SUSTAIN, 0.9f), P(SUB_PID_ENV1_RELEASE, 0.3f),
+    P(SYNTH_PID_COMMON_GLIDE, 0.08f),
+};
+
+/* square with the filter parked open: drawbar-ish, no sweep at all */
+static const preset_pair_t kSubOrganTone[] = {
+    P(SUB_PID_OSC1_WAVE, 3), P(SUB_PID_OSC1_PW, 0.5f),
+    P(SUB_PID_OSC2_WAVE, 3), P(SUB_PID_OSC2_SEMI, 12),
+    P(SUB_PID_OSC2_FINE, 0.0f),
+    P(SUB_PID_MIX_OSC1, 0.6f), P(SUB_PID_MIX_OSC2, 0.35f),
+    P(SUB_PID_FLT_CUTOFF, 7000.0f), P(SUB_PID_FLT_ENV, 0.0f),
+    P(SUB_PID_ENV1_ATTACK, 0.004f), P(SUB_PID_ENV1_DECAY, 0.05f),
+    P(SUB_PID_ENV1_SUSTAIN, 1.0f), P(SUB_PID_ENV1_RELEASE, 0.05f),
+    P(FX_PID_CHO_MIX, 0.3f), P(FX_PID_REV_MIX, 0.15f),
+};
+
+/* narrow pulse, fast decay, resonant bite */
+static const preset_pair_t kSubClavPlink[] = {
+    P(SUB_PID_OSC1_WAVE, 3), P(SUB_PID_OSC1_PW, 0.12f),
+    P(SUB_PID_FLT_CUTOFF, 1600.0f), P(SUB_PID_FLT_RESO, 0.55f),
+    P(SUB_PID_FLT_ENV, 2.4f), P(SUB_PID_FLT_KBD, 0.6f),
+    P(SUB_PID_FLT_DRIVE, 0.25f),
+    P(SUB_PID_ENV2_DECAY, 0.11f), P(SUB_PID_ENV2_SUSTAIN, 0.0f),
+    P(SUB_PID_ENV1_ATTACK, 0.001f), P(SUB_PID_ENV1_DECAY, 0.35f),
+    P(SUB_PID_ENV1_SUSTAIN, 0.1f), P(SUB_PID_ENV1_RELEASE, 0.1f),
+    MOD(0, SYNTH_MOD_SRC_VEL, SUB_PID_FLT_CUTOFF, 0.45f),
+};
+
+/* fat and round: sine sub under a triangle, barely any harmonics left */
+static const preset_pair_t kSubRubberBass[] = {
+    P(SUB_PID_OSC1_WAVE, 1), P(SUB_PID_OSC2_WAVE, 0),
+    P(SUB_PID_OSC2_SEMI, -12),
+    P(SUB_PID_MIX_OSC1, 0.55f), P(SUB_PID_MIX_OSC2, 0.5f),
+    P(SUB_PID_FLT_TYPE, 2), P(SUB_PID_FLT_CUTOFF, 240.0f),
+    P(SUB_PID_FLT_RESO, 0.35f), P(SUB_PID_FLT_ENV, 1.6f),
+    P(SUB_PID_ENV2_DECAY, 0.15f), P(SUB_PID_ENV2_SUSTAIN, 0.0f),
+    P(SUB_PID_ENV1_DECAY, 0.5f), P(SUB_PID_ENV1_SUSTAIN, 0.5f),
+    P(SUB_PID_ENV1_RELEASE, 0.1f),
+};
+
+/* one sine, one very fast filter+amp decay: a synth kick on the keyboard */
+static const preset_pair_t kSubKickSynth[] = {
+    P(SUB_PID_OSC1_WAVE, 0), P(SUB_PID_MIX_OSC1, 1.0f),
+    P(SUB_PID_FLT_CUTOFF, 180.0f), P(SUB_PID_FLT_RESO, 0.3f),
+    P(SUB_PID_FLT_ENV, 3.5f), P(SUB_PID_FLT_KBD, 0.0f),
+    P(SUB_PID_ENV2_ATTACK, 0.001f), P(SUB_PID_ENV2_DECAY, 0.045f),
+    P(SUB_PID_ENV2_SUSTAIN, 0.0f),
+    P(SUB_PID_ENV1_ATTACK, 0.001f), P(SUB_PID_ENV1_DECAY, 0.22f),
+    P(SUB_PID_ENV1_SUSTAIN, 0.0f), P(SUB_PID_ENV1_RELEASE, 0.12f),
+};
+
+/* noise through a bandpass, snapped shut */
+static const preset_pair_t kSubSnareSynth[] = {
+    P(SUB_PID_MIX_OSC1, 0.25f), P(SUB_PID_MIX_NOISE, 0.8f),
+    P(SUB_PID_OSC1_WAVE, 1),
+    P(SUB_PID_FLT_MODE, 6), P(SUB_PID_FLT_CUTOFF, 1900.0f),
+    P(SUB_PID_FLT_RESO, 0.5f), P(SUB_PID_FLT_ENV, 1.0f),
+    P(SUB_PID_FLT_KBD, 0.0f),
+    P(SUB_PID_ENV2_DECAY, 0.06f), P(SUB_PID_ENV2_SUSTAIN, 0.0f),
+    P(SUB_PID_ENV1_ATTACK, 0.001f), P(SUB_PID_ENV1_DECAY, 0.16f),
+    P(SUB_PID_ENV1_SUSTAIN, 0.0f), P(SUB_PID_ENV1_RELEASE, 0.1f),
+    P(FX_PID_REV_MIX, 0.2f),
+};
+
+/* pitched membrane: triangle, no harmonics above the skin tone */
+static const preset_pair_t kSubTomSynth[] = {
+    P(SUB_PID_OSC1_WAVE, 1), P(SUB_PID_MIX_OSC1, 0.9f),
+    P(SUB_PID_MIX_NOISE, 0.08f),
+    P(SUB_PID_FLT_TYPE, 2), P(SUB_PID_FLT_CUTOFF, 420.0f),
+    P(SUB_PID_FLT_RESO, 0.25f), P(SUB_PID_FLT_ENV, 2.0f),
+    P(SUB_PID_FLT_KBD, 0.4f),
+    P(SUB_PID_ENV2_DECAY, 0.08f), P(SUB_PID_ENV2_SUSTAIN, 0.0f),
+    P(SUB_PID_ENV1_ATTACK, 0.001f), P(SUB_PID_ENV1_DECAY, 0.45f),
+    P(SUB_PID_ENV1_SUSTAIN, 0.0f), P(SUB_PID_ENV1_RELEASE, 0.25f),
+    P(FX_PID_REV_MIX, 0.18f),
+};
+
+/* highpassed noise on a slow LFO — surf, breath, weather */
+static const preset_pair_t kSubWindNoise[] = {
+    P(SUB_PID_MIX_OSC1, 0.0f), P(SUB_PID_MIX_NOISE, 0.9f),
+    P(SUB_PID_FLT_TYPE, 3), P(SUB_PID_FLT_SPREAD, 1.8f),
+    P(SUB_PID_FLT_CUTOFF, 1200.0f), P(SUB_PID_FLT_RESO, 0.5f),
+    P(SUB_PID_FLT_ENV, 0.0f), P(SUB_PID_FLT_KBD, 0.0f),
+    P(SUB_PID_LFO2_RATE, 0.18f), P(SUB_PID_LFO2_CUTOFF, 2.5f),
+    P(SUB_PID_ENV1_ATTACK, 1.2f), P(SUB_PID_ENV1_SUSTAIN, 1.0f),
+    P(SUB_PID_ENV1_RELEASE, 1.5f),
+    P(FX_PID_REV_MIX, 0.45f), P(FX_PID_REV_SIZE, 0.8f),
+};
+
+/* slow, low, and barely moving — something to put underneath everything */
+static const preset_pair_t kSubDarkDrone[] = {
+    P(SUB_PID_OSC2_SEMI, -12), P(SUB_PID_OSC2_FINE, -6.0f),
+    P(SUB_PID_MIX_OSC1, 0.5f), P(SUB_PID_MIX_OSC2, 0.5f),
+    P(SUB_PID_FLT_TYPE, 1), P(SUB_PID_FLT_CUTOFF, 320.0f),
+    P(SUB_PID_FLT_RESO, 0.3f), P(SUB_PID_FLT_ENV, 0.5f),
+    P(SUB_PID_ENV1_ATTACK, 2.0f), P(SUB_PID_ENV1_SUSTAIN, 1.0f),
+    P(SUB_PID_ENV1_RELEASE, 2.5f),
+    P(SUB_PID_LFO2_RATE, 0.09f), P(SUB_PID_LFO2_CUTOFF, 1.2f),
+    P(FX_PID_REV_MIX, 0.5f), P(FX_PID_REV_SIZE, 0.85f),
+};
+
+/* highpass keeps the low end out of the way — sits over a bass line */
+static const preset_pair_t kSubGlassPad[] = {
+    P(SUB_PID_FLT_MODE, 2), P(SUB_PID_FLT_CUTOFF, 700.0f),
+    P(SUB_PID_FLT_RESO, 0.4f), P(SUB_PID_FLT_ENV, -1.5f),
+    P(SUB_PID_OSC1_WAVE, 1), P(SUB_PID_OSC2_WAVE, 2),
+    P(SUB_PID_OSC2_FINE, 9.0f), P(SUB_PID_MIX_OSC2, 0.45f),
+    P(SUB_PID_ENV1_ATTACK, 0.8f), P(SUB_PID_ENV1_SUSTAIN, 0.85f),
+    P(SUB_PID_ENV1_RELEASE, 1.4f),
+    P(FX_PID_CHO_MIX, 0.35f), P(FX_PID_REV_MIX, 0.45f),
+};
+
+/* triangle into a high-Q peak: struck-metal overtone, no FM needed */
+static const preset_pair_t kSubBellPluck[] = {
+    P(SUB_PID_OSC1_WAVE, 1), P(SUB_PID_OSC2_WAVE, 0),
+    P(SUB_PID_OSC2_SEMI, 19), P(SUB_PID_MIX_OSC2, 0.3f),
+    P(SUB_PID_FLT_MODE, 4), P(SUB_PID_FLT_CUTOFF, 2400.0f),
+    P(SUB_PID_FLT_RESO, 0.85f), P(SUB_PID_FLT_ENV, 1.5f),
+    P(SUB_PID_FLT_KBD, 0.9f),
+    P(SUB_PID_ENV2_DECAY, 0.25f), P(SUB_PID_ENV2_SUSTAIN, 0.0f),
+    P(SUB_PID_ENV1_ATTACK, 0.001f), P(SUB_PID_ENV1_DECAY, 1.6f),
+    P(SUB_PID_ENV1_SUSTAIN, 0.0f), P(SUB_PID_ENV1_RELEASE, 1.2f),
+    P(FX_PID_REV_MIX, 0.35f),
+};
+
+/* octave-stacked saws, no detune — clean and wide */
+static const preset_pair_t kSubOctaveStack[] = {
+    P(SUB_PID_OSC2_SEMI, 12), P(SUB_PID_OSC2_FINE, 0.0f),
+    P(SUB_PID_MIX_OSC1, 0.6f), P(SUB_PID_MIX_OSC2, 0.4f),
+    P(SUB_PID_FLT_CUTOFF, 3200.0f), P(SUB_PID_FLT_ENV, 1.4f),
+    P(SUB_PID_ENV1_SUSTAIN, 0.85f), P(SUB_PID_ENV1_RELEASE, 0.3f),
+    P(FX_PID_REV_MIX, 0.2f),
+};
+
+/* just-detuned keys, short filter blip on every note */
+static const preset_pair_t kSubDetunedKeys[] = {
+    P(SUB_PID_OSC1_WAVE, 2), P(SUB_PID_OSC2_WAVE, 3),
+    P(SUB_PID_OSC2_FINE, -6.0f), P(SUB_PID_OSC2_PW, 0.4f),
+    P(SUB_PID_MIX_OSC1, 0.55f), P(SUB_PID_MIX_OSC2, 0.45f),
+    P(SUB_PID_FLT_CUTOFF, 1500.0f), P(SUB_PID_FLT_RESO, 0.3f),
+    P(SUB_PID_FLT_ENV, 1.8f), P(SUB_PID_FLT_KBD, 0.55f),
+    P(SUB_PID_ENV2_DECAY, 0.2f), P(SUB_PID_ENV2_SUSTAIN, 0.15f),
+    P(SUB_PID_ENV1_DECAY, 0.8f), P(SUB_PID_ENV1_SUSTAIN, 0.45f),
+    P(SUB_PID_ENV1_RELEASE, 0.4f),
+    P(FX_PID_CHO_MIX, 0.2f), P(FX_PID_REV_MIX, 0.25f),
+};
+
+/* slow triangle chords, nothing sharp anywhere */
+static const preset_pair_t kSubSoftChords[] = {
+    P(SUB_PID_OSC1_WAVE, 1), P(SUB_PID_OSC2_WAVE, 1),
+    P(SUB_PID_OSC2_FINE, 7.0f),
+    P(SUB_PID_MIX_OSC1, 0.55f), P(SUB_PID_MIX_OSC2, 0.45f),
+    P(SUB_PID_FLT_CUTOFF, 2200.0f), P(SUB_PID_FLT_ENV, 0.8f),
+    P(SUB_PID_ENV1_ATTACK, 0.35f), P(SUB_PID_ENV1_SUSTAIN, 0.9f),
+    P(SUB_PID_ENV1_RELEASE, 1.0f),
+    P(FX_PID_CHO_MIX, 0.3f), P(FX_PID_REV_MIX, 0.35f),
+};
+
+/* velocity opens the filter and nothing else — expressive comping voice */
+static const preset_pair_t kSubVelKeys[] = {
+    P(SUB_PID_OSC1_WAVE, 3), P(SUB_PID_OSC1_PW, 0.45f),
+    P(SUB_PID_FLT_TYPE, 2), P(SUB_PID_FLT_CUTOFF, 600.0f),
+    P(SUB_PID_FLT_RESO, 0.3f), P(SUB_PID_FLT_ENV, 1.2f),
+    P(SUB_PID_FLT_KBD, 0.5f),
+    P(SUB_PID_ENV1_DECAY, 0.7f), P(SUB_PID_ENV1_SUSTAIN, 0.4f),
+    P(SUB_PID_ENV1_RELEASE, 0.35f),
+    MOD(0, SYNTH_MOD_SRC_VEL, SUB_PID_FLT_CUTOFF, 0.7f),
+    MOD(1, SYNTH_MOD_SRC_VEL, SUB_PID_FLT_DRIVE, 0.4f),
+    P(FX_PID_REV_MIX, 0.25f),
+};
+
+/* sub-octave sine with a long fall — drops under a mix */
+static const preset_pair_t kSubDropTail[] = {
+    P(SUB_PID_OSC1_WAVE, 0), P(SUB_PID_OSC2_WAVE, 0),
+    P(SUB_PID_OSC2_SEMI, -12), P(SUB_PID_OSC2_FINE, 0.0f),
+    P(SUB_PID_MIX_OSC1, 0.5f), P(SUB_PID_MIX_OSC2, 0.6f),
+    P(SUB_PID_FLT_CUTOFF, 400.0f), P(SUB_PID_FLT_ENV, 0.0f),
+    P(SUB_PID_ENV1_ATTACK, 0.005f), P(SUB_PID_ENV1_DECAY, 3.0f),
+    P(SUB_PID_ENV1_SUSTAIN, 0.0f), P(SUB_PID_ENV1_RELEASE, 2.0f),
+    P(SYNTH_PID_COMMON_GLIDE, 0.5f),
+    P(FX_PID_REV_MIX, 0.3f),
+};
+
+/* square lead with a fifth on top, no filter movement — chiptune-adjacent */
+static const preset_pair_t kSubFifthLead[] = {
+    P(SUB_PID_OSC1_WAVE, 3), P(SUB_PID_OSC1_PW, 0.5f),
+    P(SUB_PID_OSC2_WAVE, 3), P(SUB_PID_OSC2_SEMI, 7),
+    P(SUB_PID_OSC2_FINE, 0.0f),
+    P(SUB_PID_MIX_OSC1, 0.6f), P(SUB_PID_MIX_OSC2, 0.35f),
+    P(SUB_PID_FLT_CUTOFF, 5000.0f), P(SUB_PID_FLT_ENV, 0.0f),
+    P(SUB_PID_ENV1_ATTACK, 0.002f), P(SUB_PID_ENV1_SUSTAIN, 1.0f),
+    P(SUB_PID_ENV1_RELEASE, 0.05f),
+    P(FX_PID_DLY_MIX, 0.22f), P(FX_PID_DLY_TIME, 0.2f),
+};
+
+/* the filter doing all the work on a static waveform — slow bandpass wash */
+static const preset_pair_t kSubBandWash[] = {
+    P(SUB_PID_FLT_MODE, 6), P(SUB_PID_FLT_TYPE, 1),
+    P(SUB_PID_FLT_CUTOFF, 600.0f), P(SUB_PID_FLT_RESO, 0.6f),
+    P(SUB_PID_FLT_ENV, 0.0f),
+    P(SUB_PID_OSC2_FINE, -10.0f), P(SUB_PID_MIX_OSC2, 0.5f),
+    P(SUB_PID_MIX_NOISE, 0.1f),
+    P(SUB_PID_LFO2_RATE, 0.12f), P(SUB_PID_LFO2_WAVE, 1),
+    P(SUB_PID_LFO2_CUTOFF, 3.5f),
+    P(SUB_PID_ENV1_ATTACK, 1.5f), P(SUB_PID_ENV1_SUSTAIN, 1.0f),
+    P(SUB_PID_ENV1_RELEASE, 2.0f),
+    P(FX_PID_REV_MIX, 0.5f), P(FX_PID_REV_SIZE, 0.8f),
+};
+
+/* ---- additive (bank 1, linear slots 112-223) -------------------------------- */
 
 #define ADD_P(n) (uint16_t)(ADD_PID_P1_LEVEL + (n) - 1) /* drawbar n, 1-16 */
 
@@ -409,7 +818,457 @@ static const preset_pair_t kAddPercOrgan[] = {
     P(ADD_PID_ENV1_RELEASE, 0.08f),
 };
 
-/* ---- fm (bank 2, slots 160-239) ------------------------------------- */
+/* ---- additive, slots 16-47 (S33) ------------------------------------
+ *
+ * Drawbar registrations mostly, because that is what this engine is for —
+ * plus the S33 filter on the ones where a formant or a resonant peak does
+ * something 16 sine partials cannot do by themselves. Drawbar sums are kept
+ * near 1.0, the engine's gain-staging convention. */
+
+/* every drawbar out: the loudest legal registration */
+static const preset_pair_t kAddFullOrgan[] = {
+    P(ADD_P(1), 0.22f), P(ADD_P(2), 0.18f), P(ADD_P(3), 0.14f),
+    P(ADD_P(4), 0.12f), P(ADD_P(5), 0.09f), P(ADD_P(6), 0.07f),
+    P(ADD_P(7), 0.05f), P(ADD_P(8), 0.05f), P(ADD_P(9), 0.03f),
+    P(ADD_P(10), 0.02f), P(ADD_P(11), 0.02f), P(ADD_P(12), 0.01f),
+    P(ADD_P(13), 0.0f), P(ADD_P(14), 0.0f), P(ADD_P(15), 0.0f),
+    P(ADD_P(16), 0.0f),
+    P(ADD_PID_BRIGHT, 0.7f), P(ADD_PID_ENV_BRIGHT, 0.0f),
+    P(ADD_PID_VEL_BRIGHT, 0.0f),
+    P(ADD_PID_ENV1_ATTACK, 0.003f), P(ADD_PID_ENV1_SUSTAIN, 1.0f),
+    P(ADD_PID_ENV1_RELEASE, 0.06f),
+    P(FX_PID_CHO_MIX, 0.3f), P(FX_PID_REV_MIX, 0.2f),
+};
+
+/* 888 000 000 — the jazz registration, first three drawbars only */
+static const preset_pair_t kAddJazzOrgan[] = {
+    P(ADD_P(1), 0.42f), P(ADD_P(2), 0.32f), P(ADD_P(3), 0.24f),
+    P(ADD_P(4), 0.0f), P(ADD_P(5), 0.0f), P(ADD_P(6), 0.0f),
+    P(ADD_P(7), 0.0f), P(ADD_P(8), 0.0f), P(ADD_P(9), 0.0f),
+    P(ADD_P(10), 0.0f), P(ADD_P(11), 0.0f), P(ADD_P(12), 0.0f),
+    P(ADD_P(13), 0.0f), P(ADD_P(14), 0.0f), P(ADD_P(15), 0.0f),
+    P(ADD_P(16), 0.0f),
+    P(ADD_PID_BRIGHT, 0.75f), P(ADD_PID_ENV_BRIGHT, 0.0f),
+    P(ADD_PID_ENV1_ATTACK, 0.004f), P(ADD_PID_ENV1_SUSTAIN, 1.0f),
+    P(ADD_PID_ENV1_RELEASE, 0.05f),
+    P(ADD_PID_LFO1_RATE, 6.8f), P(ADD_PID_LFO1_PITCH, 0.04f),
+    P(FX_PID_CHO_MIX, 0.35f),
+};
+
+/* fundamental, fifth and octave pulled hard — gospel bark */
+static const preset_pair_t kAddGospelOrgan[] = {
+    P(ADD_P(1), 0.34f), P(ADD_P(2), 0.10f), P(ADD_P(3), 0.28f),
+    P(ADD_P(4), 0.08f), P(ADD_P(5), 0.06f), P(ADD_P(6), 0.06f),
+    P(ADD_P(7), 0.0f), P(ADD_P(8), 0.08f), P(ADD_P(9), 0.0f),
+    P(ADD_P(10), 0.0f), P(ADD_P(11), 0.0f), P(ADD_P(12), 0.0f),
+    P(ADD_P(13), 0.0f), P(ADD_P(14), 0.0f), P(ADD_P(15), 0.0f),
+    P(ADD_P(16), 0.0f),
+    P(ADD_PID_BRIGHT, 0.8f), P(ADD_PID_ENV_BRIGHT, 0.1f),
+    P(ADD_PID_ENV1_ATTACK, 0.002f), P(ADD_PID_ENV1_SUSTAIN, 1.0f),
+    P(ADD_PID_ENV1_RELEASE, 0.05f),
+    P(ADD_PID_FLT_ON, 1), P(ADD_PID_FLT_DRIVE, 0.45f),
+    P(ADD_PID_FLT_CUTOFF, 5000.0f),
+    P(FX_PID_CHO_MIX, 0.3f), P(FX_PID_REV_MIX, 0.2f),
+};
+
+/* odd partials only: the stopped-pipe / clarinet spectrum */
+static const preset_pair_t kAddReedPipe[] = {
+    P(ADD_PID_EVENODD, -0.85f), P(ADD_PID_TILT, -3.0f),
+    P(ADD_PID_BRIGHT, 0.6f), P(ADD_PID_ENV_BRIGHT, 0.15f),
+    P(ADD_PID_VEL_BRIGHT, 0.2f),
+    P(ADD_PID_ENV1_ATTACK, 0.05f), P(ADD_PID_ENV1_SUSTAIN, 1.0f),
+    P(ADD_PID_ENV1_RELEASE, 0.12f),
+    P(FX_PID_REV_MIX, 0.3f), P(FX_PID_REV_SIZE, 0.65f),
+};
+
+/* soft principal rank, slow speech */
+static const preset_pair_t kAddPrincipalPipe[] = {
+    P(ADD_P(1), 0.45f), P(ADD_P(2), 0.22f), P(ADD_P(3), 0.14f),
+    P(ADD_P(4), 0.09f), P(ADD_P(5), 0.05f), P(ADD_P(6), 0.03f),
+    P(ADD_P(7), 0.02f), P(ADD_P(8), 0.0f), P(ADD_P(9), 0.0f),
+    P(ADD_P(10), 0.0f), P(ADD_P(11), 0.0f), P(ADD_P(12), 0.0f),
+    P(ADD_P(13), 0.0f), P(ADD_P(14), 0.0f), P(ADD_P(15), 0.0f),
+    P(ADD_P(16), 0.0f),
+    P(ADD_PID_BRIGHT, 0.5f), P(ADD_PID_ENV_BRIGHT, 0.25f),
+    P(ADD_PID_ENV1_ATTACK, 0.12f), P(ADD_PID_ENV1_SUSTAIN, 1.0f),
+    P(ADD_PID_ENV1_RELEASE, 0.5f),
+    P(FX_PID_REV_MIX, 0.45f), P(FX_PID_REV_SIZE, 0.85f),
+};
+
+/* octave-only registration: 16', 8', 4', 2' and nothing between */
+static const preset_pair_t kAddOctaveOrgan[] = {
+    P(ADD_P(1), 0.34f), P(ADD_P(2), 0.28f), P(ADD_P(3), 0.0f),
+    P(ADD_P(4), 0.22f), P(ADD_P(5), 0.0f), P(ADD_P(6), 0.0f),
+    P(ADD_P(7), 0.0f), P(ADD_P(8), 0.16f), P(ADD_P(9), 0.0f),
+    P(ADD_P(10), 0.0f), P(ADD_P(11), 0.0f), P(ADD_P(12), 0.0f),
+    P(ADD_P(13), 0.0f), P(ADD_P(14), 0.0f), P(ADD_P(15), 0.0f),
+    P(ADD_P(16), 0.0f),
+    P(ADD_PID_BRIGHT, 0.7f), P(ADD_PID_ENV_BRIGHT, 0.0f),
+    P(ADD_PID_ENV1_ATTACK, 0.003f), P(ADD_PID_ENV1_SUSTAIN, 1.0f),
+    P(ADD_PID_ENV1_RELEASE, 0.06f),
+    P(FX_PID_CHO_MIX, 0.2f), P(FX_PID_REV_MIX, 0.2f),
+};
+
+/* quint-heavy: the hollow fifth registration */
+static const preset_pair_t kAddFifthOrgan[] = {
+    P(ADD_P(1), 0.36f), P(ADD_P(2), 0.0f), P(ADD_P(3), 0.30f),
+    P(ADD_P(4), 0.0f), P(ADD_P(5), 0.0f), P(ADD_P(6), 0.20f),
+    P(ADD_P(7), 0.0f), P(ADD_P(8), 0.0f), P(ADD_P(9), 0.10f),
+    P(ADD_P(10), 0.0f), P(ADD_P(11), 0.0f), P(ADD_P(12), 0.0f),
+    P(ADD_P(13), 0.0f), P(ADD_P(14), 0.0f), P(ADD_P(15), 0.0f),
+    P(ADD_P(16), 0.0f),
+    P(ADD_PID_BRIGHT, 0.68f), P(ADD_PID_ENV_BRIGHT, 0.0f),
+    P(ADD_PID_ENV1_ATTACK, 0.004f), P(ADD_PID_ENV1_SUSTAIN, 1.0f),
+    P(ADD_PID_ENV1_RELEASE, 0.07f),
+    P(FX_PID_REV_MIX, 0.25f),
+};
+
+/* the vowel filter over a full spectrum: a choir that actually says "ah" */
+static const preset_pair_t kAddVocalAh[] = {
+    P(ADD_PID_TILT, -4.0f), P(ADD_PID_BRIGHT, 0.75f),
+    P(ADD_PID_ENV_BRIGHT, 0.1f), P(ADD_PID_VEL_BRIGHT, 0.15f),
+    P(ADD_PID_FLT_ON, 1), P(ADD_PID_FLT_TYPE, 4),
+    P(ADD_PID_FLT_VOWEL, 0.0f), P(ADD_PID_FLT_RESO, 0.55f),
+    P(ADD_PID_FLT_CUTOFF, 1000.0f),
+    P(ADD_PID_ENV1_ATTACK, 0.25f), P(ADD_PID_ENV1_SUSTAIN, 0.95f),
+    P(ADD_PID_ENV1_RELEASE, 0.8f),
+    P(ADD_PID_LFO1_RATE, 5.2f), P(ADD_PID_LFO1_PITCH, 0.06f),
+    P(FX_PID_REV_MIX, 0.45f), P(FX_PID_REV_SIZE, 0.75f),
+};
+
+/* same idea parked on "oo" — darker, further back in the mouth */
+static const preset_pair_t kAddVocalOoh[] = {
+    P(ADD_PID_TILT, -5.0f), P(ADD_PID_BRIGHT, 0.7f),
+    P(ADD_PID_FLT_ON, 1), P(ADD_PID_FLT_TYPE, 4),
+    P(ADD_PID_FLT_VOWEL, 1.0f), P(ADD_PID_FLT_RESO, 0.6f),
+    P(ADD_PID_FLT_CUTOFF, 900.0f),
+    P(ADD_PID_ENV1_ATTACK, 0.4f), P(ADD_PID_ENV1_SUSTAIN, 0.95f),
+    P(ADD_PID_ENV1_RELEASE, 1.0f),
+    P(FX_PID_CHO_MIX, 0.25f), P(FX_PID_REV_MIX, 0.5f),
+};
+
+/* env2 sweeps the morph, so every note speaks a -> e -> i on its own */
+static const preset_pair_t kAddFormantChoir[] = {
+    P(ADD_PID_TILT, -3.5f), P(ADD_PID_BRIGHT, 0.72f),
+    P(ADD_PID_FLT_ON, 1), P(ADD_PID_FLT_TYPE, 4),
+    P(ADD_PID_FLT_VOWEL, 0.0f), P(ADD_PID_FLT_RESO, 0.65f),
+    P(ADD_PID_FLT_CUTOFF, 1050.0f),
+    P(ADD_PID_ENV2_ATTACK, 0.6f), P(ADD_PID_ENV2_DECAY, 1.5f),
+    P(ADD_PID_ENV2_SUSTAIN, 0.7f),
+    P(ADD_PID_ENV1_ATTACK, 0.3f), P(ADD_PID_ENV1_SUSTAIN, 0.9f),
+    P(ADD_PID_ENV1_RELEASE, 1.2f),
+    MOD(0, SYNTH_MOD_SRC_ENV2, ADD_PID_FLT_VOWEL, 0.55f),
+    MOD(1, SYNTH_MOD_SRC_WHEEL, ADD_PID_FLT_VOWEL, 0.4f),
+    P(FX_PID_REV_MIX, 0.5f), P(FX_PID_REV_SIZE, 0.8f),
+};
+
+/* struck metal bar with a soft mallet */
+static const preset_pair_t kAddVibraphone[] = {
+    P(ADD_P(1), 0.55f), P(ADD_P(2), 0.0f), P(ADD_P(3), 0.0f),
+    P(ADD_P(4), 0.22f), P(ADD_P(5), 0.0f), P(ADD_P(6), 0.0f),
+    P(ADD_P(7), 0.0f), P(ADD_P(8), 0.0f), P(ADD_P(9), 0.10f),
+    P(ADD_P(10), 0.0f), P(ADD_P(11), 0.0f), P(ADD_P(12), 0.0f),
+    P(ADD_P(13), 0.0f), P(ADD_P(14), 0.0f), P(ADD_P(15), 0.0f),
+    P(ADD_P(16), 0.0f),
+    P(ADD_PID_INHARM, 0.0008f), P(ADD_PID_BRIGHT, 0.55f),
+    P(ADD_PID_ENV_BRIGHT, 0.35f), P(ADD_PID_VEL_BRIGHT, 0.45f),
+    P(ADD_PID_ENV2_DECAY, 0.6f), P(ADD_PID_ENV2_SUSTAIN, 0.0f),
+    P(ADD_PID_ENV1_ATTACK, 0.002f), P(ADD_PID_ENV1_DECAY, 2.2f),
+    P(ADD_PID_ENV1_SUSTAIN, 0.0f), P(ADD_PID_ENV1_RELEASE, 1.5f),
+    P(ADD_PID_LFO2_RATE, 5.0f), P(ADD_PID_LFO2_BRIGHT, 0.25f),
+    P(FX_PID_REV_MIX, 0.35f),
+};
+
+/* wooden bar: the 4th partial carries it, and it is gone in half a second */
+static const preset_pair_t kAddMarimba[] = {
+    P(ADD_P(1), 0.52f), P(ADD_P(2), 0.04f), P(ADD_P(3), 0.06f),
+    P(ADD_P(4), 0.30f), P(ADD_P(5), 0.0f), P(ADD_P(6), 0.0f),
+    P(ADD_P(7), 0.0f), P(ADD_P(8), 0.06f), P(ADD_P(9), 0.0f),
+    P(ADD_P(10), 0.0f), P(ADD_P(11), 0.0f), P(ADD_P(12), 0.0f),
+    P(ADD_P(13), 0.0f), P(ADD_P(14), 0.0f), P(ADD_P(15), 0.0f),
+    P(ADD_P(16), 0.0f),
+    P(ADD_PID_BRIGHT, 0.45f), P(ADD_PID_ENV_BRIGHT, 0.5f),
+    P(ADD_PID_VEL_BRIGHT, 0.55f),
+    P(ADD_PID_ENV2_ATTACK, 0.002f), P(ADD_PID_ENV2_DECAY, 0.12f),
+    P(ADD_PID_ENV2_SUSTAIN, 0.0f),
+    P(ADD_PID_ENV1_ATTACK, 0.001f), P(ADD_PID_ENV1_DECAY, 0.55f),
+    P(ADD_PID_ENV1_SUSTAIN, 0.0f), P(ADD_PID_ENV1_RELEASE, 0.35f),
+    P(FX_PID_REV_MIX, 0.25f),
+};
+
+/* small, bright, quick — a celeste rather than a bell */
+static const preset_pair_t kAddCeleste[] = {
+    P(ADD_P(1), 0.42f), P(ADD_P(2), 0.20f), P(ADD_P(3), 0.05f),
+    P(ADD_P(4), 0.18f), P(ADD_P(5), 0.0f), P(ADD_P(6), 0.0f),
+    P(ADD_P(7), 0.0f), P(ADD_P(8), 0.10f), P(ADD_P(9), 0.0f),
+    P(ADD_P(10), 0.0f), P(ADD_P(11), 0.0f), P(ADD_P(12), 0.0f),
+    P(ADD_P(13), 0.0f), P(ADD_P(14), 0.0f), P(ADD_P(15), 0.0f),
+    P(ADD_P(16), 0.0f),
+    P(ADD_PID_INHARM, 0.0015f), P(ADD_PID_BRIGHT, 0.6f),
+    P(ADD_PID_ENV_BRIGHT, 0.4f), P(ADD_PID_VEL_BRIGHT, 0.5f),
+    P(ADD_PID_ENV2_DECAY, 0.35f), P(ADD_PID_ENV2_SUSTAIN, 0.0f),
+    P(ADD_PID_ENV1_ATTACK, 0.001f), P(ADD_PID_ENV1_DECAY, 1.4f),
+    P(ADD_PID_ENV1_SUSTAIN, 0.0f), P(ADD_PID_ENV1_RELEASE, 0.9f),
+    P(FX_PID_REV_MIX, 0.4f),
+};
+
+/* heavy stretch: the partials stop being harmonics and start being a gong */
+static const preset_pair_t kAddGong[] = {
+    P(ADD_PID_INHARM, 0.045f), P(ADD_PID_TILT, -1.5f),
+    P(ADD_PID_EVENODD, 0.25f), P(ADD_PID_BRIGHT, 0.6f),
+    P(ADD_PID_ENV_BRIGHT, 0.45f), P(ADD_PID_VEL_BRIGHT, 0.35f),
+    P(ADD_PID_ENV2_ATTACK, 0.02f), P(ADD_PID_ENV2_DECAY, 2.5f),
+    P(ADD_PID_ENV2_SUSTAIN, 0.0f),
+    P(ADD_PID_ENV1_ATTACK, 0.008f), P(ADD_PID_ENV1_DECAY, 4.0f),
+    P(ADD_PID_ENV1_SUSTAIN, 0.0f), P(ADD_PID_ENV1_RELEASE, 3.0f),
+    P(FX_PID_REV_MIX, 0.5f), P(FX_PID_REV_SIZE, 0.9f),
+};
+
+/* two close partials beating against each other, forever */
+static const preset_pair_t kAddSingingBowl[] = {
+    P(ADD_P(1), 0.5f), P(ADD_P(2), 0.0f), P(ADD_P(3), 0.28f),
+    P(ADD_P(4), 0.0f), P(ADD_P(5), 0.14f), P(ADD_P(6), 0.0f),
+    P(ADD_P(7), 0.08f), P(ADD_P(8), 0.0f), P(ADD_P(9), 0.0f),
+    P(ADD_P(10), 0.0f), P(ADD_P(11), 0.0f), P(ADD_P(12), 0.0f),
+    P(ADD_P(13), 0.0f), P(ADD_P(14), 0.0f), P(ADD_P(15), 0.0f),
+    P(ADD_P(16), 0.0f),
+    P(ADD_PID_INHARM, 0.006f), P(ADD_PID_BRIGHT, 0.5f),
+    P(ADD_PID_ENV_BRIGHT, 0.3f),
+    P(ADD_PID_ENV1_ATTACK, 0.03f), P(ADD_PID_ENV1_DECAY, 6.0f),
+    P(ADD_PID_ENV1_SUSTAIN, 0.15f), P(ADD_PID_ENV1_RELEASE, 4.0f),
+    P(ADD_PID_LFO2_RATE, 0.15f), P(ADD_PID_LFO2_BRIGHT, 0.2f),
+    P(FX_PID_REV_MIX, 0.55f), P(FX_PID_REV_SIZE, 0.9f),
+};
+
+/* free-reed: strong odds, fixed spectrum, bellows-slow attack */
+static const preset_pair_t kAddHarmonium[] = {
+    P(ADD_PID_EVENODD, -0.45f), P(ADD_PID_TILT, -2.0f),
+    P(ADD_PID_BRIGHT, 0.68f), P(ADD_PID_ENV_BRIGHT, 0.1f),
+    P(ADD_PID_ENV1_ATTACK, 0.09f), P(ADD_PID_ENV1_SUSTAIN, 1.0f),
+    P(ADD_PID_ENV1_RELEASE, 0.2f),
+    P(ADD_PID_FLT_ON, 1), P(ADD_PID_FLT_CUTOFF, 3500.0f),
+    P(ADD_PID_FLT_RESO, 0.2f),
+    P(FX_PID_CHO_MIX, 0.2f), P(FX_PID_REV_MIX, 0.3f),
+};
+
+/* the same reed with a bandpass squeeze and a faster bellow */
+static const preset_pair_t kAddAccordion[] = {
+    P(ADD_PID_EVENODD, -0.3f), P(ADD_PID_TILT, -1.0f),
+    P(ADD_PID_BRIGHT, 0.75f), P(ADD_PID_ENV_BRIGHT, 0.05f),
+    P(ADD_PID_ENV1_ATTACK, 0.03f), P(ADD_PID_ENV1_SUSTAIN, 1.0f),
+    P(ADD_PID_ENV1_RELEASE, 0.1f),
+    P(ADD_PID_FLT_ON, 1), P(ADD_PID_FLT_TYPE, 3),
+    P(ADD_PID_FLT_SPREAD, 2.5f), P(ADD_PID_FLT_CUTOFF, 1400.0f),
+    P(ADD_PID_FLT_RESO, 0.3f),
+    P(ADD_PID_LFO1_RATE, 6.0f), P(ADD_PID_LFO1_PITCH, 0.08f),
+    P(FX_PID_CHO_MIX, 0.3f), P(FX_PID_REV_MIX, 0.22f),
+};
+
+/* saw-ish drawbar ramp under a slow filter — an ensemble without a chorus */
+static const preset_pair_t kAddStringStack[] = {
+    P(ADD_PID_TILT, -6.0f), P(ADD_PID_BRIGHT, 0.62f),
+    P(ADD_PID_ENV_BRIGHT, 0.3f), P(ADD_PID_VEL_BRIGHT, 0.25f),
+    P(ADD_PID_ENV2_ATTACK, 0.4f), P(ADD_PID_ENV2_DECAY, 2.0f),
+    P(ADD_PID_ENV2_SUSTAIN, 0.6f),
+    P(ADD_PID_ENV1_ATTACK, 0.3f), P(ADD_PID_ENV1_SUSTAIN, 0.95f),
+    P(ADD_PID_ENV1_RELEASE, 1.0f),
+    P(ADD_PID_LFO1_RATE, 4.5f), P(ADD_PID_LFO1_PITCH, 0.05f),
+    P(FX_PID_CHO_MIX, 0.35f), P(FX_PID_REV_MIX, 0.4f),
+};
+
+/* bright even harmonics + drive: additive brass, no filter sweep needed */
+static const preset_pair_t kAddBrassStack[] = {
+    P(ADD_PID_TILT, -4.5f), P(ADD_PID_EVENODD, 0.15f),
+    P(ADD_PID_BRIGHT, 0.5f), P(ADD_PID_ENV_BRIGHT, 0.5f),
+    P(ADD_PID_VEL_BRIGHT, 0.5f),
+    P(ADD_PID_ENV2_ATTACK, 0.06f), P(ADD_PID_ENV2_DECAY, 0.5f),
+    P(ADD_PID_ENV2_SUSTAIN, 0.75f),
+    P(ADD_PID_ENV1_ATTACK, 0.03f), P(ADD_PID_ENV1_SUSTAIN, 0.9f),
+    P(ADD_PID_ENV1_RELEASE, 0.2f),
+    P(ADD_PID_FLT_ON, 1), P(ADD_PID_FLT_DRIVE, 0.5f),
+    P(ADD_PID_FLT_CUTOFF, 4000.0f), P(ADD_PID_FLT_RESO, 0.25f),
+    P(FX_PID_REV_MIX, 0.25f),
+};
+
+/* ladder lowpass on a drawbar spectrum: warm in a way the rolloff is not */
+static const preset_pair_t kAddWarmLadder[] = {
+    P(ADD_P(1), 0.4f), P(ADD_P(2), 0.24f), P(ADD_P(3), 0.16f),
+    P(ADD_P(4), 0.1f), P(ADD_P(5), 0.06f), P(ADD_P(6), 0.04f),
+    P(ADD_P(7), 0.0f), P(ADD_P(8), 0.0f), P(ADD_P(9), 0.0f),
+    P(ADD_P(10), 0.0f), P(ADD_P(11), 0.0f), P(ADD_P(12), 0.0f),
+    P(ADD_P(13), 0.0f), P(ADD_P(14), 0.0f), P(ADD_P(15), 0.0f),
+    P(ADD_P(16), 0.0f),
+    P(ADD_PID_BRIGHT, 0.85f),
+    P(ADD_PID_FLT_ON, 1), P(ADD_PID_FLT_TYPE, 2),
+    P(ADD_PID_FLT_CUTOFF, 800.0f), P(ADD_PID_FLT_RESO, 0.45f),
+    P(ADD_PID_FLT_ENV, 2.0f), P(ADD_PID_FLT_KBD, 0.5f),
+    P(ADD_PID_ENV2_DECAY, 0.5f), P(ADD_PID_ENV2_SUSTAIN, 0.2f),
+    P(ADD_PID_ENV1_DECAY, 1.0f), P(ADD_PID_ENV1_SUSTAIN, 0.5f),
+    P(ADD_PID_ENV1_RELEASE, 0.4f),
+    P(FX_PID_REV_MIX, 0.3f),
+};
+
+/* a notch wandering through a static spectrum */
+static const preset_pair_t kAddNotchDrift[] = {
+    P(ADD_PID_TILT, -3.0f), P(ADD_PID_BRIGHT, 0.8f),
+    P(ADD_PID_ENV_BRIGHT, 0.0f),
+    P(ADD_PID_FLT_ON, 1), P(ADD_PID_FLT_MODE, 3),
+    P(ADD_PID_FLT_CUTOFF, 900.0f), P(ADD_PID_FLT_RESO, 0.55f),
+    P(ADD_PID_ENV1_ATTACK, 0.6f), P(ADD_PID_ENV1_SUSTAIN, 1.0f),
+    P(ADD_PID_ENV1_RELEASE, 1.5f),
+    P(ADD_PID_LFO2_RATE, 0.2f),
+    MOD(0, SYNTH_MOD_SRC_LFO2, ADD_PID_FLT_CUTOFF, 0.45f),
+    P(FX_PID_REV_MIX, 0.45f), P(FX_PID_REV_SIZE, 0.8f),
+};
+
+/* five partials, nothing else — the sound of the engine at its simplest */
+static const preset_pair_t kAddPureTones[] = {
+    P(ADD_P(1), 0.5f), P(ADD_P(2), 0.25f), P(ADD_P(3), 0.13f),
+    P(ADD_P(4), 0.07f), P(ADD_P(5), 0.05f), P(ADD_P(6), 0.0f),
+    P(ADD_P(7), 0.0f), P(ADD_P(8), 0.0f), P(ADD_P(9), 0.0f),
+    P(ADD_P(10), 0.0f), P(ADD_P(11), 0.0f), P(ADD_P(12), 0.0f),
+    P(ADD_P(13), 0.0f), P(ADD_P(14), 0.0f), P(ADD_P(15), 0.0f),
+    P(ADD_P(16), 0.0f),
+    P(ADD_PID_BRIGHT, 0.8f), P(ADD_PID_ENV_BRIGHT, 0.15f),
+    P(ADD_PID_ENV1_ATTACK, 0.02f), P(ADD_PID_ENV1_SUSTAIN, 0.9f),
+    P(ADD_PID_ENV1_RELEASE, 0.35f),
+    P(FX_PID_REV_MIX, 0.3f),
+};
+
+/* the fundamental alone: a test tone that happens to be musical */
+static const preset_pair_t kAddSineKeys[] = {
+    P(ADD_P(1), 1.0f), P(ADD_P(2), 0.0f), P(ADD_P(3), 0.0f),
+    P(ADD_P(4), 0.0f), P(ADD_P(5), 0.0f), P(ADD_P(6), 0.0f),
+    P(ADD_P(7), 0.0f), P(ADD_P(8), 0.0f), P(ADD_P(9), 0.0f),
+    P(ADD_P(10), 0.0f), P(ADD_P(11), 0.0f), P(ADD_P(12), 0.0f),
+    P(ADD_P(13), 0.0f), P(ADD_P(14), 0.0f), P(ADD_P(15), 0.0f),
+    P(ADD_P(16), 0.0f),
+    P(ADD_PID_BRIGHT, 1.0f), P(ADD_PID_ENV_BRIGHT, 0.0f),
+    P(ADD_PID_VEL_BRIGHT, 0.0f),
+    P(ADD_PID_ENV1_ATTACK, 0.01f), P(ADD_PID_ENV1_DECAY, 1.0f),
+    P(ADD_PID_ENV1_SUSTAIN, 0.6f), P(ADD_PID_ENV1_RELEASE, 0.5f),
+    P(FX_PID_REV_MIX, 0.25f),
+};
+
+/* tuned percussion with a hard mallet and a short bloom */
+static const preset_pair_t kAddSteelDrum[] = {
+    P(ADD_P(1), 0.4f), P(ADD_P(2), 0.26f), P(ADD_P(3), 0.06f),
+    P(ADD_P(4), 0.16f), P(ADD_P(5), 0.0f), P(ADD_P(6), 0.05f),
+    P(ADD_P(7), 0.0f), P(ADD_P(8), 0.07f), P(ADD_P(9), 0.0f),
+    P(ADD_P(10), 0.0f), P(ADD_P(11), 0.0f), P(ADD_P(12), 0.0f),
+    P(ADD_P(13), 0.0f), P(ADD_P(14), 0.0f), P(ADD_P(15), 0.0f),
+    P(ADD_P(16), 0.0f),
+    P(ADD_PID_INHARM, 0.003f), P(ADD_PID_BRIGHT, 0.5f),
+    P(ADD_PID_ENV_BRIGHT, 0.55f), P(ADD_PID_VEL_BRIGHT, 0.5f),
+    P(ADD_PID_ENV2_ATTACK, 0.006f), P(ADD_PID_ENV2_DECAY, 0.25f),
+    P(ADD_PID_ENV2_SUSTAIN, 0.0f),
+    P(ADD_PID_ENV1_ATTACK, 0.001f), P(ADD_PID_ENV1_DECAY, 1.1f),
+    P(ADD_PID_ENV1_SUSTAIN, 0.0f), P(ADD_PID_ENV1_RELEASE, 0.7f),
+    P(FX_PID_REV_MIX, 0.3f),
+};
+
+/* high, thin, and very short — a bell tree struck once */
+static const preset_pair_t kAddBellTree[] = {
+    P(ADD_PID_INHARM, 0.02f), P(ADD_PID_TILT, 3.0f),
+    P(ADD_PID_EVENODD, 0.3f), P(ADD_PID_BRIGHT, 0.9f),
+    P(ADD_PID_ENV_BRIGHT, 0.2f), P(ADD_PID_VEL_BRIGHT, 0.4f),
+    P(ADD_PID_ENV1_ATTACK, 0.001f), P(ADD_PID_ENV1_DECAY, 0.6f),
+    P(ADD_PID_ENV1_SUSTAIN, 0.0f), P(ADD_PID_ENV1_RELEASE, 0.4f),
+    P(FX_PID_REV_MIX, 0.5f), P(FX_PID_REV_SIZE, 0.75f),
+    P(FX_PID_DLY_MIX, 0.2f), P(FX_PID_DLY_TIME, 0.18f),
+};
+
+/* brightness envelope inverted: opens as it dies away */
+static const preset_pair_t kAddReverseBloom[] = {
+    P(ADD_PID_TILT, -5.0f), P(ADD_PID_BRIGHT, 0.25f),
+    P(ADD_PID_ENV_BRIGHT, -0.6f), P(ADD_PID_VEL_BRIGHT, 0.0f),
+    P(ADD_PID_ENV2_ATTACK, 0.005f), P(ADD_PID_ENV2_DECAY, 2.0f),
+    P(ADD_PID_ENV2_SUSTAIN, 0.0f),
+    P(ADD_PID_ENV1_ATTACK, 0.6f), P(ADD_PID_ENV1_SUSTAIN, 0.85f),
+    P(ADD_PID_ENV1_RELEASE, 1.8f),
+    P(FX_PID_REV_MIX, 0.5f), P(FX_PID_REV_SIZE, 0.85f),
+};
+
+/* stretched and slow: metal sheet rather than a note */
+static const preset_pair_t kAddMetalDrone[] = {
+    P(ADD_PID_INHARM, 0.03f), P(ADD_PID_EVENODD, -0.2f),
+    P(ADD_PID_TILT, -2.0f), P(ADD_PID_BRIGHT, 0.55f),
+    P(ADD_PID_ENV_BRIGHT, 0.25f),
+    P(ADD_PID_FLT_ON, 1), P(ADD_PID_FLT_MODE, 4),
+    P(ADD_PID_FLT_CUTOFF, 1600.0f), P(ADD_PID_FLT_RESO, 0.6f),
+    P(ADD_PID_ENV1_ATTACK, 1.5f), P(ADD_PID_ENV1_SUSTAIN, 1.0f),
+    P(ADD_PID_ENV1_RELEASE, 2.5f),
+    P(ADD_PID_LFO2_RATE, 0.11f), P(ADD_PID_LFO2_BRIGHT, 0.3f),
+    P(FX_PID_REV_MIX, 0.55f), P(FX_PID_REV_SIZE, 0.9f),
+};
+
+/* velocity picks the register: soft is a flute, hard is a reed */
+static const preset_pair_t kAddVelReed[] = {
+    P(ADD_PID_TILT, -4.0f), P(ADD_PID_EVENODD, -0.5f),
+    P(ADD_PID_BRIGHT, 0.3f), P(ADD_PID_ENV_BRIGHT, 0.25f),
+    P(ADD_PID_VEL_BRIGHT, 0.85f),
+    P(ADD_PID_ENV1_ATTACK, 0.04f), P(ADD_PID_ENV1_SUSTAIN, 1.0f),
+    P(ADD_PID_ENV1_RELEASE, 0.18f),
+    MOD(0, SYNTH_MOD_SRC_VEL, ADD_PID_FLT_CUTOFF, 0.4f),
+    P(FX_PID_REV_MIX, 0.32f),
+};
+
+/* wheel walks the whole spectrum open — a hands-on riser */
+static const preset_pair_t kAddWheelSweep[] = {
+    P(ADD_PID_TILT, -3.0f), P(ADD_PID_BRIGHT, 0.15f),
+    P(ADD_PID_ENV_BRIGHT, 0.0f), P(ADD_PID_VEL_BRIGHT, 0.0f),
+    P(ADD_PID_ENV1_ATTACK, 0.05f), P(ADD_PID_ENV1_SUSTAIN, 1.0f),
+    P(ADD_PID_ENV1_RELEASE, 0.6f),
+    MOD(0, SYNTH_MOD_SRC_WHEEL, ADD_PID_BRIGHT, 0.85f),
+    P(FX_PID_REV_MIX, 0.4f), P(FX_PID_DLY_MIX, 0.2f),
+};
+
+/* octave doubling with a bright top: additive celesta-organ hybrid */
+static const preset_pair_t kAddGlassOrgan[] = {
+    P(ADD_P(1), 0.36f), P(ADD_P(2), 0.20f), P(ADD_P(3), 0.0f),
+    P(ADD_P(4), 0.16f), P(ADD_P(5), 0.0f), P(ADD_P(6), 0.0f),
+    P(ADD_P(7), 0.0f), P(ADD_P(8), 0.14f), P(ADD_P(9), 0.0f),
+    P(ADD_P(10), 0.0f), P(ADD_P(11), 0.0f), P(ADD_P(12), 0.0f),
+    P(ADD_P(13), 0.0f), P(ADD_P(14), 0.0f), P(ADD_P(15), 0.0f),
+    P(ADD_P(16), 0.10f),
+    P(ADD_PID_INHARM, 0.0004f), P(ADD_PID_BRIGHT, 0.8f),
+    P(ADD_PID_ENV_BRIGHT, 0.15f),
+    P(ADD_PID_ENV1_ATTACK, 0.006f), P(ADD_PID_ENV1_DECAY, 1.5f),
+    P(ADD_PID_ENV1_SUSTAIN, 0.55f), P(ADD_PID_ENV1_RELEASE, 0.8f),
+    P(FX_PID_CHO_MIX, 0.25f), P(FX_PID_REV_MIX, 0.4f),
+};
+
+/* a wide dual band on a dense spectrum — hollow, vocal-adjacent pad */
+static const preset_pair_t kAddHollowPad[] = {
+    P(ADD_PID_TILT, -2.5f), P(ADD_PID_BRIGHT, 0.78f),
+    P(ADD_PID_ENV_BRIGHT, 0.1f),
+    P(ADD_PID_FLT_ON, 1), P(ADD_PID_FLT_TYPE, 3),
+    P(ADD_PID_FLT_SPREAD, 1.5f), P(ADD_PID_FLT_CUTOFF, 1100.0f),
+    P(ADD_PID_FLT_RESO, 0.45f), P(ADD_PID_FLT_ENV, 1.2f),
+    P(ADD_PID_ENV2_ATTACK, 0.5f), P(ADD_PID_ENV2_DECAY, 2.0f),
+    P(ADD_PID_ENV2_SUSTAIN, 0.5f),
+    P(ADD_PID_ENV1_ATTACK, 0.5f), P(ADD_PID_ENV1_SUSTAIN, 0.9f),
+    P(ADD_PID_ENV1_RELEASE, 1.4f),
+    P(FX_PID_REV_MIX, 0.48f), P(FX_PID_REV_SIZE, 0.8f),
+};
+
+/* one drawbar per octave and a very long tail: additive sub-bass */
+static const preset_pair_t kAddSubDrone[] = {
+    P(ADD_P(1), 0.7f), P(ADD_P(2), 0.2f), P(ADD_P(3), 0.0f),
+    P(ADD_P(4), 0.08f), P(ADD_P(5), 0.0f), P(ADD_P(6), 0.0f),
+    P(ADD_P(7), 0.0f), P(ADD_P(8), 0.0f), P(ADD_P(9), 0.0f),
+    P(ADD_P(10), 0.0f), P(ADD_P(11), 0.0f), P(ADD_P(12), 0.0f),
+    P(ADD_P(13), 0.0f), P(ADD_P(14), 0.0f), P(ADD_P(15), 0.0f),
+    P(ADD_P(16), 0.0f),
+    P(ADD_PID_BRIGHT, 0.4f), P(ADD_PID_ENV_BRIGHT, 0.1f),
+    P(ADD_PID_ENV1_ATTACK, 0.8f), P(ADD_PID_ENV1_SUSTAIN, 1.0f),
+    P(ADD_PID_ENV1_RELEASE, 2.0f),
+    P(ADD_PID_FLT_ON, 1), P(ADD_PID_FLT_TYPE, 1),
+    P(ADD_PID_FLT_CUTOFF, 500.0f), P(ADD_PID_FLT_RESO, 0.15f),
+    P(FX_PID_REV_MIX, 0.35f),
+};
+
+/* ---- fm (bank 2, linear slots 224-335) ------------------------------------- */
 
 /* harder e-piano: more index, hotter tine pair */
 static const preset_pair_t kFmBrightTines[] = {
@@ -622,7 +1481,460 @@ static const preset_pair_t kFmClav[] = {
     P(FM_PID_VEL_INDEX, 0.85f),
 };
 
-/* ---- wavetable (bank 3, slots 240-319) ------------------------------ */
+/* ---- fm, slots 16-47 (S33) ------------------------------------------
+ *
+ * FM had no filter at all until S33, so the ones that switch it on are new
+ * ground for this engine: a lowpass after the operators tames the top
+ * partials that ratio-and-index alone cannot, and the vowel type turns a
+ * two-operator stack into something that speaks. There is no flt.env here —
+ * cutoff moves from keyboard tracking, the LFO, velocity and the matrix. */
+
+/* soft mallet, long bell tail — the mk1 rather than the DX */
+static const preset_pair_t kFmRhodesMk1[] = {
+    P(FM_PID_A_CRATIO, 1.0f), P(FM_PID_A_MRATIO, 1.0f),
+    P(FM_PID_A_INDEX, 1.6f), P(FM_PID_A_LEVEL, 0.8f),
+    P(FM_PID_A_ENV_D, 2.5f), P(FM_PID_A_ENV_S, 0.0f),
+    P(FM_PID_A_ENV_R, 0.5f),
+    P(FM_PID_A_MENV_D, 0.35f), P(FM_PID_A_MENV_S, 0.1f),
+    P(FM_PID_B_CRATIO, 8.0f), P(FM_PID_B_MRATIO, 8.0f),
+    P(FM_PID_B_INDEX, 0.8f), P(FM_PID_B_LEVEL, 0.12f),
+    P(FM_PID_B_ENV_D, 0.18f), P(FM_PID_B_ENV_S, 0.0f),
+    P(FM_PID_VEL_INDEX, 0.75f),
+    P(FX_PID_CHO_MIX, 0.25f), P(FX_PID_REV_MIX, 0.25f),
+};
+
+/* the hard, glassy one: high index on the tine, velocity wide open */
+static const preset_pair_t kFmHardTines[] = {
+    P(FM_PID_A_INDEX, 3.6f), P(FM_PID_A_LEVEL, 0.65f),
+    P(FM_PID_A_ENV_D, 1.6f), P(FM_PID_A_ENV_S, 0.0f),
+    P(FM_PID_A_MENV_D, 0.4f), P(FM_PID_A_MENV_S, 0.05f),
+    P(FM_PID_B_CRATIO, 14.0f), P(FM_PID_B_MRATIO, 14.0f),
+    P(FM_PID_B_INDEX, 1.4f), P(FM_PID_B_LEVEL, 0.3f),
+    P(FM_PID_B_ENV_D, 0.12f), P(FM_PID_B_ENV_S, 0.0f),
+    P(FM_PID_VEL_INDEX, 0.95f),
+    P(FX_PID_REV_MIX, 0.2f),
+};
+
+/* a lowpass after the operators: FM that does not spit at the top */
+static const preset_pair_t kFmSmoothKeys[] = {
+    P(FM_PID_A_INDEX, 3.2f), P(FM_PID_A_ENV_D, 1.8f),
+    P(FM_PID_A_ENV_S, 0.15f),
+    P(FM_PID_B_LEVEL, 0.25f), P(FM_PID_B_INDEX, 1.2f),
+    P(FM_PID_FLT_ON, 1), P(FM_PID_FLT_TYPE, 2),
+    P(FM_PID_FLT_CUTOFF, 2600.0f), P(FM_PID_FLT_RESO, 0.2f),
+    P(FM_PID_FLT_KBD, 0.7f),
+    P(FM_PID_VEL_INDEX, 0.7f),
+    MOD(0, SYNTH_MOD_SRC_VEL, FM_PID_FLT_CUTOFF, 0.5f),
+    P(FX_PID_CHO_MIX, 0.2f), P(FX_PID_REV_MIX, 0.28f),
+};
+
+/* two operators through the vowel filter — FM that speaks */
+static const preset_pair_t kFmVoiceBox[] = {
+    P(FM_PID_A_CRATIO, 1.0f), P(FM_PID_A_MRATIO, 2.0f),
+    P(FM_PID_A_INDEX, 3.0f), P(FM_PID_A_ENV_S, 0.85f),
+    P(FM_PID_A_ENV_D, 0.4f), P(FM_PID_A_ENV_R, 0.2f),
+    P(FM_PID_B_LEVEL, 0.15f),
+    P(FM_PID_FLT_ON, 1), P(FM_PID_FLT_TYPE, 4),
+    P(FM_PID_FLT_VOWEL, 0.25f), P(FM_PID_FLT_RESO, 0.65f),
+    P(FM_PID_FLT_CUTOFF, 1000.0f),
+    P(FM_PID_LFO_RATE, 3.5f),
+    MOD(0, SYNTH_MOD_SRC_LFO1, FM_PID_FLT_VOWEL, 0.45f),
+    MOD(1, SYNTH_MOD_SRC_WHEEL, FM_PID_FLT_VOWEL, 0.5f),
+    P(FX_PID_DLY_MIX, 0.2f), P(FX_PID_REV_MIX, 0.25f),
+};
+
+/* index high, filter driven: the nastiest bass this engine can make */
+static const preset_pair_t kFmMetalBass[] = {
+    P(FM_PID_A_CRATIO, 0.5f), P(FM_PID_A_MRATIO, 1.5f),
+    P(FM_PID_A_INDEX, 5.5f), P(FM_PID_A_FB, 0.3f),
+    P(FM_PID_A_LEVEL, 0.9f),
+    P(FM_PID_A_ENV_D, 0.6f), P(FM_PID_A_ENV_S, 0.55f),
+    P(FM_PID_A_ENV_R, 0.1f),
+    P(FM_PID_A_MENV_D, 0.2f), P(FM_PID_A_MENV_S, 0.35f),
+    P(FM_PID_B_LEVEL, 0.1f),
+    P(FM_PID_FLT_ON, 1), P(FM_PID_FLT_TYPE, 2),
+    P(FM_PID_FLT_CUTOFF, 420.0f), P(FM_PID_FLT_RESO, 0.5f),
+    P(FM_PID_FLT_DRIVE, 0.6f), P(FM_PID_FLT_KBD, 0.3f),
+    P(FM_PID_VEL_INDEX, 0.8f),
+};
+
+/* ratio 1:1 at low index — a clean, round sub with just enough edge */
+static const preset_pair_t kFmSubBass[] = {
+    P(FM_PID_A_CRATIO, 0.5f), P(FM_PID_A_MRATIO, 0.5f),
+    P(FM_PID_A_INDEX, 1.1f), P(FM_PID_A_LEVEL, 1.0f),
+    P(FM_PID_A_ENV_A, 0.003f), P(FM_PID_A_ENV_D, 0.8f),
+    P(FM_PID_A_ENV_S, 0.7f), P(FM_PID_A_ENV_R, 0.08f),
+    P(FM_PID_A_MENV_D, 0.1f), P(FM_PID_A_MENV_S, 0.0f),
+    P(FM_PID_B_LEVEL, 0.0f),
+    P(FM_PID_VEL_INDEX, 0.5f),
+};
+
+/* slap: a very short, very bright B pair on top of a plain A */
+static const preset_pair_t kFmSlapBass[] = {
+    P(FM_PID_A_CRATIO, 0.5f), P(FM_PID_A_MRATIO, 1.0f),
+    P(FM_PID_A_INDEX, 2.2f), P(FM_PID_A_LEVEL, 0.85f),
+    P(FM_PID_A_ENV_D, 0.35f), P(FM_PID_A_ENV_S, 0.4f),
+    P(FM_PID_A_ENV_R, 0.08f),
+    P(FM_PID_A_MENV_D, 0.09f), P(FM_PID_A_MENV_S, 0.1f),
+    P(FM_PID_B_CRATIO, 6.0f), P(FM_PID_B_MRATIO, 7.0f),
+    P(FM_PID_B_INDEX, 3.5f), P(FM_PID_B_LEVEL, 0.22f),
+    P(FM_PID_B_ENV_D, 0.06f), P(FM_PID_B_ENV_S, 0.0f),
+    P(FM_PID_B_ENV_R, 0.05f),
+    P(FM_PID_VEL_INDEX, 0.9f),
+};
+
+/* feedback near the top of its range: FM noise with a pitch centre */
+static const preset_pair_t kFmBuzzLead[] = {
+    P(FM_PID_A_CRATIO, 1.0f), P(FM_PID_A_MRATIO, 1.0f),
+    P(FM_PID_A_INDEX, 4.0f), P(FM_PID_A_FB, 0.72f),
+    P(FM_PID_A_LEVEL, 0.8f), P(FM_PID_A_ENV_S, 0.85f),
+    P(FM_PID_A_ENV_D, 0.3f), P(FM_PID_A_ENV_R, 0.12f),
+    P(FM_PID_B_LEVEL, 0.1f),
+    P(FM_PID_FLT_ON, 1), P(FM_PID_FLT_TYPE, 1),
+    P(FM_PID_FLT_CUTOFF, 2200.0f), P(FM_PID_FLT_RESO, 0.35f),
+    P(FM_PID_FLT_KBD, 0.8f),
+    P(SYNTH_PID_COMMON_GLIDE, 0.05f),
+    P(FX_PID_DLY_MIX, 0.25f), P(FX_PID_DLY_FB, 0.4f),
+};
+
+/* singing lead: modest index, full sustain, vibrato on the wheel */
+static const preset_pair_t kFmSingLead[] = {
+    P(FM_PID_A_CRATIO, 1.0f), P(FM_PID_A_MRATIO, 2.0f),
+    P(FM_PID_A_INDEX, 2.4f), P(FM_PID_A_LEVEL, 0.85f),
+    P(FM_PID_A_ENV_A, 0.02f), P(FM_PID_A_ENV_D, 0.4f),
+    P(FM_PID_A_ENV_S, 0.9f), P(FM_PID_A_ENV_R, 0.2f),
+    P(FM_PID_A_MENV_S, 0.6f),
+    P(FM_PID_B_LEVEL, 0.12f),
+    P(FM_PID_LFO_RATE, 5.0f),
+    MOD(0, SYNTH_MOD_SRC_WHEEL, FM_PID_LFO_PITCH, 0.45f),
+    P(SYNTH_PID_COMMON_GLIDE, 0.05f),
+    P(FX_PID_REV_MIX, 0.3f),
+};
+
+/* plucked string: ratio 1:1, index falls fast, nothing sustains */
+static const preset_pair_t kFmKoto[] = {
+    P(FM_PID_A_CRATIO, 1.0f), P(FM_PID_A_MRATIO, 1.0f),
+    P(FM_PID_A_INDEX, 4.2f), P(FM_PID_A_LEVEL, 0.85f),
+    P(FM_PID_A_ENV_A, 0.001f), P(FM_PID_A_ENV_D, 1.1f),
+    P(FM_PID_A_ENV_S, 0.0f), P(FM_PID_A_ENV_R, 0.3f),
+    P(FM_PID_A_MENV_A, 0.001f), P(FM_PID_A_MENV_D, 0.08f),
+    P(FM_PID_A_MENV_S, 0.0f),
+    P(FM_PID_B_LEVEL, 0.08f),
+    P(FM_PID_VEL_INDEX, 0.85f),
+    P(FX_PID_REV_MIX, 0.3f),
+};
+
+/* harp: same shape, gentler index, longer bloom */
+static const preset_pair_t kFmHarp[] = {
+    P(FM_PID_A_CRATIO, 1.0f), P(FM_PID_A_MRATIO, 2.0f),
+    P(FM_PID_A_INDEX, 2.0f), P(FM_PID_A_LEVEL, 0.8f),
+    P(FM_PID_A_ENV_A, 0.001f), P(FM_PID_A_ENV_D, 2.0f),
+    P(FM_PID_A_ENV_S, 0.0f), P(FM_PID_A_ENV_R, 0.6f),
+    P(FM_PID_A_MENV_D, 0.25f), P(FM_PID_A_MENV_S, 0.0f),
+    P(FM_PID_B_CRATIO, 3.0f), P(FM_PID_B_MRATIO, 3.0f),
+    P(FM_PID_B_INDEX, 1.0f), P(FM_PID_B_LEVEL, 0.15f),
+    P(FM_PID_B_ENV_D, 0.6f), P(FM_PID_B_ENV_S, 0.0f),
+    P(FM_PID_VEL_INDEX, 0.7f),
+    P(FX_PID_REV_MIX, 0.4f), P(FX_PID_REV_SIZE, 0.7f),
+};
+
+/* wooden mallet: ratio 1:4, very short index envelope */
+static const preset_pair_t kFmMarimba[] = {
+    P(FM_PID_A_CRATIO, 1.0f), P(FM_PID_A_MRATIO, 4.0f),
+    P(FM_PID_A_INDEX, 3.0f), P(FM_PID_A_LEVEL, 0.9f),
+    P(FM_PID_A_ENV_A, 0.001f), P(FM_PID_A_ENV_D, 0.5f),
+    P(FM_PID_A_ENV_S, 0.0f), P(FM_PID_A_ENV_R, 0.2f),
+    P(FM_PID_A_MENV_A, 0.001f), P(FM_PID_A_MENV_D, 0.05f),
+    P(FM_PID_A_MENV_S, 0.0f),
+    P(FM_PID_B_LEVEL, 0.06f),
+    P(FM_PID_VEL_INDEX, 0.8f),
+    P(FX_PID_REV_MIX, 0.22f),
+};
+
+/* metal bar, soft mallet, slow tremolo */
+static const preset_pair_t kFmVibes[] = {
+    P(FM_PID_A_CRATIO, 1.0f), P(FM_PID_A_MRATIO, 4.0f),
+    P(FM_PID_A_INDEX, 1.4f), P(FM_PID_A_LEVEL, 0.85f),
+    P(FM_PID_A_ENV_A, 0.003f), P(FM_PID_A_ENV_D, 2.5f),
+    P(FM_PID_A_ENV_S, 0.0f), P(FM_PID_A_ENV_R, 1.2f),
+    P(FM_PID_A_MENV_D, 0.5f), P(FM_PID_A_MENV_S, 0.0f),
+    P(FM_PID_B_CRATIO, 9.0f), P(FM_PID_B_MRATIO, 9.0f),
+    P(FM_PID_B_INDEX, 0.6f), P(FM_PID_B_LEVEL, 0.1f),
+    P(FM_PID_B_ENV_D, 0.3f), P(FM_PID_B_ENV_S, 0.0f),
+    P(FM_PID_LFO_RATE, 4.5f),
+    P(FX_PID_REV_MIX, 0.35f),
+};
+
+/* glockenspiel: high ratio, tiny index, instant attack */
+static const preset_pair_t kFmGlocken[] = {
+    P(FM_PID_A_CRATIO, 1.0f), P(FM_PID_A_MRATIO, 7.0f),
+    P(FM_PID_A_INDEX, 1.2f), P(FM_PID_A_LEVEL, 0.8f),
+    P(FM_PID_A_ENV_A, 0.001f), P(FM_PID_A_ENV_D, 1.2f),
+    P(FM_PID_A_ENV_S, 0.0f), P(FM_PID_A_ENV_R, 0.5f),
+    P(FM_PID_A_MENV_D, 0.15f), P(FM_PID_A_MENV_S, 0.0f),
+    P(FM_PID_B_CRATIO, 11.0f), P(FM_PID_B_MRATIO, 11.0f),
+    P(FM_PID_B_INDEX, 0.7f), P(FM_PID_B_LEVEL, 0.18f),
+    P(FM_PID_B_ENV_D, 0.25f), P(FM_PID_B_ENV_S, 0.0f),
+    P(FM_PID_VEL_INDEX, 0.85f),
+    P(FX_PID_REV_MIX, 0.42f),
+};
+
+/* inharmonic ratio and a long tail: a struck church bell */
+static const preset_pair_t kFmChurchBell[] = {
+    P(FM_PID_A_CRATIO, 1.0f), P(FM_PID_A_MRATIO, 3.5f),
+    P(FM_PID_A_INDEX, 5.0f), P(FM_PID_A_LEVEL, 0.8f),
+    P(FM_PID_A_ENV_A, 0.002f), P(FM_PID_A_ENV_D, 5.0f),
+    P(FM_PID_A_ENV_S, 0.0f), P(FM_PID_A_ENV_R, 3.0f),
+    P(FM_PID_A_MENV_A, 0.001f), P(FM_PID_A_MENV_D, 1.5f),
+    P(FM_PID_A_MENV_S, 0.05f),
+    P(FM_PID_B_CRATIO, 2.0f), P(FM_PID_B_MRATIO, 5.0f),
+    P(FM_PID_B_INDEX, 2.5f), P(FM_PID_B_LEVEL, 0.2f),
+    P(FM_PID_B_ENV_D, 2.0f), P(FM_PID_B_ENV_S, 0.0f),
+    P(FM_PID_B_DETUNE, 9.0f),
+    P(FX_PID_REV_MIX, 0.5f), P(FX_PID_REV_SIZE, 0.9f),
+};
+
+/* gamelan: badly-tuned metal, on purpose */
+static const preset_pair_t kFmGamelan[] = {
+    P(FM_PID_A_CRATIO, 1.0f), P(FM_PID_A_MRATIO, 2.5f),
+    P(FM_PID_A_INDEX, 4.5f), P(FM_PID_A_LEVEL, 0.85f),
+    P(FM_PID_A_ENV_A, 0.001f), P(FM_PID_A_ENV_D, 1.8f),
+    P(FM_PID_A_ENV_S, 0.0f), P(FM_PID_A_ENV_R, 0.8f),
+    P(FM_PID_A_MENV_D, 0.3f), P(FM_PID_A_MENV_S, 0.1f),
+    P(FM_PID_B_CRATIO, 3.5f), P(FM_PID_B_MRATIO, 4.5f),
+    P(FM_PID_B_INDEX, 2.0f), P(FM_PID_B_LEVEL, 0.25f),
+    P(FM_PID_B_ENV_D, 0.9f), P(FM_PID_B_ENV_S, 0.0f),
+    P(FM_PID_B_DETUNE, 22.0f),
+    P(FM_PID_VEL_INDEX, 0.8f),
+    P(FX_PID_REV_MIX, 0.38f),
+};
+
+/* additive-ish FM organ: index near zero, both pairs held flat */
+static const preset_pair_t kFmOrgan[] = {
+    P(FM_PID_A_CRATIO, 1.0f), P(FM_PID_A_MRATIO, 2.0f),
+    P(FM_PID_A_INDEX, 0.9f), P(FM_PID_A_LEVEL, 0.7f),
+    P(FM_PID_A_ENV_A, 0.004f), P(FM_PID_A_ENV_D, 0.05f),
+    P(FM_PID_A_ENV_S, 1.0f), P(FM_PID_A_ENV_R, 0.05f),
+    P(FM_PID_A_MENV_S, 1.0f), P(FM_PID_A_MENV_D, 0.05f),
+    P(FM_PID_B_CRATIO, 2.0f), P(FM_PID_B_MRATIO, 2.0f),
+    P(FM_PID_B_INDEX, 0.6f), P(FM_PID_B_LEVEL, 0.3f),
+    P(FM_PID_B_ENV_S, 1.0f), P(FM_PID_B_ENV_D, 0.05f),
+    P(FM_PID_B_ENV_R, 0.05f), P(FM_PID_B_MENV_S, 1.0f),
+    P(FM_PID_VEL_INDEX, 0.2f),
+    P(FX_PID_CHO_MIX, 0.35f), P(FX_PID_REV_MIX, 0.2f),
+};
+
+/* slow swell, index rising with it — a brass section leaning in */
+static const preset_pair_t kFmBrassSwell[] = {
+    P(FM_PID_A_CRATIO, 1.0f), P(FM_PID_A_MRATIO, 1.0f),
+    P(FM_PID_A_INDEX, 3.4f), P(FM_PID_A_LEVEL, 0.85f),
+    P(FM_PID_A_ENV_A, 0.25f), P(FM_PID_A_ENV_D, 0.6f),
+    P(FM_PID_A_ENV_S, 0.85f), P(FM_PID_A_ENV_R, 0.3f),
+    P(FM_PID_A_MENV_A, 0.35f), P(FM_PID_A_MENV_D, 1.0f),
+    P(FM_PID_A_MENV_S, 0.8f),
+    P(FM_PID_B_LEVEL, 0.15f), P(FM_PID_B_INDEX, 1.5f),
+    P(FM_PID_B_ENV_A, 0.2f), P(FM_PID_B_ENV_S, 0.6f),
+    P(FM_PID_VEL_INDEX, 0.5f),
+    P(FX_PID_REV_MIX, 0.35f),
+};
+
+/* single horn: darker, filter rolling the top off */
+static const preset_pair_t kFmHorn[] = {
+    P(FM_PID_A_CRATIO, 1.0f), P(FM_PID_A_MRATIO, 1.0f),
+    P(FM_PID_A_INDEX, 2.6f), P(FM_PID_A_LEVEL, 0.9f),
+    P(FM_PID_A_ENV_A, 0.08f), P(FM_PID_A_ENV_D, 0.5f),
+    P(FM_PID_A_ENV_S, 0.8f), P(FM_PID_A_ENV_R, 0.25f),
+    P(FM_PID_A_MENV_A, 0.1f), P(FM_PID_A_MENV_S, 0.55f),
+    P(FM_PID_B_LEVEL, 0.0f),
+    P(FM_PID_FLT_ON, 1), P(FM_PID_FLT_CUTOFF, 1800.0f),
+    P(FM_PID_FLT_RESO, 0.15f), P(FM_PID_FLT_KBD, 0.6f),
+    P(FM_PID_VEL_INDEX, 0.6f),
+    P(FX_PID_REV_MIX, 0.4f), P(FX_PID_REV_SIZE, 0.7f),
+};
+
+/* odd-harmonic ratio: a clarinet's hollow register */
+static const preset_pair_t kFmClarinet[] = {
+    P(FM_PID_A_CRATIO, 1.0f), P(FM_PID_A_MRATIO, 3.0f),
+    P(FM_PID_A_INDEX, 1.8f), P(FM_PID_A_LEVEL, 0.9f),
+    P(FM_PID_A_ENV_A, 0.05f), P(FM_PID_A_ENV_D, 0.3f),
+    P(FM_PID_A_ENV_S, 0.95f), P(FM_PID_A_ENV_R, 0.12f),
+    P(FM_PID_A_MENV_S, 0.7f), P(FM_PID_A_MENV_D, 0.3f),
+    P(FM_PID_B_LEVEL, 0.0f),
+    P(FM_PID_LFO_RATE, 4.8f),
+    MOD(0, SYNTH_MOD_SRC_WHEEL, FM_PID_LFO_PITCH, 0.35f),
+    P(FX_PID_REV_MIX, 0.32f),
+};
+
+/* reedy double: high index at low level, bandpassed */
+static const preset_pair_t kFmOboe[] = {
+    P(FM_PID_A_CRATIO, 1.0f), P(FM_PID_A_MRATIO, 2.0f),
+    P(FM_PID_A_INDEX, 4.0f), P(FM_PID_A_LEVEL, 0.85f),
+    P(FM_PID_A_ENV_A, 0.04f), P(FM_PID_A_ENV_S, 0.9f),
+    P(FM_PID_A_ENV_D, 0.25f), P(FM_PID_A_ENV_R, 0.15f),
+    P(FM_PID_A_MENV_S, 0.75f),
+    P(FM_PID_B_LEVEL, 0.0f),
+    P(FM_PID_FLT_ON, 1), P(FM_PID_FLT_TYPE, 3),
+    P(FM_PID_FLT_SPREAD, 2.0f), P(FM_PID_FLT_CUTOFF, 1500.0f),
+    P(FM_PID_FLT_RESO, 0.35f), P(FM_PID_FLT_KBD, 0.5f),
+    P(FX_PID_REV_MIX, 0.35f),
+};
+
+/* pair B detuned hard, both sustaining: a wide, slightly sour pad */
+static const preset_pair_t kFmDetunePad[] = {
+    P(FM_PID_A_CRATIO, 1.0f), P(FM_PID_A_MRATIO, 1.0f),
+    P(FM_PID_A_INDEX, 1.8f), P(FM_PID_A_LEVEL, 0.55f),
+    P(FM_PID_A_ENV_A, 0.6f), P(FM_PID_A_ENV_S, 0.9f),
+    P(FM_PID_A_ENV_D, 1.0f), P(FM_PID_A_ENV_R, 1.2f),
+    P(FM_PID_A_MENV_S, 0.6f), P(FM_PID_A_MENV_A, 0.4f),
+    P(FM_PID_B_CRATIO, 1.0f), P(FM_PID_B_MRATIO, 2.0f),
+    P(FM_PID_B_INDEX, 1.4f), P(FM_PID_B_LEVEL, 0.45f),
+    P(FM_PID_B_ENV_A, 0.8f), P(FM_PID_B_ENV_S, 0.85f),
+    P(FM_PID_B_ENV_R, 1.4f), P(FM_PID_B_MENV_S, 0.5f),
+    P(FM_PID_B_DETUNE, 14.0f),
+    P(FX_PID_CHO_MIX, 0.3f), P(FX_PID_REV_MIX, 0.45f),
+};
+
+/* 24 dB lowpass over a soft FM stack: a pad that stays under the mix */
+static const preset_pair_t kFmSoftPad[] = {
+    P(FM_PID_A_INDEX, 1.5f), P(FM_PID_A_LEVEL, 0.6f),
+    P(FM_PID_A_ENV_A, 0.9f), P(FM_PID_A_ENV_S, 0.9f),
+    P(FM_PID_A_ENV_D, 1.5f), P(FM_PID_A_ENV_R, 1.6f),
+    P(FM_PID_A_MENV_A, 0.6f), P(FM_PID_A_MENV_S, 0.5f),
+    P(FM_PID_B_CRATIO, 2.0f), P(FM_PID_B_MRATIO, 3.0f),
+    P(FM_PID_B_INDEX, 1.0f), P(FM_PID_B_LEVEL, 0.3f),
+    P(FM_PID_B_ENV_A, 1.2f), P(FM_PID_B_ENV_S, 0.8f),
+    P(FM_PID_B_ENV_R, 1.8f),
+    P(FM_PID_FLT_ON, 1), P(FM_PID_FLT_TYPE, 1),
+    P(FM_PID_FLT_CUTOFF, 1600.0f), P(FM_PID_FLT_RESO, 0.25f),
+    P(FX_PID_REV_MIX, 0.5f), P(FX_PID_REV_SIZE, 0.8f),
+};
+
+/* an allpass on FM: phase motion with the spectrum left alone */
+static const preset_pair_t kFmPhasePad[] = {
+    P(FM_PID_A_INDEX, 2.2f), P(FM_PID_A_ENV_A, 0.5f),
+    P(FM_PID_A_ENV_S, 0.9f), P(FM_PID_A_ENV_R, 1.2f),
+    P(FM_PID_A_MENV_S, 0.55f),
+    P(FM_PID_B_LEVEL, 0.2f), P(FM_PID_B_ENV_S, 0.7f),
+    P(FM_PID_B_ENV_A, 0.6f), P(FM_PID_B_ENV_R, 1.2f),
+    P(FM_PID_FLT_ON, 1), P(FM_PID_FLT_MODE, 5),
+    P(FM_PID_FLT_CUTOFF, 1200.0f), P(FM_PID_FLT_RESO, 0.7f),
+    P(FM_PID_LFO_RATE, 0.5f),
+    MOD(0, SYNTH_MOD_SRC_LFO1, FM_PID_FLT_CUTOFF, 0.4f),
+    P(FX_PID_REV_MIX, 0.42f),
+};
+
+/* modulator ratio far off the carrier: metallic, unpitched-ish stab */
+static const preset_pair_t kFmClangStab[] = {
+    P(FM_PID_A_CRATIO, 1.0f), P(FM_PID_A_MRATIO, 11.0f),
+    P(FM_PID_A_INDEX, 6.0f), P(FM_PID_A_LEVEL, 0.8f),
+    P(FM_PID_A_ENV_A, 0.001f), P(FM_PID_A_ENV_D, 0.35f),
+    P(FM_PID_A_ENV_S, 0.0f), P(FM_PID_A_ENV_R, 0.2f),
+    P(FM_PID_A_MENV_D, 0.1f), P(FM_PID_A_MENV_S, 0.0f),
+    P(FM_PID_B_CRATIO, 5.0f), P(FM_PID_B_MRATIO, 13.0f),
+    P(FM_PID_B_INDEX, 3.0f), P(FM_PID_B_LEVEL, 0.25f),
+    P(FM_PID_B_ENV_D, 0.15f), P(FM_PID_B_ENV_S, 0.0f),
+    P(FM_PID_VEL_INDEX, 0.9f),
+    P(FX_PID_REV_MIX, 0.3f),
+};
+
+/* low drum with a skin: index collapses fast, the filter takes the rest */
+static const preset_pair_t kFmTimpani[] = {
+    P(FM_PID_A_CRATIO, 0.5f), P(FM_PID_A_MRATIO, 1.5f),
+    P(FM_PID_A_INDEX, 4.0f), P(FM_PID_A_LEVEL, 0.95f),
+    P(FM_PID_A_ENV_A, 0.001f), P(FM_PID_A_ENV_D, 1.6f),
+    P(FM_PID_A_ENV_S, 0.0f), P(FM_PID_A_ENV_R, 0.8f),
+    P(FM_PID_A_MENV_A, 0.001f), P(FM_PID_A_MENV_D, 0.07f),
+    P(FM_PID_A_MENV_S, 0.0f),
+    P(FM_PID_B_LEVEL, 0.08f), P(FM_PID_B_ENV_D, 0.1f),
+    P(FM_PID_FLT_ON, 1), P(FM_PID_FLT_TYPE, 2),
+    P(FM_PID_FLT_CUTOFF, 500.0f), P(FM_PID_FLT_RESO, 0.3f),
+    P(FM_PID_FLT_KBD, 0.4f),
+    P(FM_PID_VEL_INDEX, 0.9f),
+    P(FX_PID_REV_MIX, 0.35f), P(FX_PID_REV_SIZE, 0.75f),
+};
+
+/* short and woody: the block, not the drum */
+static const preset_pair_t kFmWoodBlock[] = {
+    P(FM_PID_A_CRATIO, 1.0f), P(FM_PID_A_MRATIO, 6.0f),
+    P(FM_PID_A_INDEX, 3.5f), P(FM_PID_A_LEVEL, 0.9f),
+    P(FM_PID_A_ENV_A, 0.001f), P(FM_PID_A_ENV_D, 0.12f),
+    P(FM_PID_A_ENV_S, 0.0f), P(FM_PID_A_ENV_R, 0.08f),
+    P(FM_PID_A_MENV_A, 0.001f), P(FM_PID_A_MENV_D, 0.03f),
+    P(FM_PID_A_MENV_S, 0.0f),
+    P(FM_PID_B_LEVEL, 0.1f), P(FM_PID_B_ENV_D, 0.04f),
+    P(FM_PID_VEL_INDEX, 0.85f),
+};
+
+/* full feedback, no pitch centre left — an FM noise burst */
+static const preset_pair_t kFmNoiseBurst[] = {
+    P(FM_PID_A_CRATIO, 1.0f), P(FM_PID_A_MRATIO, 9.0f),
+    P(FM_PID_A_INDEX, 8.0f), P(FM_PID_A_FB, 0.95f),
+    P(FM_PID_A_LEVEL, 0.75f),
+    P(FM_PID_A_ENV_A, 0.001f), P(FM_PID_A_ENV_D, 0.25f),
+    P(FM_PID_A_ENV_S, 0.0f), P(FM_PID_A_ENV_R, 0.15f),
+    P(FM_PID_A_MENV_D, 0.12f), P(FM_PID_A_MENV_S, 0.0f),
+    P(FM_PID_B_LEVEL, 0.0f),
+    P(FM_PID_FLT_ON, 1), P(FM_PID_FLT_MODE, 6),
+    P(FM_PID_FLT_CUTOFF, 3000.0f), P(FM_PID_FLT_RESO, 0.4f),
+    P(FM_PID_FLT_KBD, 0.0f),
+    P(FX_PID_REV_MIX, 0.3f),
+};
+
+/* pitch dropping away under a held note — the classic drop effect */
+static const preset_pair_t kFmDropFx[] = {
+    P(FM_PID_A_CRATIO, 1.0f), P(FM_PID_A_MRATIO, 1.5f),
+    P(FM_PID_A_INDEX, 5.0f), P(FM_PID_A_LEVEL, 0.85f),
+    P(FM_PID_A_ENV_A, 0.002f), P(FM_PID_A_ENV_D, 3.0f),
+    P(FM_PID_A_ENV_S, 0.0f), P(FM_PID_A_ENV_R, 1.0f),
+    P(FM_PID_A_MENV_D, 1.2f), P(FM_PID_A_MENV_S, 0.0f),
+    P(FM_PID_B_LEVEL, 0.15f), P(FM_PID_B_ENV_D, 1.5f),
+    P(FM_PID_LFO_RATE, 0.15f), P(FM_PID_LFO_WAVE, 2),
+    P(FM_PID_LFO_PITCH, 2.0f),
+    P(FX_PID_DLY_MIX, 0.3f), P(FX_PID_REV_MIX, 0.4f),
+};
+
+/* fast square LFO on pitch: an alarm you can play chords with */
+static const preset_pair_t kFmSiren[] = {
+    P(FM_PID_A_INDEX, 3.0f), P(FM_PID_A_LEVEL, 0.8f),
+    P(FM_PID_A_ENV_S, 0.9f), P(FM_PID_A_ENV_R, 0.1f),
+    P(FM_PID_A_MENV_S, 0.7f),
+    P(FM_PID_B_LEVEL, 0.15f),
+    P(FM_PID_LFO_RATE, 7.5f), P(FM_PID_LFO_WAVE, 3),
+    P(FM_PID_LFO_PITCH, 1.2f),
+    P(FX_PID_DLY_MIX, 0.25f), P(FX_PID_REV_MIX, 0.25f),
+};
+
+/* the ladder on FM: a plucked, resonant, distinctly analogue result */
+static const preset_pair_t kFmLadderPluck[] = {
+    P(FM_PID_A_CRATIO, 1.0f), P(FM_PID_A_MRATIO, 2.0f),
+    P(FM_PID_A_INDEX, 3.5f), P(FM_PID_A_LEVEL, 0.9f),
+    P(FM_PID_A_ENV_A, 0.001f), P(FM_PID_A_ENV_D, 0.8f),
+    P(FM_PID_A_ENV_S, 0.0f), P(FM_PID_A_ENV_R, 0.25f),
+    P(FM_PID_A_MENV_D, 0.15f), P(FM_PID_A_MENV_S, 0.0f),
+    P(FM_PID_B_LEVEL, 0.1f),
+    P(FM_PID_FLT_ON, 1), P(FM_PID_FLT_TYPE, 2),
+    P(FM_PID_FLT_CUTOFF, 1200.0f), P(FM_PID_FLT_RESO, 0.65f),
+    P(FM_PID_FLT_DRIVE, 0.3f), P(FM_PID_FLT_KBD, 0.7f),
+    MOD(0, SYNTH_MOD_SRC_VEL, FM_PID_FLT_CUTOFF, 0.55f),
+    P(FX_PID_DLY_MIX, 0.2f), P(FX_PID_REV_MIX, 0.25f),
+};
+
+/* two pairs an octave apart, both short: an FM mallet stack */
+static const preset_pair_t kFmOctaveMallet[] = {
+    P(FM_PID_A_CRATIO, 1.0f), P(FM_PID_A_MRATIO, 3.0f),
+    P(FM_PID_A_INDEX, 2.6f), P(FM_PID_A_LEVEL, 0.6f),
+    P(FM_PID_A_ENV_A, 0.001f), P(FM_PID_A_ENV_D, 0.9f),
+    P(FM_PID_A_ENV_S, 0.0f), P(FM_PID_A_ENV_R, 0.35f),
+    P(FM_PID_A_MENV_D, 0.1f), P(FM_PID_A_MENV_S, 0.0f),
+    P(FM_PID_B_CRATIO, 2.0f), P(FM_PID_B_MRATIO, 6.0f),
+    P(FM_PID_B_INDEX, 1.8f), P(FM_PID_B_LEVEL, 0.35f),
+    P(FM_PID_B_ENV_D, 0.5f), P(FM_PID_B_ENV_S, 0.0f),
+    P(FM_PID_B_ENV_R, 0.25f), P(FM_PID_B_DETUNE, 6.0f),
+    P(FM_PID_VEL_INDEX, 0.8f),
+    P(FX_PID_REV_MIX, 0.35f),
+};
+
+/* ---- wavetable (bank 3, linear slots 336-447) ------------------------------ */
 
 /* sync table swept hard by the env, wheel drags the position */
 static const preset_pair_t kWtSyncLead[] = {
@@ -794,6 +2106,442 @@ static const preset_pair_t kWtGlassyKeys[] = {
     P(FX_PID_CHO_MIX, 0.3f), P(FX_PID_REV_MIX, 0.35f),
 };
 
+/* ---- wavetable, slots 16-47 (S33) -----------------------------------
+ *
+ * Table sets: 0 basic, 1 sync, 2 vocal, 3 fm. The vocal set under the S33
+ * vowel filter is the pairing worth knowing about — a formant spectrum
+ * morphing inside a formant filter, two things moving at once — and several
+ * of these are built on it. */
+
+/* the vocal table inside the vowel filter, both morphing together */
+static const preset_pair_t kWtDoubleVowel[] = {
+    P(WT_PID_OSC1_TABLE, 2), P(WT_PID_OSC1_POS, 0.1f),
+    P(WT_PID_OSC2_TABLE, 2), P(WT_PID_OSC2_POS, 0.5f),
+    P(WT_PID_OSC2_FINE, -8.0f),
+    P(WT_PID_MIX_OSC1, 0.55f), P(WT_PID_MIX_OSC2, 0.45f),
+    P(WT_PID_ENV_POS, 0.4f),
+    P(WT_PID_FLT_TYPE, 4), P(WT_PID_FLT_VOWEL, 0.0f),
+    P(WT_PID_FLT_CUTOFF, 1000.0f), P(WT_PID_FLT_RESO, 0.55f),
+    P(WT_PID_ENV1_ATTACK, 0.4f), P(WT_PID_ENV1_SUSTAIN, 0.9f),
+    P(WT_PID_ENV1_RELEASE, 1.2f),
+    MOD(0, SYNTH_MOD_SRC_ENV2, WT_PID_FLT_VOWEL, 0.5f),
+    MOD(1, SYNTH_MOD_SRC_WHEEL, WT_PID_FLT_VOWEL, 0.5f),
+    P(FX_PID_REV_MIX, 0.45f), P(FX_PID_REV_SIZE, 0.75f),
+};
+
+/* LFO on the morph and a short envelope: it says something every note */
+static const preset_pair_t kWtRobotVoice[] = {
+    P(WT_PID_OSC1_TABLE, 2), P(WT_PID_OSC1_POS, 0.3f),
+    P(WT_PID_MIX_OSC1, 0.9f), P(WT_PID_ENV_POS, 0.5f),
+    P(WT_PID_FLT_TYPE, 4), P(WT_PID_FLT_VOWEL, 0.2f),
+    P(WT_PID_FLT_CUTOFF, 1100.0f), P(WT_PID_FLT_RESO, 0.75f),
+    P(WT_PID_FLT_DRIVE, 0.3f),
+    P(WT_PID_ENV1_ATTACK, 0.005f), P(WT_PID_ENV1_SUSTAIN, 0.85f),
+    P(WT_PID_ENV1_RELEASE, 0.12f),
+    P(WT_PID_LFO2_RATE, 4.5f), P(WT_PID_LFO2_WAVE, 4),
+    MOD(0, SYNTH_MOD_SRC_LFO2, WT_PID_FLT_VOWEL, 0.6f),
+    P(FX_PID_DLY_MIX, 0.22f),
+};
+
+/* formant shift on the cutoff, morph held: a vocal tract changing size */
+static const preset_pair_t kWtFormantSweep[] = {
+    P(WT_PID_OSC1_TABLE, 2), P(WT_PID_OSC1_POS, 0.6f),
+    P(WT_PID_MIX_OSC1, 0.85f),
+    P(WT_PID_FLT_TYPE, 4), P(WT_PID_FLT_VOWEL, 0.45f),
+    P(WT_PID_FLT_CUTOFF, 700.0f), P(WT_PID_FLT_RESO, 0.6f),
+    P(WT_PID_FLT_ENV, 2.0f),
+    P(WT_PID_ENV2_ATTACK, 0.3f), P(WT_PID_ENV2_DECAY, 1.8f),
+    P(WT_PID_ENV2_SUSTAIN, 0.4f),
+    P(WT_PID_ENV1_ATTACK, 0.25f), P(WT_PID_ENV1_SUSTAIN, 0.9f),
+    P(WT_PID_ENV1_RELEASE, 1.0f),
+    P(FX_PID_REV_MIX, 0.4f),
+};
+
+/* sync table with the ladder behind it — the scream has a floor now */
+static const preset_pair_t kWtSyncScream[] = {
+    P(WT_PID_OSC1_TABLE, 1), P(WT_PID_OSC1_POS, 0.2f),
+    P(WT_PID_MIX_OSC1, 0.9f), P(WT_PID_ENV_POS, 0.75f),
+    P(WT_PID_FLT_TYPE, 2), P(WT_PID_FLT_CUTOFF, 1400.0f),
+    P(WT_PID_FLT_RESO, 0.6f), P(WT_PID_FLT_DRIVE, 0.45f),
+    P(WT_PID_FLT_KBD, 0.8f),
+    P(WT_PID_ENV2_ATTACK, 0.01f), P(WT_PID_ENV2_DECAY, 0.7f),
+    P(WT_PID_ENV2_SUSTAIN, 0.3f),
+    P(WT_PID_ENV1_SUSTAIN, 0.9f), P(WT_PID_ENV1_RELEASE, 0.15f),
+    P(SYNTH_PID_COMMON_GLIDE, 0.04f),
+    P(FX_PID_DLY_MIX, 0.25f), P(FX_PID_DLY_FB, 0.35f),
+};
+
+/* hard sync in the bass register, filter tight */
+static const preset_pair_t kWtSyncBass[] = {
+    P(WT_PID_OSC1_TABLE, 1), P(WT_PID_OSC1_POS, 0.15f),
+    P(WT_PID_MIX_OSC1, 0.95f), P(WT_PID_ENV_POS, 0.45f),
+    P(WT_PID_FLT_TYPE, 2), P(WT_PID_FLT_CUTOFF, 380.0f),
+    P(WT_PID_FLT_RESO, 0.45f), P(WT_PID_FLT_ENV, 2.2f),
+    P(WT_PID_FLT_KBD, 0.3f), P(WT_PID_FLT_DRIVE, 0.3f),
+    P(WT_PID_ENV2_DECAY, 0.18f), P(WT_PID_ENV2_SUSTAIN, 0.0f),
+    P(WT_PID_ENV1_DECAY, 0.4f), P(WT_PID_ENV1_SUSTAIN, 0.5f),
+    P(WT_PID_ENV1_RELEASE, 0.1f),
+};
+
+/* the fm table run clean and bright: digital, glassy, no filter at all */
+static const preset_pair_t kWtDigitalBass[] = {
+    P(WT_PID_OSC1_TABLE, 3), P(WT_PID_OSC1_POS, 0.25f),
+    P(WT_PID_OSC2_TABLE, 0), P(WT_PID_OSC2_SEMI, -12),
+    P(WT_PID_OSC2_FINE, 0.0f),
+    P(WT_PID_MIX_OSC1, 0.6f), P(WT_PID_MIX_OSC2, 0.45f),
+    P(WT_PID_ENV_POS, 0.3f), P(WT_PID_FLT_ON, 0),
+    P(WT_PID_ENV1_ATTACK, 0.002f), P(WT_PID_ENV1_DECAY, 0.5f),
+    P(WT_PID_ENV1_SUSTAIN, 0.55f), P(WT_PID_ENV1_RELEASE, 0.1f),
+};
+
+/* 24 dB slope on a morphing spectrum — the pad the engine deserved */
+static const preset_pair_t kWtWidePad[] = {
+    P(WT_PID_OSC1_TABLE, 0), P(WT_PID_OSC1_POS, 0.2f),
+    P(WT_PID_OSC2_TABLE, 0), P(WT_PID_OSC2_POS, 0.6f),
+    P(WT_PID_OSC2_FINE, -12.0f),
+    P(WT_PID_MIX_OSC1, 0.5f), P(WT_PID_MIX_OSC2, 0.5f),
+    P(WT_PID_ENV_POS, 0.45f),
+    P(WT_PID_FLT_TYPE, 1), P(WT_PID_FLT_CUTOFF, 2400.0f),
+    P(WT_PID_FLT_RESO, 0.3f), P(WT_PID_FLT_ENV, 1.5f),
+    P(WT_PID_ENV1_ATTACK, 0.7f), P(WT_PID_ENV1_SUSTAIN, 0.95f),
+    P(WT_PID_ENV1_RELEASE, 1.6f),
+    P(SYNTH_PID_COMMON_UNISON, 2), P(SYNTH_PID_COMMON_UNI_DETUNE, 15.0f),
+    P(FX_PID_REV_MIX, 0.45f), P(FX_PID_REV_SIZE, 0.8f),
+};
+
+/* dual band on a wavetable: the morph only shows through a narrow window */
+static const preset_pair_t kWtBandMorph[] = {
+    P(WT_PID_OSC1_TABLE, 0), P(WT_PID_OSC1_POS, 0.35f),
+    P(WT_PID_MIX_OSC1, 0.9f), P(WT_PID_ENV_POS, 0.6f),
+    P(WT_PID_FLT_TYPE, 3), P(WT_PID_FLT_SPREAD, 1.0f),
+    P(WT_PID_FLT_CUTOFF, 1200.0f), P(WT_PID_FLT_RESO, 0.5f),
+    P(WT_PID_ENV2_DECAY, 1.2f), P(WT_PID_ENV2_SUSTAIN, 0.4f),
+    P(WT_PID_ENV1_ATTACK, 0.1f), P(WT_PID_ENV1_SUSTAIN, 0.85f),
+    P(WT_PID_ENV1_RELEASE, 0.6f),
+    P(FX_PID_REV_MIX, 0.35f),
+};
+
+/* a notch wandering across the morph — two kinds of motion at once */
+static const preset_pair_t kWtNotchMorph[] = {
+    P(WT_PID_OSC1_TABLE, 0), P(WT_PID_OSC1_POS, 0.1f),
+    P(WT_PID_OSC2_TABLE, 0), P(WT_PID_OSC2_POS, 0.7f),
+    P(WT_PID_OSC2_FINE, 6.0f),
+    P(WT_PID_MIX_OSC1, 0.5f), P(WT_PID_MIX_OSC2, 0.5f),
+    P(WT_PID_FLT_MODE, 3), P(WT_PID_FLT_CUTOFF, 900.0f),
+    P(WT_PID_FLT_RESO, 0.55f),
+    P(WT_PID_LFO2_RATE, 0.3f), P(WT_PID_LFO2_POS, 0.4f),
+    P(WT_PID_ENV1_ATTACK, 0.5f), P(WT_PID_ENV1_SUSTAIN, 0.9f),
+    P(WT_PID_ENV1_RELEASE, 1.2f),
+    MOD(0, SYNTH_MOD_SRC_LFO2, WT_PID_FLT_CUTOFF, 0.4f),
+    P(FX_PID_REV_MIX, 0.42f),
+};
+
+/* peak mode riding the morph: a resonant formant that is not a vowel */
+static const preset_pair_t kWtPeakMorph[] = {
+    P(WT_PID_OSC1_TABLE, 3), P(WT_PID_OSC1_POS, 0.4f),
+    P(WT_PID_MIX_OSC1, 0.9f), P(WT_PID_ENV_POS, 0.55f),
+    P(WT_PID_FLT_MODE, 4), P(WT_PID_FLT_CUTOFF, 1300.0f),
+    P(WT_PID_FLT_RESO, 0.8f), P(WT_PID_FLT_ENV, 2.5f),
+    P(WT_PID_FLT_KBD, 0.5f),
+    P(WT_PID_ENV2_DECAY, 0.6f), P(WT_PID_ENV2_SUSTAIN, 0.2f),
+    P(WT_PID_ENV1_DECAY, 0.9f), P(WT_PID_ENV1_SUSTAIN, 0.4f),
+    P(WT_PID_ENV1_RELEASE, 0.5f),
+    P(FX_PID_DLY_MIX, 0.2f), P(FX_PID_REV_MIX, 0.3f),
+};
+
+/* drive on a wavetable lead — grit that the tables cannot make alone */
+static const preset_pair_t kWtDriveLead[] = {
+    P(WT_PID_OSC1_TABLE, 1), P(WT_PID_OSC1_POS, 0.5f),
+    P(WT_PID_OSC2_TABLE, 0), P(WT_PID_OSC2_FINE, 9.0f),
+    P(WT_PID_MIX_OSC1, 0.6f), P(WT_PID_MIX_OSC2, 0.4f),
+    P(WT_PID_ENV_POS, 0.35f),
+    P(WT_PID_FLT_TYPE, 1), P(WT_PID_FLT_CUTOFF, 1800.0f),
+    P(WT_PID_FLT_RESO, 0.4f), P(WT_PID_FLT_DRIVE, 0.65f),
+    P(WT_PID_FLT_KBD, 0.85f),
+    P(WT_PID_ENV1_SUSTAIN, 0.9f), P(WT_PID_ENV1_RELEASE, 0.15f),
+    P(SYNTH_PID_COMMON_GLIDE, 0.05f),
+    P(FX_PID_DLY_MIX, 0.28f), P(FX_PID_DLY_FB, 0.4f),
+};
+
+/* the basic table swept slowly with nothing else moving */
+static const preset_pair_t kWtSlowMorph[] = {
+    P(WT_PID_OSC1_TABLE, 0), P(WT_PID_OSC1_POS, 0.0f),
+    P(WT_PID_MIX_OSC1, 0.85f), P(WT_PID_ENV_POS, 0.0f),
+    P(WT_PID_FLT_CUTOFF, 7000.0f), P(WT_PID_FLT_ENV, 0.0f),
+    P(WT_PID_LFO2_RATE, 0.09f), P(WT_PID_LFO2_WAVE, 1),
+    P(WT_PID_LFO2_POS, 1.0f),
+    P(WT_PID_ENV1_ATTACK, 1.2f), P(WT_PID_ENV1_SUSTAIN, 1.0f),
+    P(WT_PID_ENV1_RELEASE, 2.0f),
+    P(FX_PID_REV_MIX, 0.5f), P(FX_PID_REV_SIZE, 0.85f),
+};
+
+/* velocity picks the frame: soft is a sine, hard is the far end */
+static const preset_pair_t kWtVelMorph[] = {
+    P(WT_PID_OSC1_TABLE, 0), P(WT_PID_OSC1_POS, 0.05f),
+    P(WT_PID_MIX_OSC1, 0.9f), P(WT_PID_ENV_POS, 0.2f),
+    P(WT_PID_FLT_CUTOFF, 4000.0f), P(WT_PID_FLT_ENV, 1.2f),
+    P(WT_PID_ENV1_DECAY, 0.8f), P(WT_PID_ENV1_SUSTAIN, 0.45f),
+    P(WT_PID_ENV1_RELEASE, 0.35f),
+    MOD(0, SYNTH_MOD_SRC_VEL, WT_PID_OSC1_POS, 0.75f),
+    MOD(1, SYNTH_MOD_SRC_VEL, WT_PID_FLT_CUTOFF, 0.4f),
+    P(FX_PID_REV_MIX, 0.28f),
+};
+
+/* two octaves of the fm table, struck and left to ring */
+static const preset_pair_t kWtBellStack[] = {
+    P(WT_PID_OSC1_TABLE, 3), P(WT_PID_OSC1_POS, 0.7f),
+    P(WT_PID_OSC2_TABLE, 3), P(WT_PID_OSC2_POS, 0.35f),
+    P(WT_PID_OSC2_SEMI, 12), P(WT_PID_OSC2_FINE, 5.0f),
+    P(WT_PID_MIX_OSC1, 0.6f), P(WT_PID_MIX_OSC2, 0.35f),
+    P(WT_PID_ENV_POS, -0.4f),
+    P(WT_PID_FLT_CUTOFF, 6000.0f), P(WT_PID_FLT_ENV, 0.0f),
+    P(WT_PID_ENV2_DECAY, 1.0f), P(WT_PID_ENV2_SUSTAIN, 0.0f),
+    P(WT_PID_ENV1_ATTACK, 0.001f), P(WT_PID_ENV1_DECAY, 2.5f),
+    P(WT_PID_ENV1_SUSTAIN, 0.0f), P(WT_PID_ENV1_RELEASE, 1.8f),
+    P(FX_PID_REV_MIX, 0.45f), P(FX_PID_REV_SIZE, 0.8f),
+};
+
+/* short, bright, and gone: the wavetable as a pluck */
+static const preset_pair_t kWtBrightPluck[] = {
+    P(WT_PID_OSC1_TABLE, 0), P(WT_PID_OSC1_POS, 0.55f),
+    P(WT_PID_MIX_OSC1, 0.9f), P(WT_PID_ENV_POS, -0.5f),
+    P(WT_PID_FLT_CUTOFF, 3500.0f), P(WT_PID_FLT_RESO, 0.35f),
+    P(WT_PID_FLT_ENV, 2.0f), P(WT_PID_FLT_KBD, 0.7f),
+    P(WT_PID_ENV2_DECAY, 0.12f), P(WT_PID_ENV2_SUSTAIN, 0.0f),
+    P(WT_PID_ENV1_ATTACK, 0.001f), P(WT_PID_ENV1_DECAY, 0.4f),
+    P(WT_PID_ENV1_SUSTAIN, 0.0f), P(WT_PID_ENV1_RELEASE, 0.2f),
+    MOD(0, SYNTH_MOD_SRC_VEL, WT_PID_FLT_CUTOFF, 0.5f),
+    P(FX_PID_REV_MIX, 0.25f),
+};
+
+/* the same pluck with the ladder closed down over it */
+static const preset_pair_t kWtDarkPluck[] = {
+    P(WT_PID_OSC1_TABLE, 0), P(WT_PID_OSC1_POS, 0.4f),
+    P(WT_PID_MIX_OSC1, 0.9f), P(WT_PID_ENV_POS, 0.2f),
+    P(WT_PID_FLT_TYPE, 2), P(WT_PID_FLT_CUTOFF, 700.0f),
+    P(WT_PID_FLT_RESO, 0.5f), P(WT_PID_FLT_ENV, 1.5f),
+    P(WT_PID_FLT_KBD, 0.6f), P(WT_PID_FLT_DRIVE, 0.25f),
+    P(WT_PID_ENV2_DECAY, 0.2f), P(WT_PID_ENV2_SUSTAIN, 0.0f),
+    P(WT_PID_ENV1_ATTACK, 0.001f), P(WT_PID_ENV1_DECAY, 0.7f),
+    P(WT_PID_ENV1_SUSTAIN, 0.0f), P(WT_PID_ENV1_RELEASE, 0.3f),
+    P(FX_PID_REV_MIX, 0.3f),
+};
+
+/* ladder bass on the basic table: round and heavy */
+static const preset_pair_t kWtLadderBass[] = {
+    P(WT_PID_OSC1_TABLE, 0), P(WT_PID_OSC1_POS, 0.15f),
+    P(WT_PID_OSC2_TABLE, 0), P(WT_PID_OSC2_SEMI, -12),
+    P(WT_PID_OSC2_FINE, 0.0f),
+    P(WT_PID_MIX_OSC1, 0.55f), P(WT_PID_MIX_OSC2, 0.5f),
+    P(WT_PID_ENV_POS, 0.25f),
+    P(WT_PID_FLT_TYPE, 2), P(WT_PID_FLT_CUTOFF, 300.0f),
+    P(WT_PID_FLT_RESO, 0.5f), P(WT_PID_FLT_ENV, 2.0f),
+    P(WT_PID_FLT_KBD, 0.3f), P(WT_PID_FLT_DRIVE, 0.3f),
+    P(WT_PID_ENV2_DECAY, 0.22f), P(WT_PID_ENV2_SUSTAIN, 0.0f),
+    P(WT_PID_ENV1_DECAY, 0.5f), P(WT_PID_ENV1_SUSTAIN, 0.5f),
+    P(WT_PID_ENV1_RELEASE, 0.12f),
+};
+
+/* the vowel filter down in the bass register — a bass that mumbles */
+static const preset_pair_t kWtVowelBass[] = {
+    P(WT_PID_OSC1_TABLE, 0), P(WT_PID_OSC1_POS, 0.2f),
+    P(WT_PID_MIX_OSC1, 0.95f), P(WT_PID_ENV_POS, 0.3f),
+    P(WT_PID_FLT_TYPE, 4), P(WT_PID_FLT_VOWEL, 0.75f),
+    P(WT_PID_FLT_CUTOFF, 480.0f), P(WT_PID_FLT_RESO, 0.6f),
+    P(WT_PID_FLT_DRIVE, 0.35f), P(WT_PID_FLT_KBD, 0.2f),
+    P(WT_PID_ENV1_ATTACK, 0.003f), P(WT_PID_ENV1_DECAY, 0.5f),
+    P(WT_PID_ENV1_SUSTAIN, 0.55f), P(WT_PID_ENV1_RELEASE, 0.12f),
+    MOD(0, SYNTH_MOD_SRC_VEL, WT_PID_FLT_VOWEL, -0.35f),
+    P(FX_PID_REV_MIX, 0.18f),
+};
+
+/* brass out of a wavetable: position rises with the envelope, not a filter */
+static const preset_pair_t kWtBrass[] = {
+    P(WT_PID_OSC1_TABLE, 0), P(WT_PID_OSC1_POS, 0.1f),
+    P(WT_PID_OSC2_TABLE, 0), P(WT_PID_OSC2_FINE, -7.0f),
+    P(WT_PID_MIX_OSC1, 0.55f), P(WT_PID_MIX_OSC2, 0.45f),
+    P(WT_PID_ENV_POS, 0.7f),
+    P(WT_PID_FLT_CUTOFF, 4500.0f), P(WT_PID_FLT_ENV, 1.0f),
+    P(WT_PID_ENV2_ATTACK, 0.06f), P(WT_PID_ENV2_DECAY, 0.6f),
+    P(WT_PID_ENV2_SUSTAIN, 0.7f),
+    P(WT_PID_ENV1_ATTACK, 0.03f), P(WT_PID_ENV1_SUSTAIN, 0.9f),
+    P(WT_PID_ENV1_RELEASE, 0.2f),
+    P(FX_PID_REV_MIX, 0.3f),
+};
+
+/* string ensemble: two positions, slow vibrato, chorus on top */
+static const preset_pair_t kWtStrings[] = {
+    P(WT_PID_OSC1_TABLE, 0), P(WT_PID_OSC1_POS, 0.3f),
+    P(WT_PID_OSC2_TABLE, 0), P(WT_PID_OSC2_POS, 0.45f),
+    P(WT_PID_OSC2_FINE, 11.0f),
+    P(WT_PID_MIX_OSC1, 0.5f), P(WT_PID_MIX_OSC2, 0.5f),
+    P(WT_PID_ENV_POS, 0.2f),
+    P(WT_PID_FLT_TYPE, 1), P(WT_PID_FLT_CUTOFF, 3000.0f),
+    P(WT_PID_FLT_ENV, 1.0f),
+    P(WT_PID_ENV1_ATTACK, 0.35f), P(WT_PID_ENV1_SUSTAIN, 0.95f),
+    P(WT_PID_ENV1_RELEASE, 0.9f),
+    P(WT_PID_LFO1_RATE, 4.8f), P(WT_PID_LFO1_PITCH, 0.06f),
+    P(FX_PID_CHO_MIX, 0.4f), P(FX_PID_REV_MIX, 0.4f),
+};
+
+/* highpassed and thin — a wavetable that sits on top of a full mix */
+static const preset_pair_t kWtAirLayer[] = {
+    P(WT_PID_OSC1_TABLE, 3), P(WT_PID_OSC1_POS, 0.8f),
+    P(WT_PID_MIX_OSC1, 0.8f), P(WT_PID_ENV_POS, -0.3f),
+    P(WT_PID_FLT_MODE, 2), P(WT_PID_FLT_CUTOFF, 1500.0f),
+    P(WT_PID_FLT_RESO, 0.3f), P(WT_PID_FLT_ENV, 0.0f),
+    P(WT_PID_ENV1_ATTACK, 0.6f), P(WT_PID_ENV1_SUSTAIN, 0.85f),
+    P(WT_PID_ENV1_RELEASE, 1.4f),
+    P(FX_PID_REV_MIX, 0.5f), P(FX_PID_REV_SIZE, 0.85f),
+};
+
+/* one table frame held still, allpass swinging the phase across it */
+static const preset_pair_t kWtPhaseDrift[] = {
+    P(WT_PID_OSC1_TABLE, 0), P(WT_PID_OSC1_POS, 0.25f),
+    P(WT_PID_OSC2_TABLE, 0), P(WT_PID_OSC2_POS, 0.25f),
+    P(WT_PID_OSC2_FINE, 4.0f),
+    P(WT_PID_MIX_OSC1, 0.5f), P(WT_PID_MIX_OSC2, 0.5f),
+    P(WT_PID_ENV_POS, 0.0f),
+    P(WT_PID_FLT_MODE, 5), P(WT_PID_FLT_CUTOFF, 1000.0f),
+    P(WT_PID_FLT_RESO, 0.75f),
+    P(WT_PID_LFO2_RATE, 0.45f),
+    MOD(0, SYNTH_MOD_SRC_LFO2, WT_PID_FLT_CUTOFF, 0.5f),
+    P(WT_PID_ENV1_ATTACK, 0.3f), P(WT_PID_ENV1_SUSTAIN, 0.9f),
+    P(WT_PID_ENV1_RELEASE, 1.0f),
+    P(FX_PID_REV_MIX, 0.4f),
+};
+
+/* sub octave under a bright frame: bass and top, nothing in the middle */
+static const preset_pair_t kWtSplitBass[] = {
+    P(WT_PID_OSC1_TABLE, 0), P(WT_PID_OSC1_POS, 0.0f),
+    P(WT_PID_OSC2_TABLE, 3), P(WT_PID_OSC2_POS, 0.6f),
+    P(WT_PID_OSC2_SEMI, 12), P(WT_PID_OSC2_FINE, 0.0f),
+    P(WT_PID_MIX_OSC1, 0.7f), P(WT_PID_MIX_OSC2, 0.3f),
+    P(WT_PID_ENV_POS, 0.2f),
+    P(WT_PID_FLT_MODE, 3), P(WT_PID_FLT_CUTOFF, 800.0f),
+    P(WT_PID_FLT_RESO, 0.4f), P(WT_PID_FLT_ENV, 0.5f),
+    P(WT_PID_ENV1_DECAY, 0.6f), P(WT_PID_ENV1_SUSTAIN, 0.6f),
+    P(WT_PID_ENV1_RELEASE, 0.15f),
+};
+
+/* the vocal table an octave apart, no filter: raw formant chords */
+static const preset_pair_t kWtChoirStack[] = {
+    P(WT_PID_OSC1_TABLE, 2), P(WT_PID_OSC1_POS, 0.2f),
+    P(WT_PID_OSC2_TABLE, 2), P(WT_PID_OSC2_POS, 0.55f),
+    P(WT_PID_OSC2_SEMI, 12), P(WT_PID_OSC2_FINE, -5.0f),
+    P(WT_PID_MIX_OSC1, 0.6f), P(WT_PID_MIX_OSC2, 0.35f),
+    P(WT_PID_ENV_POS, 0.3f), P(WT_PID_FLT_ON, 0),
+    P(WT_PID_ENV1_ATTACK, 0.5f), P(WT_PID_ENV1_SUSTAIN, 0.95f),
+    P(WT_PID_ENV1_RELEASE, 1.5f),
+    P(WT_PID_LFO1_RATE, 4.2f), P(WT_PID_LFO1_PITCH, 0.07f),
+    P(FX_PID_CHO_MIX, 0.3f), P(FX_PID_REV_MIX, 0.5f),
+};
+
+/* sharp square-ish frame, no filter movement, fast delay — chiptune arp */
+static const preset_pair_t kWtChipArp[] = {
+    P(WT_PID_OSC1_TABLE, 0), P(WT_PID_OSC1_POS, 0.65f),
+    P(WT_PID_MIX_OSC1, 0.9f), P(WT_PID_ENV_POS, 0.0f),
+    P(WT_PID_FLT_ON, 0),
+    P(WT_PID_ENV1_ATTACK, 0.001f), P(WT_PID_ENV1_DECAY, 0.12f),
+    P(WT_PID_ENV1_SUSTAIN, 0.25f), P(WT_PID_ENV1_RELEASE, 0.05f),
+    P(FX_PID_DLY_MIX, 0.3f), P(FX_PID_DLY_TIME, 0.14f),
+    P(FX_PID_DLY_FB, 0.4f), P(FX_PID_DLY_PP, 1),
+};
+
+/* the position LFO faster than the note: a sample-and-hold texture */
+static const preset_pair_t kWtStepTexture[] = {
+    P(WT_PID_OSC1_TABLE, 3), P(WT_PID_OSC1_POS, 0.3f),
+    P(WT_PID_MIX_OSC1, 0.85f), P(WT_PID_ENV_POS, 0.0f),
+    P(WT_PID_FLT_TYPE, 1), P(WT_PID_FLT_CUTOFF, 2500.0f),
+    P(WT_PID_FLT_RESO, 0.4f),
+    P(WT_PID_LFO2_RATE, 9.0f), P(WT_PID_LFO2_WAVE, 4),
+    P(WT_PID_LFO2_POS, 0.8f),
+    P(WT_PID_ENV1_ATTACK, 0.02f), P(WT_PID_ENV1_SUSTAIN, 0.8f),
+    P(WT_PID_ENV1_RELEASE, 0.3f),
+    P(FX_PID_DLY_MIX, 0.25f), P(FX_PID_REV_MIX, 0.3f),
+};
+
+/* long attack, long release, position crawling: something to leave running */
+static const preset_pair_t kWtSlowTexture[] = {
+    P(WT_PID_OSC1_TABLE, 2), P(WT_PID_OSC1_POS, 0.1f),
+    P(WT_PID_OSC2_TABLE, 3), P(WT_PID_OSC2_POS, 0.4f),
+    P(WT_PID_OSC2_SEMI, -12), P(WT_PID_OSC2_FINE, 7.0f),
+    P(WT_PID_MIX_OSC1, 0.5f), P(WT_PID_MIX_OSC2, 0.4f),
+    P(WT_PID_ENV_POS, 0.6f),
+    P(WT_PID_FLT_TYPE, 3), P(WT_PID_FLT_SPREAD, 3.0f),
+    P(WT_PID_FLT_CUTOFF, 900.0f), P(WT_PID_FLT_RESO, 0.4f),
+    P(WT_PID_ENV2_ATTACK, 2.0f), P(WT_PID_ENV2_DECAY, 4.0f),
+    P(WT_PID_ENV2_SUSTAIN, 0.6f),
+    P(WT_PID_ENV1_ATTACK, 2.0f), P(WT_PID_ENV1_SUSTAIN, 1.0f),
+    P(WT_PID_ENV1_RELEASE, 3.0f),
+    P(FX_PID_REV_MIX, 0.55f), P(FX_PID_REV_SIZE, 0.9f),
+};
+
+/* wheel drives the morph directly — a hands-on spectral sweep */
+static const preset_pair_t kWtWheelMorph[] = {
+    P(WT_PID_OSC1_TABLE, 1), P(WT_PID_OSC1_POS, 0.0f),
+    P(WT_PID_MIX_OSC1, 0.9f), P(WT_PID_ENV_POS, 0.0f),
+    P(WT_PID_FLT_TYPE, 1), P(WT_PID_FLT_CUTOFF, 3000.0f),
+    P(WT_PID_FLT_RESO, 0.35f),
+    P(WT_PID_ENV1_ATTACK, 0.01f), P(WT_PID_ENV1_SUSTAIN, 0.9f),
+    P(WT_PID_ENV1_RELEASE, 0.3f),
+    MOD(0, SYNTH_MOD_SRC_WHEEL, WT_PID_OSC1_POS, 0.9f),
+    MOD(1, SYNTH_MOD_SRC_WHEEL, WT_PID_FLT_CUTOFF, 0.3f),
+    P(FX_PID_DLY_MIX, 0.2f), P(FX_PID_REV_MIX, 0.3f),
+};
+
+/* organ registration out of two static frames, filter parked open */
+static const preset_pair_t kWtDrawOrgan[] = {
+    P(WT_PID_OSC1_TABLE, 0), P(WT_PID_OSC1_POS, 0.6f),
+    P(WT_PID_OSC2_TABLE, 0), P(WT_PID_OSC2_POS, 0.6f),
+    P(WT_PID_OSC2_SEMI, 12), P(WT_PID_OSC2_FINE, 0.0f),
+    P(WT_PID_MIX_OSC1, 0.6f), P(WT_PID_MIX_OSC2, 0.35f),
+    P(WT_PID_ENV_POS, 0.0f), P(WT_PID_FLT_ON, 0),
+    P(WT_PID_ENV1_ATTACK, 0.004f), P(WT_PID_ENV1_DECAY, 0.05f),
+    P(WT_PID_ENV1_SUSTAIN, 1.0f), P(WT_PID_ENV1_RELEASE, 0.05f),
+    P(FX_PID_CHO_MIX, 0.3f), P(FX_PID_REV_MIX, 0.2f),
+};
+
+/* a full-range riser: position, cutoff and pitch all climbing together */
+static const preset_pair_t kWtSpectralRiser[] = {
+    P(WT_PID_OSC1_TABLE, 1), P(WT_PID_OSC1_POS, 0.0f),
+    P(WT_PID_MIX_OSC1, 0.85f), P(WT_PID_ENV_POS, 1.0f),
+    P(WT_PID_FLT_TYPE, 1), P(WT_PID_FLT_CUTOFF, 300.0f),
+    P(WT_PID_FLT_RESO, 0.55f), P(WT_PID_FLT_ENV, 4.0f),
+    P(WT_PID_ENV2_ATTACK, 3.0f), P(WT_PID_ENV2_DECAY, 4.0f),
+    P(WT_PID_ENV2_SUSTAIN, 1.0f),
+    P(WT_PID_ENV1_ATTACK, 0.2f), P(WT_PID_ENV1_SUSTAIN, 1.0f),
+    P(WT_PID_ENV1_RELEASE, 0.5f),
+    P(WT_PID_LFO1_RATE, 6.0f), P(WT_PID_LFO1_PITCH, 0.25f),
+    P(FX_PID_REV_MIX, 0.45f), P(FX_PID_DLY_MIX, 0.25f),
+};
+
+/* crushed and narrow: the wavetable put through the lo-fi stage */
+static const preset_pair_t kWtLofiKeys[] = {
+    P(WT_PID_OSC1_TABLE, 0), P(WT_PID_OSC1_POS, 0.35f),
+    P(WT_PID_MIX_OSC1, 0.85f), P(WT_PID_ENV_POS, 0.25f),
+    P(WT_PID_FLT_TYPE, 3), P(WT_PID_FLT_SPREAD, 1.6f),
+    P(WT_PID_FLT_CUTOFF, 1100.0f), P(WT_PID_FLT_RESO, 0.35f),
+    P(WT_PID_ENV1_ATTACK, 0.004f), P(WT_PID_ENV1_DECAY, 0.9f),
+    P(WT_PID_ENV1_SUSTAIN, 0.35f), P(WT_PID_ENV1_RELEASE, 0.4f),
+    P(FX_PID_CRUSH_MIX, 0.45f), P(FX_PID_CRUSH_BITS, 7.0f),
+    P(FX_PID_CRUSH_DOWN, 3),
+    P(FX_PID_REV_MIX, 0.3f),
+};
+
+/* grains over a slow morph — the granular delay doing the heavy lifting */
+static const preset_pair_t kWtGrainCloud[] = {
+    P(WT_PID_OSC1_TABLE, 2), P(WT_PID_OSC1_POS, 0.4f),
+    P(WT_PID_MIX_OSC1, 0.8f), P(WT_PID_ENV_POS, 0.3f),
+    P(WT_PID_FLT_CUTOFF, 4000.0f), P(WT_PID_FLT_ENV, 0.8f),
+    P(WT_PID_ENV1_ATTACK, 0.8f), P(WT_PID_ENV1_SUSTAIN, 0.9f),
+    P(WT_PID_ENV1_RELEASE, 1.5f),
+    P(WT_PID_LFO2_RATE, 0.13f), P(WT_PID_LFO2_POS, 0.6f),
+    P(FX_PID_GRN_MIX, 0.45f), P(FX_PID_GRN_SIZE, 0.14f),
+    P(FX_PID_GRN_DENS, 18.0f), P(FX_PID_GRN_SPRAY, 0.06f),
+    P(FX_PID_REV_MIX, 0.4f),
+};
+
 /* ---- the banks ------------------------------------------------------ */
 
 #define F(nm, t) {nm, t, N(t)}
@@ -818,6 +2566,40 @@ const factory_preset_t
             F("string machine", kSubStringMachine),
             F("zap perc", kSubZapPerc),
             F("soft keys", kSubSoftKeys),
+            /* S33: filter-family showcases first, then the classics the
+             * original sixteen had no room for */
+            F("ladder bass", kSubLadderBass),
+            F("ladder lead", kSubLadderLead),
+            F("ladder acid", kSubLadderAcid),
+            F("vowel pad", kSubVowelPad),
+            F("talking lead", kSubTalkingLead),
+            F("formant stab", kSubFormantStab),
+            F("notch sweep", kSubNotchSweep),
+            F("phase keys", kSubPhaseKeys),
+            F("peak sweep", kSubPeakSweep),
+            F("dual band stab", kSubDualStab),
+            F("narrow lead", kSubNarrowLead),
+            F("driven saw", kSubDrivenSaw),
+            F("reese bass", kSubReeseBass),
+            F("super saw", kSubSuperSaw),
+            F("hoover", kSubHoover),
+            F("organ tone", kSubOrganTone),
+            F("clav plink", kSubClavPlink),
+            F("rubber bass", kSubRubberBass),
+            F("kick synth", kSubKickSynth),
+            F("snare synth", kSubSnareSynth),
+            F("tom synth", kSubTomSynth),
+            F("wind noise", kSubWindNoise),
+            F("dark drone", kSubDarkDrone),
+            F("glass pad", kSubGlassPad),
+            F("bell pluck", kSubBellPluck),
+            F("octave stack", kSubOctaveStack),
+            F("detuned keys", kSubDetunedKeys),
+            F("soft chords", kSubSoftChords),
+            F("velocity keys", kSubVelKeys),
+            F("drop tail", kSubDropTail),
+            F("fifth lead", kSubFifthLead),
+            F("band wash", kSubBandWash),
         },
         /* additive */
         {
@@ -837,6 +2619,40 @@ const factory_preset_t
             F("toy piano", kAddToyPiano),
             F("drift pad", kAddDriftPad),
             F("perc organ", kAddPercOrgan),
+            /* S33: more registrations, plus the ones the new filter made
+             * possible — formants and resonant peaks the rolloff cannot do */
+            F("full organ", kAddFullOrgan),
+            F("jazz organ", kAddJazzOrgan),
+            F("gospel organ", kAddGospelOrgan),
+            F("reed pipe", kAddReedPipe),
+            F("principal pipe", kAddPrincipalPipe),
+            F("octave organ", kAddOctaveOrgan),
+            F("fifth organ", kAddFifthOrgan),
+            F("vocal ah", kAddVocalAh),
+            F("vocal ooh", kAddVocalOoh),
+            F("formant choir", kAddFormantChoir),
+            F("marimba", kAddMarimba),
+            F("vibraphone", kAddVibraphone),
+            F("celeste", kAddCeleste),
+            F("gong", kAddGong),
+            F("singing bowl", kAddSingingBowl),
+            F("harmonium", kAddHarmonium),
+            F("accordion", kAddAccordion),
+            F("string stack", kAddStringStack),
+            F("brass stack", kAddBrassStack),
+            F("warm ladder", kAddWarmLadder),
+            F("notch drift", kAddNotchDrift),
+            F("pure tones", kAddPureTones),
+            F("sine keys", kAddSineKeys),
+            F("steel drum", kAddSteelDrum),
+            F("bell tree", kAddBellTree),
+            F("reverse bloom", kAddReverseBloom),
+            F("metal drone", kAddMetalDrone),
+            F("velocity reed", kAddVelReed),
+            F("wheel sweep", kAddWheelSweep),
+            F("glass organ", kAddGlassOrgan),
+            F("hollow pad", kAddHollowPad),
+            F("sub drone", kAddSubDrone),
         },
         /* fm */
         {
@@ -856,6 +2672,40 @@ const factory_preset_t
             F("sci-fi swell", kFmSciFiSwell),
             F("bell pad", kFmBellPad),
             F("fm clav", kFmClav),
+            /* S33: FM had no filter until now, so the ones that switch it on
+             * are sounds this engine could not make before */
+            F("rhodes mk1", kFmRhodesMk1),
+            F("hard tines", kFmHardTines),
+            F("smooth keys", kFmSmoothKeys),
+            F("voice box", kFmVoiceBox),
+            F("metal bass", kFmMetalBass),
+            F("sub bass", kFmSubBass),
+            F("slap bass", kFmSlapBass),
+            F("buzz lead", kFmBuzzLead),
+            F("singing lead", kFmSingLead),
+            F("koto", kFmKoto),
+            F("harp", kFmHarp),
+            F("marimba", kFmMarimba),
+            F("vibes", kFmVibes),
+            F("glockenspiel", kFmGlocken),
+            F("church bell", kFmChurchBell),
+            F("gamelan", kFmGamelan),
+            F("fm organ", kFmOrgan),
+            F("brass swell", kFmBrassSwell),
+            F("horn", kFmHorn),
+            F("clarinet", kFmClarinet),
+            F("oboe", kFmOboe),
+            F("detune pad", kFmDetunePad),
+            F("soft pad", kFmSoftPad),
+            F("phase pad", kFmPhasePad),
+            F("clang stab", kFmClangStab),
+            F("timpani", kFmTimpani),
+            F("wood block", kFmWoodBlock),
+            F("noise burst", kFmNoiseBurst),
+            F("drop fx", kFmDropFx),
+            F("siren", kFmSiren),
+            F("ladder pluck", kFmLadderPluck),
+            F("octave mallet", kFmOctaveMallet),
         },
         /* wavetable */
         {
@@ -875,6 +2725,40 @@ const factory_preset_t
             F("evolving drone", kWtEvolvingDrone),
             F("arp cascade", kWtArpCascade),
             F("glassy keys", kWtGlassyKeys),
+            /* S33: the vocal table under the vowel filter is the pairing
+             * this engine was waiting for — several of these are built on it */
+            F("double vowel", kWtDoubleVowel),
+            F("robot voice", kWtRobotVoice),
+            F("formant sweep", kWtFormantSweep),
+            F("vowel bass", kWtVowelBass),
+            F("sync scream", kWtSyncScream),
+            F("sync bass", kWtSyncBass),
+            F("digital bass", kWtDigitalBass),
+            F("wide pad", kWtWidePad),
+            F("band morph", kWtBandMorph),
+            F("notch morph", kWtNotchMorph),
+            F("peak morph", kWtPeakMorph),
+            F("drive lead", kWtDriveLead),
+            F("slow morph", kWtSlowMorph),
+            F("velocity morph", kWtVelMorph),
+            F("bell stack", kWtBellStack),
+            F("bright pluck", kWtBrightPluck),
+            F("dark pluck", kWtDarkPluck),
+            F("ladder bass", kWtLadderBass),
+            F("wt brass", kWtBrass),
+            F("wt strings", kWtStrings),
+            F("air layer", kWtAirLayer),
+            F("phase drift", kWtPhaseDrift),
+            F("split bass", kWtSplitBass),
+            F("choir stack", kWtChoirStack),
+            F("chip arp", kWtChipArp),
+            F("step texture", kWtStepTexture),
+            F("slow texture", kWtSlowTexture),
+            F("wheel morph", kWtWheelMorph),
+            F("draw organ", kWtDrawOrgan),
+            F("spectral riser", kWtSpectralRiser),
+            F("lofi keys", kWtLofiKeys),
+            F("grain cloud", kWtGrainCloud),
         },
 #if SYNTH_ENABLE_MODULAR
         /* modular (S28) — deliberately all "init".
@@ -902,7 +2786,17 @@ const factory_preset_t
             {"init", nullptr, 0},  {"init", nullptr, 0}, {"init", nullptr, 0},
             {"init", nullptr, 0},  {"init", nullptr, 0}, {"init", nullptr, 0},
             {"init", nullptr, 0},  {"init", nullptr, 0}, {"init", nullptr, 0},
-            {"init", nullptr, 0},
+            {"init", nullptr, 0},  {"init", nullptr, 0}, {"init", nullptr, 0},
+            {"init", nullptr, 0},  {"init", nullptr, 0}, {"init", nullptr, 0},
+            {"init", nullptr, 0},  {"init", nullptr, 0}, {"init", nullptr, 0},
+            {"init", nullptr, 0},  {"init", nullptr, 0}, {"init", nullptr, 0},
+            {"init", nullptr, 0},  {"init", nullptr, 0}, {"init", nullptr, 0},
+            {"init", nullptr, 0},  {"init", nullptr, 0}, {"init", nullptr, 0},
+            {"init", nullptr, 0},  {"init", nullptr, 0}, {"init", nullptr, 0},
+            {"init", nullptr, 0},  {"init", nullptr, 0}, {"init", nullptr, 0},
+            {"init", nullptr, 0},  {"init", nullptr, 0}, {"init", nullptr, 0},
+            {"init", nullptr, 0},  {"init", nullptr, 0}, {"init", nullptr, 0},
+            {"init", nullptr, 0},  {"init", nullptr, 0}, {"init", nullptr, 0},
         },
 #endif
 };

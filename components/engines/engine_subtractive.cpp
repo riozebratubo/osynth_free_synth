@@ -1,7 +1,8 @@
 /*
- * osynth — subtractive engine (Session 5; mod matrix Session 9).
+ * osynth — subtractive engine (Session 5; mod matrix Session 9; filter
+ * family Session 33).
  *
- * Per voice: osc1 + osc2 + noise -> mixer -> SVF -> amp env, composed from
+ * Per voice: osc1 + osc2 + noise -> mixer -> filter -> amp env, composed from
  * the shared blocks in synth_dsp.h. env2 sweeps the filter and lfo2 wobbles
  * it, both at block rate (1.33 ms steps — inaudible as zipper at these
  * modulation speeds); lfo1 is vibrato. All parameters are read once per
@@ -9,10 +10,15 @@
  * and mix settings are global); only note-dependent values (keyboard
  * tracking, env2 level, vibrato) are computed per voice in render().
  *
+ * The filter is one of five types (flt.type) behind one bypass switch
+ * (flt.on); both resolve to a dsp::FltType in begin_block(), so the sample
+ * loop sees a single filt_next() call whatever is selected — see the
+ * dispatch note in synth_dsp.h.
+ *
  * Mod matrix (S9): the per-voice consumable params — pulse widths, mix
- * levels, cutoff/reso, flt.env and the LFO depths — are routed through
- * synth_mod_apply() at the top of render(), so any matrix slot can retarget
- * them per voice at block rate (see docs/PARAM_MAP.md for the dest list).
+ * levels, cutoff/reso/drive/vowel, flt.env and the LFO depths — are routed
+ * through synth_mod_apply() at the top of render(), so any matrix slot can
+ * retarget them per voice at block rate (docs/PARAM_MAP.md lists the dests).
  *
  * Gain staging: output = mixer * filter * env1 * velocity. The voice
  * manager applies the 1/SYNTH_VOICES headroom and unison pan on top, so the
@@ -45,7 +51,7 @@ namespace {
 struct SubVoice {
     dsp::Osc osc1, osc2;
     dsp::Noise noise;
-    dsp::Svf svf;
+    dsp::Filt filt;
     dsp::Adsr env1; /* amplitude, per sample */
     dsp::Adsr env2; /* filter, block rate */
     dsp::Lfo lfo1, lfo2;
@@ -59,6 +65,7 @@ enum PIdx {
     OSC1_WAVE, OSC1_PW, OSC2_WAVE, OSC2_PW, OSC2_SEMI, OSC2_FINE,
     MIX_OSC1, MIX_OSC2, MIX_NOISE,
     FLT_MODE, FLT_CUTOFF, FLT_RESO, FLT_ENV, FLT_KBD,
+    FLT_ON, FLT_TYPE, FLT_DRIVE, FLT_SPREAD, FLT_VOWEL,
     ENV1_A, ENV1_D, ENV1_S, ENV1_R,
     ENV2_A, ENV2_D, ENV2_S, ENV2_R,
     LFO1_RATE, LFO1_WAVE, LFO1_PITCH,
@@ -67,7 +74,10 @@ enum PIdx {
 };
 
 const char* const kOscWaves[] = {"sine", "triangle", "saw", "pulse"};
-const char* const kFltModes[] = {"lp", "bp", "hp"};
+/* Both lists are append-only: presets store the index, not the name. */
+const char* const kFltModes[] = {"lp",   "bp",   "hp", "notch",
+                                 "peak", "ap",   "bp norm"};
+const char* const kFltTypes[] = {"svf 12", "svf 24", "ladder", "dual", "vowel"};
 const char* const kLfoWaves[] = {"sine", "triangle", "saw", "square", "s&h"};
 
 const ParamDesc kParams[P_COUNT] = {
@@ -90,7 +100,7 @@ const ParamDesc kParams[P_COUNT] = {
     {SUB_PID_MIX_NOISE, "mix.noise", ParamType::Float, ParamCurve::Linear,
      0.0f, 1.0f, 0.0f, nullptr, 0},
     {SUB_PID_FLT_MODE, "flt.mode", ParamType::Enum, ParamCurve::Linear,
-     0.0f, 2.0f, 0.0f /* lp */, kFltModes, 3},
+     0.0f, 6.0f, 0.0f /* lp */, kFltModes, 7},
     {SUB_PID_FLT_CUTOFF, "flt.cutoff", ParamType::Float, ParamCurve::Exp,
      20.0f, 18000.0f, 1200.0f, nullptr, 0},
     {SUB_PID_FLT_RESO, "flt.reso", ParamType::Float, ParamCurve::Linear,
@@ -99,6 +109,20 @@ const ParamDesc kParams[P_COUNT] = {
      -4.0f, 4.0f, 2.5f, nullptr, 0}, /* octaves */
     {SUB_PID_FLT_KBD, "flt.kbd", ParamType::Float, ParamCurve::Linear,
      0.0f, 1.0f, 0.5f, nullptr, 0},
+    /* Bypass. Defaults on, so every patch saved before S33 keeps its
+     * filter; off costs nothing, it just selects FltType::Bypass. */
+    {SUB_PID_FLT_ON, "flt.on", ParamType::Bool, ParamCurve::Linear,
+     0.0f, 1.0f, 1.0f, nullptr, 0},
+    /* Defaults to svf 12 with no drive: an untouched patch renders exactly
+     * what it rendered before these five parameters existed. */
+    {SUB_PID_FLT_TYPE, "flt.type", ParamType::Enum, ParamCurve::Linear,
+     0.0f, 4.0f, 0.0f /* svf 12 */, kFltTypes, 5},
+    {SUB_PID_FLT_DRIVE, "flt.drive", ParamType::Float, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0},
+    {SUB_PID_FLT_SPREAD, "flt.spread", ParamType::Float, ParamCurve::Linear,
+     0.0f, 6.0f, 2.0f, nullptr, 0}, /* dual: passband width in octaves */
+    {SUB_PID_FLT_VOWEL, "flt.vowel", ParamType::Float, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0}, /* vowel: morph a-e-i-o-u */
     {SUB_PID_ENV1_ATTACK, "env1.attack", ParamType::Float, ParamCurve::Exp,
      0.001f, 10.0f, 0.005f, nullptr, 0},
     {SUB_PID_ENV1_DECAY, "env1.decay", ParamType::Float, ParamCurve::Exp,
@@ -141,7 +165,8 @@ struct BlockCache {
     float mul2; /* osc2 frequency multiplier (semi + fine) */
     float m1, m2, mn;
     dsp::SvfMode fmode;
-    float cutoff, reso, fenv_oct, fkbd;
+    dsp::FltType ftype;
+    float cutoff, reso, fenv_oct, fkbd, fdrive, fspread, fvowel;
     dsp::AdsrCoef amp; /* per-sample rates */
     dsp::AdsrCoef flt; /* per-block rates */
     float lfo1_inc, lfo2_inc;
@@ -156,7 +181,7 @@ BlockCache s_bc;
  * neither can step the signal, so neither is smoothed. */
 struct Smoothers {
     dsp::Smooth pw1, pw2, mul2, m1, m2, mn;
-    dsp::Smooth cutoff, reso, fenv, fkbd;
+    dsp::Smooth cutoff, reso, fenv, fkbd, fdrive, fspread, fvowel;
     dsp::Smooth l1_pitch, l2_oct;
 };
 
@@ -204,10 +229,17 @@ void SYNTH_RENDER_IRAM sub_begin_block(size_t frames) {
     b.m2 = dsp::smooth_lin(s_sm.m2, pv(MIX_OSC2));
     b.mn = dsp::smooth_lin(s_sm.mn, pv(MIX_NOISE));
     b.fmode = (dsp::SvfMode)(int)pv(FLT_MODE);
+    /* The bypass switch resolves to a filter type here, once per block, so
+     * the render loop never learns it exists. */
+    b.ftype = (pv(FLT_ON) < 0.5f) ? dsp::FltType::Bypass
+                                  : (dsp::FltType)(int)pv(FLT_TYPE);
     b.cutoff = dsp::smooth_exp(s_sm.cutoff, pv(FLT_CUTOFF));
     b.reso = dsp::smooth_lin(s_sm.reso, pv(FLT_RESO));
     b.fenv_oct = dsp::smooth_lin(s_sm.fenv, pv(FLT_ENV));
     b.fkbd = dsp::smooth_lin(s_sm.fkbd, pv(FLT_KBD));
+    b.fdrive = dsp::smooth_lin(s_sm.fdrive, pv(FLT_DRIVE));
+    b.fspread = dsp::smooth_lin(s_sm.fspread, pv(FLT_SPREAD));
+    b.fvowel = dsp::smooth_lin(s_sm.fvowel, pv(FLT_VOWEL));
     b.amp = dsp::adsr_coef_block(pv(ENV1_A), pv(ENV1_D), pv(ENV1_S),
                                  pv(ENV1_R), kSr, (uint32_t)frames);
     b.flt = dsp::adsr_coef(pv(ENV2_A), pv(ENV2_D), pv(ENV2_S), pv(ENV2_R),
@@ -273,6 +305,8 @@ void SYNTH_RENDER_IRAM sub_render(void* vs, const synth_voice_frame_t* f,
     const float cutoff = synth_mod_apply(SUB_PID_FLT_CUTOFF, b.cutoff, &ms);
     const float reso = synth_mod_apply(SUB_PID_FLT_RESO, b.reso, &ms);
     const float fenv_oct = synth_mod_apply(SUB_PID_FLT_ENV, b.fenv_oct, &ms);
+    const float fdrive = synth_mod_apply(SUB_PID_FLT_DRIVE, b.fdrive, &ms);
+    const float fvowel = synth_mod_apply(SUB_PID_FLT_VOWEL, b.fvowel, &ms);
 
     const float pitch_mul =
         (l1_pitch != 0.0f) ? exp2f(l1 * l1_pitch * (1.0f / 12.0f)) : 1.0f;
@@ -281,7 +315,9 @@ void SYNTH_RENDER_IRAM sub_render(void* vs, const synth_voice_frame_t* f,
 
     const float oct = fenv_oct * fenv + l2_oct * l2 +
                       b.fkbd * ((float)v.note - 60.0f) * (1.0f / 12.0f);
-    const dsp::SvfCoef fc = dsp::svf_coef(cutoff * exp2f(oct), reso, kSr);
+    const dsp::FiltCoef fc =
+        dsp::filt_coef(b.ftype, b.fmode, cutoff * exp2f(oct), reso, fdrive,
+                       b.fspread, fvowel, kSr);
 
     const float gl = f->gain_l * v.vel;
     const float gr = f->gain_r * v.vel;
@@ -302,7 +338,7 @@ void SYNTH_RENDER_IRAM sub_render(void* vs, const synth_voice_frame_t* f,
         const float x = m1 * dsp::osc_next(v.osc1, b.w1, step1, pw1) +
                         m2 * dsp::osc_next(v.osc2, b.w2, step2, pw2) +
                         mn * dsp::noise_next(v.noise);
-        const float y = dsp::svf_next(v.svf, fc, b.fmode, x) * a;
+        const float y = dsp::filt_next(v.filt, fc, x) * a;
         out_l[i] += y * gl;
         out_r[i] += y * gr;
     }

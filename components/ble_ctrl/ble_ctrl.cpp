@@ -267,8 +267,8 @@ public:
         if (fill_ + len > cap()) {
             /* Only flush something. With an MTU too small to hold even one
              * record, `fill_` is always 0 here and emitting anyway sent one
-             * empty continuation frame *per record* — 80 of them for a preset
-             * listing — before the equally empty final frame. */
+             * empty continuation frame *per record* — 112 of them for a
+             * preset listing — before the equally empty final frame. */
             if (fill_ > 0) emit(true);
             if (len > cap()) return; /* record can never fit this MTU */
         }
