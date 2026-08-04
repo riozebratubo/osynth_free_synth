@@ -87,6 +87,10 @@ enum PIdx {
     P_FIXED
 };
 constexpr int P_COUNT = P_FIXED + SEQ_TRACKS * 2;
+/* The per-track block that follows the fixed ones: {mute, solo} for each track
+ * in turn, in the order build_params() appends them. */
+constexpr int trk_mute_idx(int t) { return P_FIXED + t * 2 + 0; }
+constexpr int trk_solo_idx(int t) { return P_FIXED + t * 2 + 1; }
 
 const char* const kClockNames[] = {"internal", "midi"};
 const char* const kDivNames[] = {"1/4", "1/8", "1/8t", "1/16", "1/16t", "1/32"};
@@ -111,6 +115,14 @@ const std::atomic<float>* s_p[P_COUNT];
 
 inline float pv(PIdx i) { return s_p[i]->load(std::memory_order_relaxed); }
 inline int pi(PIdx i) { return (int)(pv(i) + 0.5f); }
+
+/* The per-track mute/solo parameters sit past the last PIdx enumerator, so they
+ * are read through the array directly: casting their index to PIdx would be a
+ * value outside the range the enum is allowed to represent. */
+inline bool trk_flag_on(int idx) {
+    const std::atomic<float>* p = s_p[idx];
+    return p != nullptr && p->load(std::memory_order_relaxed) >= 0.5f;
+}
 
 /* ---- state shared between the tap (USB/serial tasks) and seq_clk ---- */
 
@@ -188,6 +200,17 @@ int s_len_prev = -1;
  * queued switch reaching its bar, a song chain), and that changes the subject
  * just as much as switching track does. */
 int s_mirror_pat_prev = -1;
+/* Last mute/solo seen, one bit per track. The parameters are the *live*
+ * control — seq_play's track_audible() reads them straight — but the pattern is
+ * what owns the state: seq_track_cfg_t carries SEQ_TRACK_F_MUTE/SOLO, and
+ * seqarp_pattern_reflect() publishes it back out on a load. Until S23e the
+ * traffic only ever went that one way. Nothing wrote a toggled parameter back
+ * into the flag, so a mute was audible at once and then simply evaporated: it
+ * was not in the blob a sequence or set save wrote, and the next load
+ * republished the old flags over it. Same shadow-and-edge shape as scale/root
+ * below, for the same reason. */
+uint32_t s_mute_prev = 0;
+uint32_t s_solo_prev = 0;
 bool s_fill_prev = false;
 /* Last seq.rev published. UINT32_MAX rather than 0 so the very first poll
  * publishes — the model starts at revision 0, and a client that connects
@@ -461,6 +484,42 @@ void poll_edges() {
         seq_pattern_cfg_set(seqarp_edit_pattern(), &cfg);
         s_scale_prev = scale;
         s_root_prev = root;
+    }
+    /* Mute/solo: parameter -> pattern. The playback path never reads the flags
+     * (track_audible() reads these parameters, so a toggle is silent on the
+     * very next step either way); this is purely about the state outliving the
+     * session. Edge-filtered per track, because seq_track_cfg_set() bumps the
+     * model revision and an unconditional write would tell every connected app
+     * the pattern had changed 50 times a second.
+     *
+     * Scoped to the edited pattern, exactly as scale/root above are, which also
+     * means it inherits their one limitation: selecting another pattern does not
+     * republish these from that pattern, so the parameters keep describing the
+     * one they were set on until something calls seqarp_pattern_reflect(). */
+    uint32_t mute_now = 0;
+    uint32_t solo_now = 0;
+    for (int t = 0; t < SEQ_TRACKS; ++t) {
+        if (trk_flag_on(trk_mute_idx(t))) mute_now |= 1u << t;
+        if (trk_flag_on(trk_solo_idx(t))) solo_now |= 1u << t;
+    }
+    if (mute_now != s_mute_prev || solo_now != s_solo_prev) {
+        const int mpat = seqarp_edit_pattern();
+        for (int t = 0; t < SEQ_TRACKS; ++t) {
+            const uint32_t bit = 1u << t;
+            if (((mute_now ^ s_mute_prev) & bit) == 0 &&
+                ((solo_now ^ s_solo_prev) & bit) == 0) {
+                continue;
+            }
+            seq_track_cfg_t tcfg;
+            seq_track_cfg_get(mpat, t, &tcfg);
+            tcfg.flags = (uint8_t)((tcfg.flags & ~(SEQ_TRACK_F_MUTE |
+                                                   SEQ_TRACK_F_SOLO)) |
+                                   ((mute_now & bit) ? SEQ_TRACK_F_MUTE : 0) |
+                                   ((solo_now & bit) ? SEQ_TRACK_F_SOLO : 0));
+            seq_track_cfg_set(mpat, t, &tcfg);
+        }
+        s_mute_prev = mute_now;
+        s_solo_prev = solo_now;
     }
     /* seq.steps mirrors the edited track's length in both directions: the app
      * can drive it as a knob (the generic seq.* page has one), a MIDI NRPN can,
@@ -976,6 +1035,8 @@ void seqarp_pattern_reflect(int pattern) {
     ps.set(SEQ_PID_SCALE, (float)cfg.scale, ParamOrigin::Preset);
     ps.set(SEQ_PID_ROOT, (float)cfg.root, ParamOrigin::Preset);
     ps.set(SEQ_PID_SWING, (float)cfg.swing, ParamOrigin::Preset);
+    uint32_t mute_bits = 0;
+    uint32_t solo_bits = 0;
     for (int t = 0; t < SEQ_TRACKS; ++t) {
         seq_track_cfg_t tc;
         seq_track_cfg_get(pattern, t, &tc);
@@ -983,7 +1044,16 @@ void seqarp_pattern_reflect(int pattern) {
                (tc.flags & SEQ_TRACK_F_MUTE) ? 1.0f : 0.0f, ParamOrigin::Preset);
         ps.set((uint16_t)SEQ_PID_TRACK_SOLO(t),
                (tc.flags & SEQ_TRACK_F_SOLO) ? 1.0f : 0.0f, ParamOrigin::Preset);
+        if (tc.flags & SEQ_TRACK_F_MUTE) mute_bits |= 1u << t;
+        if (tc.flags & SEQ_TRACK_F_SOLO) solo_bits |= 1u << t;
     }
+    /* Moved with the parameters, exactly as s_scale_prev/s_root_prev are and
+     * for the same reason: poll_edges compares against these, so leaving them
+     * holding the pre-load values would make the very next poll read them as a
+     * user edit and write the old mutes straight back over the pattern that
+     * was just loaded. */
+    s_mute_prev = mute_bits;
+    s_solo_prev = solo_bits;
     s_scale_prev = cfg.scale;
     s_root_prev = cfg.root;
     /* seq.steps mirrors the *edited track's* length, so it has to be moved

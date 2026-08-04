@@ -593,6 +593,28 @@ void handle_seq_track(uint8_t seq, const uint8_t* p, uint16_t plen) {
         }
         seq_track_cfg_t cfg;
         memcpy(&cfg, p + 3, sizeof(cfg));
+        /* Mute and solo are not the client's to send here. They are owned by
+         * the trk<N>.mute/solo parameters — that is what the playback path
+         * reads (seq_play's track_audible()), and seqarp mirrors them into
+         * these flags so they travel with a saved pattern.
+         *
+         * A client edits one field at a time but has to send the whole struct
+         * back, so what it sends for the other fields is whatever its last read
+         * said. Muting a track moves the flag without going through this
+         * opcode, so any track-field edit made before the client re-read —
+         * changing the division, dragging the level — carried the pre-mute
+         * flags and quietly un-muted the track in the stored pattern. The
+         * parameter still said muted, so it still *sounded* muted, and the
+         * disagreement only showed up after a save and load.
+         *
+         * Keeping the stored bits is the conservative half of the fix: a
+         * client that wants to change a mute writes the parameter. */
+        seq_track_cfg_t prev;
+        seq_track_cfg_get(pattern, track, &prev);
+        cfg.flags = (uint8_t)((cfg.flags & ~(SEQ_TRACK_F_MUTE |
+                                             SEQ_TRACK_F_SOLO)) |
+                              (prev.flags & (SEQ_TRACK_F_MUTE |
+                                             SEQ_TRACK_F_SOLO)));
         seq_track_cfg_set(pattern, track, &cfg);
     }
     seq_track_cfg_t cfg;

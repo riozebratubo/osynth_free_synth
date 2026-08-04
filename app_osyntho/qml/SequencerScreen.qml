@@ -202,6 +202,17 @@ Item {
                 }
             }
 
+            // Copy another pattern over this one — the fastest way to make a
+            // variation, which is nearly always "the last one, but with X
+            // changed". The firmware does the copy in place (OP_SEQ_EDIT), so
+            // no pattern data travels over the link for it.
+            Button {
+                text: t.t("Copy…")
+                flat: true
+                enabled: Synth.seqPatterns > 1
+                onClicked: copyPatternDialog.open()
+            }
+
             Button {
                 text: t.t("Fill")
                 // Momentary: fill is a gesture, not a mode — so setParamNow,
@@ -290,9 +301,11 @@ Item {
 
             Repeater {
                 model: Synth.seqTracks
-                delegate: Button {
-                    id: trackBtn
+                delegate: Row {
+                    id: trackRow
                     required property int index
+                    spacing: 2
+
                     // Safe as bindings, unlike the page-level ids above: a
                     // delegate is only created once its model has content, and
                     // both models (Synth.kitSlots, Synth.seqTracks) are filled
@@ -300,17 +313,54 @@ Item {
                     // after every parameter's metadata is in. Any later model
                     // change recreates the delegates and re-resolves these.
                     readonly property int pidMute: Synth.paramIdForName("trk" + (index + 1) + ".mute")
-                    ParamValue { id: muteVal; paramId: trackBtn.pidMute }
+                    ParamValue { id: muteVal; paramId: trackRow.pidMute }
                     readonly property bool muted: muteVal.on
 
-                    text: (index + 1) + (muted ? " ✕" : "")
-                    highlighted: Synth.editTrack === index
-                    opacity: muted ? 0.45 : 1.0
-                    padding: 8
-                    onClicked: Synth.editTrack = index
-                    // Long-press mutes: the fastest live gesture, and it keeps
-                    // a second row of mute buttons off a phone screen.
-                    onPressAndHold: if (pidMute > 0) Synth.setParam(pidMute, muted ? 0 : 1)
+                    Button {
+                        text: trackRow.index + 1
+                        highlighted: Synth.editTrack === trackRow.index
+                        // Dimmed rather than marked: the M beside it now says
+                        // *which* state this is, so a second glyph in here only
+                        // competed with it for a very small button.
+                        opacity: trackRow.muted ? 0.45 : 1.0
+                        padding: 8
+                        onClicked: Synth.editTrack = trackRow.index
+                        // The long-press survives the button beside it: it is
+                        // the fastest gesture on a phone, where the M is a
+                        // small target, and it costs nothing to keep.
+                        // >= 0, matching the button beside it: paramIdForName
+                        // answers -1 for "no such name", and 0 is a real id.
+                        onPressAndHold: if (trackRow.pidMute >= 0)
+                                            Synth.setParam(trackRow.pidMute,
+                                                           trackRow.muted ? 0 : 1)
+                    }
+
+                    // Mute, in the open. It was a long-press and nothing else
+                    // before — undiscoverable, and impossible to read back at a
+                    // glance across eight tracks while playing.
+                    //
+                    // Synced, not plain-checkable: the firmware owns this
+                    // parameter and moves it on its own (a loaded sequence or
+                    // set republishes every track's mute from the pattern), so
+                    // a `checked` the button assigned itself would go stale.
+                    // See SyncedButton.qml.
+                    SyncedButton {
+                        text: "M"
+                        visible: trackRow.pidMute >= 0
+                        padding: 8
+                        font.bold: true
+                        // Red rather than the accent: mute is the one state
+                        // here that means "you are not hearing this", and it
+                        // has to read as different from the blue selection
+                        // highlight on the button it sits against.
+                        Material.accent: "#FF5252"
+                        // Filled when muted. The default checked Button is a
+                        // very quiet change, which is not enough for a state
+                        // you need to read across eight of these mid-take.
+                        highlighted: checked
+                        modelChecked: trackRow.muted
+                        onToggled: Synth.setParam(trackRow.pidMute, checked ? 1 : 0)
+                    }
                 }
             }
 
@@ -771,4 +821,75 @@ Item {
     TrackSheet { id: trackSheet }
     PlockDialog { id: plockDialog }
     SeqSetDialog { id: seqSetDialog }
+
+    // Copy a pattern onto the one being edited. Destructive and not undoable —
+    // the firmware overwrites in place — so it asks first, and the dialog is
+    // also where the source is picked rather than adding a second control to a
+    // toolbar that is already full.
+    Dialog {
+        id: copyPatternDialog
+
+        // The previous pattern, because a variation is nearly always of the one
+        // you just made. On the first pattern there is no previous, so the next
+        // one stands in — anything but the destination, which would be a no-op.
+        function defaultSource() {
+            const here = Synth.editPattern
+            const last = Math.max(0, Synth.seqPatterns - 1)
+            return here > 0 ? here - 1 : Math.min(1, last)
+        }
+
+        title: t.t("Copy pattern")
+        modal: true
+        anchors.centerIn: Overlay.overlay
+        width: Math.min(parent ? parent.width - 32 : 380, 420)
+        standardButtons: Dialog.Ok | Dialog.Cancel
+
+        onOpened: srcBox.value = defaultSource() + 1
+        onAccepted: {
+            const src = srcBox.value - 1
+            if (src !== Synth.editPattern) {
+                Synth.copyPattern(src, Synth.editPattern)
+            }
+        }
+
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: 10
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                Label {
+                    text: t.t("Copy from pattern")
+                    color: Material.foreground
+                }
+                SpinBox {
+                    id: srcBox
+                    from: 1
+                    to: Math.max(1, Synth.seqPatterns)
+                    value: copyPatternDialog.defaultSource() + 1
+                }
+            }
+
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                color: Material.foreground
+                text: t.ts("Everything in pattern %1 — every track's steps, "
+                           + "configuration and parameter locks — is replaced "
+                           + "by pattern %2. This cannot be undone.",
+                           Synth.editPattern + 1, srcBox.value)
+            }
+
+            // The one input this dialog can be given that does nothing at all.
+            // Better said than silently ignored on OK.
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                visible: srcBox.value - 1 === Synth.editPattern
+                color: "#FF5252"
+                text: t.t("That is the pattern being edited — pick another one.")
+            }
+        }
+    }
 }

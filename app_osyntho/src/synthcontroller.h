@@ -480,6 +480,19 @@ class SynthController : public QObject, public DatabaseClient {
   void handlePresetList(const QByteArray& payload, bool more);
   void handleEngineEvent(const QByteArray& payload);
 
+  // Pushes m_editTrack into the firmware's seq.edit.track, which is what the
+  // recorder writes to. Call after anything that moves m_editTrack, and on
+  // connect — the synth keeps its own selection across a disconnect.
+  void syncEditTrack();
+
+  // Records that this app just wrote pattern data, so a revision bump caused by
+  // that write does not trigger a re-read that undoes it.
+  void noteLocalSeqEdit();
+  // seq.mode == rec. A revision bump means something different then.
+  bool seqRecording() const;
+  // What a settled seq.rev change re-reads, which depends on the above.
+  void onSeqRevSettled();
+
   // Sequencer/kit frame handlers, all chunked like the preset list.
   void handleSeqInfo(const QByteArray& payload);
   void handleSeqSteps(const QByteArray& payload, bool more);
@@ -685,6 +698,10 @@ class SynthController : public QObject, public DatabaseClient {
   // window is this app's own echo, and re-reading on it would fight the
   // optimistic local edit that a grid drag depends on.
   qint64 m_lastLocalSeqEditMs = 0;
+  // Steps written locally since the current read cycle began. A read already in
+  // flight predates those writes and must not merge over them — see
+  // handleSeqSteps(). Cleared by refreshSequencer().
+  QSet<int> m_localStepEdits;
 
   QVariantList m_kitSlots;
   QVariantList m_kitSlotsAccum;

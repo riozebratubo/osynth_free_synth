@@ -65,6 +65,16 @@ constexpr int kInfoTopUpBudgetMs = 5000;
 // of the link a fast drum roll eats. Not restarted while it is already running,
 // so a burst costs one refresh per window rather than deferring forever.
 constexpr int kSeqRevSettleMs = 400;
+// The same settle while the transport is recording. Longer, because there the
+// bumps never stop: a take is a continuous stream of them, so this is the
+// period of a permanent re-read cycle rather than the tail of a one-off edit.
+// At 400 ms a walk over a long track could not finish before the next cycle
+// tore it down and started again, so the grid never converged *and* the link
+// stayed saturated — the app locked up and eventually dropped the connection.
+// The in-flight check in onSeqRevSettled() is what actually guarantees
+// convergence; this only keeps the quiet-link case from re-reading needlessly
+// often.
+constexpr int kSeqRevRecSettleMs = 1200;
 // Ignore a bump this soon after the app's own pattern write. Every edit this
 // app makes already refreshes (or applies optimistically), so its echo would
 // only re-read what it just sent — and mid-drag, re-reading is what makes the
@@ -110,6 +120,11 @@ constexpr quint16 ID_ENGINE_LAST = 0x02FF;
 // costs no extra traffic.
 constexpr quint16 ID_SEQ_POS = 0x040B;
 constexpr quint16 ID_SEQ_CURPAT = 0x040C;
+// seq.mode: 0 stop, 1 play, 2 rec. Read to tell a revision bump caused by live
+// recording (steps only, on the edited track) from one caused by a preset load
+// or a MIDI edit (which can move anything). See onSeqRevSettled().
+constexpr quint16 ID_SEQ_MODE = 0x0420;
+constexpr int SEQ_MODE_REC = 2;
 // seq.rev: read-only, bumped by the firmware whenever pattern data changes.
 // Pattern data is not parameter space and has no event opcode, so this is the
 // only way the app hears about a change it did not make — a step recorded from
@@ -184,13 +199,15 @@ SynthController::SynthController(QObject* parent) : QObject(parent) {
   connect(&m_followPatternTimer, &QTimer::timeout, this,
           &SynthController::refreshSequencer);
 
-  // Debounces a seq.rev change into one re-read. A full refresh rather than
-  // just the steps: the revision also covers track and pattern configuration
-  // and the parameter locks, and a preset load moves all of them at once.
+  // Debounces a seq.rev change into one re-read. Normally a full refresh: the
+  // revision also covers track and pattern configuration and the parameter
+  // locks, and a preset load moves all of them at once. onSeqRevSettled()
+  // narrows it to a steps re-read while the transport is recording, which is
+  // the one case that repeats indefinitely.
   m_seqRevTimer.setSingleShot(true);
   m_seqRevTimer.setInterval(kSeqRevSettleMs);
   connect(&m_seqRevTimer, &QTimer::timeout, this,
-          &SynthController::refreshSequencer);
+          &SynthController::onSeqRevSettled);
 
   m_discoveredCoalesceTimer.setSingleShot(true);
   m_discoveredCoalesceTimer.setInterval(kDiscoveredCoalesceMs);
@@ -418,6 +435,7 @@ void SynthController::resetState() {
   m_seqRevision = -1;  // the next connection's first value is not a change
   m_seqRevTimer.stop();
   m_lastLocalSeqEditMs = 0;
+  m_localStepEdits.clear();
   m_infoListAccum.clear();
   m_presetsAccum.clear();
   m_seqInfo = SynthProto::SeqInfo();
@@ -746,6 +764,11 @@ void SynthController::finishDiscovery() {
 
   // The sequencer and kit are not parameters, so discovery does not reach
   // them; ask once the parameter traffic has been queued.
+  //
+  // The edit target goes the other way: the app owns it, the synth is holding
+  // a stale one from before this connection, and only now are the parameter
+  // names known well enough to resolve it. See syncEditTrack().
+  syncEditTrack();
   refreshSequencer();
   refreshKit();
   // Same reasoning: the patch graph's structure is not parameter space, so
@@ -1080,7 +1103,8 @@ void SynthController::applyValue(quint16 id, float value, bool echo) {
       // already reading the sequencer in full.
       if (!first && nowMs() - m_lastLocalSeqEditMs > kSeqRevLocalGuardMs &&
           !m_seqRevTimer.isActive()) {
-        m_seqRevTimer.start();
+        m_seqRevTimer.start(seqRecording() ? kSeqRevRecSettleMs
+                                           : kSeqRevSettleMs);
       }
     }
   } else if (id == ID_SEQ_CURPAT) {
@@ -1503,6 +1527,16 @@ static bool isNotPatchMaterial(const QString& name) {
       // — or recording — behind the user.
       QStringLiteral("seq.mode"),
       QStringLiteral("loop.mode"),
+      // Editor cursors, not settings — they say *where the user is looking*,
+      // and only this app knows that. A patch saved while track 5 was selected
+      // carried seq.edit.track=5, and loading it moved the firmware's record
+      // target there without touching m_editTrack or anything on screen: the
+      // sequencer page still showed track 1 highlighted while live recording
+      // and step input landed on track 5. The firmware excludes both from its
+      // own presets for exactly this reason (presets.cpp, patch_skip_id /
+      // seqset_id); the app's filter just never grew the matching rows.
+      QStringLiteral("seq.edit.track"),
+      QStringLiteral("seq.edit.step"),
       // Read-only status the synth reports; writing them means nothing.
       QStringLiteral("seq.pos"),
       QStringLiteral("seq.curpat"),
@@ -1963,16 +1997,79 @@ void SynthController::setEditPattern(int pattern) {
   refreshSequencer();
 }
 
+// Mirror the edit target into seq.edit.track so live recording and step input
+// land on the track the user is looking at. The firmware holds that selection
+// itself and keeps it across a disconnect, so pushing it only when the user
+// *changes* tracks is not enough: with the app back at its default track 1 and
+// the synth still on whatever was recorded to last session, the highlighted
+// button and the track being written to were different ones — and nothing on
+// screen said so. Hence the unconditional push here, called from connect and
+// from every path that moves m_editTrack, including the ones that move it
+// without a user gesture.
+void SynthController::syncEditTrack() {
+  if (!m_connected) return;
+  // >= 0: paramIdForName() answers -1 for "no such name" (see mirrorLocal).
+  const int pid = paramIdForName(QStringLiteral("seq.edit.track"));
+  if (pid >= 0) setParam(pid, m_editTrack + 1);
+}
+
 void SynthController::setEditTrack(int track) {
   if (track < 0 || (m_seqInfo.valid && track >= m_seqInfo.tracks)) return;
   if (track == m_editTrack) return;
   m_editTrack = track;
   emit editTargetChanged();
-  // Mirror into seq.edit.track so live recording and step input land on the
-  // track the user is looking at.
-  const int pid = paramIdForName(QStringLiteral("seq.edit.track"));
-  if (pid > 0) setParam(pid, track + 1);
+  syncEditTrack();
   refreshSequencer();
+}
+
+// Called by every path that writes pattern data. Two jobs, both about not
+// letting a read undo what the user just did.
+//
+// The timestamp is the older one: a revision bump arriving within the guard
+// window is this app's own echo, and re-reading on it fights the optimistic
+// edit a grid drag depends on. But testing it only when the bump *arrives* left
+// a hole — a refresh already armed from an earlier bump was not cancelled, so
+// deleting a step less than a settle period after one meant the refresh fired
+// straight afterwards and put the step back. While recording, bumps stream in
+// continuously, so there was almost always one armed: that is why the delete
+// looked like it did nothing. Stop the armed one too; the next bump re-arms it.
+void SynthController::noteLocalSeqEdit() {
+  m_lastLocalSeqEditMs = nowMs();
+  m_seqRevTimer.stop();
+}
+
+bool SynthController::seqRecording() const {
+  return int(std::lround(paramValue(ID_SEQ_MODE))) == SEQ_MODE_REC;
+}
+
+// A seq.rev bump has settled. What it means depends on what the transport is
+// doing, and the recording case is the one that used to melt the link.
+//
+// Recording bumps the revision once per note, for as long as the take lasts.
+// Answering each with a full refreshSequencer() — SEQ_INFO, SEQ_PATTERN, a
+// pattern-wide p-lock listing, SEQ_TRACK, and only *then* a step walk that is
+// several round trips of its own — meant restarting a multi-round-trip read
+// every settle period and abandoning the one before it. It never converged: the
+// grid stayed stale, the link stayed busy, and a step edit made during it was
+// competing with that traffic for the firmware's four-deep command queue. That
+// is the freeze-then-disconnect.
+//
+// Nothing recording touches is in the expensive part. It writes steps, on the
+// edited track, and nothing else — not the track config, not the pattern
+// config, not a single p-lock. So re-read exactly that.
+void SynthController::onSeqRevSettled() {
+  if (!seqRecording()) {
+    refreshSequencer();
+    return;
+  }
+  // A walk is still in flight. Re-arm rather than tear it down and start over:
+  // restarting on a fixed period is precisely how the old path could never
+  // finish a long track.
+  if (m_stepsWindowNext >= 0) {
+    m_seqRevTimer.start(kSeqRevRecSettleMs);
+    return;
+  }
+  beginStepWalk();
 }
 
 void SynthController::refreshSequencer() {
@@ -2028,6 +2125,13 @@ void SynthController::requestSteps() {
 
 void SynthController::beginStepWalk() {
   m_stepsAccum.clear();
+  // Every window from here on is requested *after* the writes made so far, so
+  // the firmware answers them with those writes applied and the local values
+  // have nothing left to protect. Cleared here rather than in
+  // refreshSequencer() because the recording path (onSeqRevSettled) walks
+  // without a full refresh — anchoring it there would have let the set grow for
+  // a whole take, pinning a deleted step against the note recorded onto it next.
+  m_localStepEdits.clear();
   m_stepsWindowNext = 0;
   m_stepsWindowRetries = kStepsWindowRetries;
   requestSteps();
@@ -2126,7 +2230,8 @@ void SynthController::writeSteps(int first, int count) {
     if (batch.isEmpty()) break;
     send(OP_SEQ_STEPS,
          payloadSeqSetSteps(m_editPattern, m_editTrack, at, batch), true);
-  m_lastLocalSeqEditMs = nowMs();
+    for (int i = 0; i < batch.size(); ++i) m_localStepEdits.insert(at + i);
+    noteLocalSeqEdit();
   }
 }
 
@@ -2179,7 +2284,7 @@ void SynthController::toggleStep(int step, int note) {
     // Match the firmware's seq_step_clear(): clearing a step drops its locks.
     send(OP_SEQ_PLOCK,
          payloadSeqPlockClearStep(m_editPattern, m_editTrack, step), false);
-    m_lastLocalSeqEditMs = nowMs();
+    noteLocalSeqEdit();
     m_plocks.remove(plockKey(m_editTrack, step));
     emit plocksChanged();
   }
@@ -2228,7 +2333,8 @@ void SynthController::writeStep(int index) {
   send(OP_SEQ_STEPS,
        payloadSeqSetSteps(m_editPattern, m_editTrack, index, {m_steps.at(index)}),
        false);
-  m_lastLocalSeqEditMs = nowMs();
+  m_localStepEdits.insert(index);
+  noteLocalSeqEdit();
 }
 
 QVariantMap SynthController::trackConfig() const {
@@ -2305,7 +2411,7 @@ void SynthController::setTrackField(const QString& field, double value) {
   }
   emit trackConfigChanged();
   send(OP_SEQ_TRACK, payloadSeqSetTrack(m_editPattern, m_editTrack, c), true);
-  m_lastLocalSeqEditMs = nowMs();
+  noteLocalSeqEdit();
   // A length change moves the grid's extent: re-read from the top.
   if (field == QLatin1String("length")) {
     m_steps.resize(c.length);
@@ -2340,7 +2446,7 @@ void SynthController::setPatternField(const QString& field, double value) {
        payloadSeqSetPattern(m_editPattern, m_patternLength, m_patternScale,
                             m_patternRoot, m_patternSwing, m_patternName),
        true);
-  m_lastLocalSeqEditMs = nowMs();
+  noteLocalSeqEdit();
 }
 
 void SynthController::setPatternName(const QString& name) {
@@ -2352,32 +2458,32 @@ void SynthController::setPatternName(const QString& name) {
        payloadSeqSetPattern(m_editPattern, m_patternLength, m_patternScale,
                             m_patternRoot, m_patternSwing, m_patternName),
        true);
-  m_lastLocalSeqEditMs = nowMs();
+  noteLocalSeqEdit();
 }
 
 void SynthController::clearPattern(int pattern) {
   const int p = pattern < 0 ? m_editPattern : pattern;
   send(OP_SEQ_EDIT, payloadSeqClearPattern(p), true);
-  m_lastLocalSeqEditMs = nowMs();
+  noteLocalSeqEdit();
   if (p == m_editPattern) refreshSequencer();
 }
 
 void SynthController::clearTrack(int track) {
   const int t = track < 0 ? m_editTrack : track;
   send(OP_SEQ_EDIT, payloadSeqClearTrack(m_editPattern, t), true);
-  m_lastLocalSeqEditMs = nowMs();
+  noteLocalSeqEdit();
   if (t == m_editTrack) refreshSequencer();
 }
 
 void SynthController::copyPattern(int src, int dst) {
   send(OP_SEQ_EDIT, payloadSeqCopyPattern(src, dst), true);
-  m_lastLocalSeqEditMs = nowMs();
+  noteLocalSeqEdit();
   if (dst == m_editPattern) refreshSequencer();
 }
 
 void SynthController::rotateTrack(int delta) {
   send(OP_SEQ_EDIT, payloadSeqRotate(m_editPattern, m_editTrack, delta), true);
-  m_lastLocalSeqEditMs = nowMs();
+  noteLocalSeqEdit();
   refreshSequencer();
 }
 
@@ -2387,13 +2493,13 @@ void SynthController::euclidFill(int pulses, int steps, int rotate, int note,
        payloadSeqEuclid(m_editPattern, m_editTrack, pulses, steps, rotate, note,
                         velocity),
        true);
-  m_lastLocalSeqEditMs = nowMs();
+  noteLocalSeqEdit();
   refreshSequencer();
 }
 
 void SynthController::humanizeTrack(int amount) {
   send(OP_SEQ_EDIT, payloadSeqHumanize(m_editPattern, m_editTrack, amount), true);
-  m_lastLocalSeqEditMs = nowMs();
+  noteLocalSeqEdit();
   refreshSequencer();
 }
 
@@ -2405,7 +2511,7 @@ void SynthController::setPlock(int step, int pid, double value) {
   send(OP_SEQ_PLOCK,
        payloadSeqPlockSet(m_editPattern, m_editTrack, step, pid, float(value)),
        true);
-  m_lastLocalSeqEditMs = nowMs();
+  noteLocalSeqEdit();
   // Reflect locally so the grid shades the step without a round trip.
   QVariantList& locks = m_plocks[plockKey(m_editTrack, step)];
   for (int i = 0; i < locks.size(); ++i) {
@@ -2433,7 +2539,7 @@ void SynthController::clearPlock(int step, int pid) {
        payloadSeqPlockSet(m_editPattern, m_editTrack, step, pid,
                           std::numeric_limits<float>::quiet_NaN()),
        true);
-  m_lastLocalSeqEditMs = nowMs();
+  noteLocalSeqEdit();
   QVariantList& locks = m_plocks[plockKey(m_editTrack, step)];
   for (int i = 0; i < locks.size(); ++i) {
     if (locks.at(i).toMap().value("pid").toInt() == pid) {
@@ -2448,7 +2554,7 @@ void SynthController::clearPlock(int step, int pid) {
 void SynthController::clearStepPlocks(int step) {
   send(OP_SEQ_PLOCK, payloadSeqPlockClearStep(m_editPattern, m_editTrack, step),
        true);
-  m_lastLocalSeqEditMs = nowMs();
+  noteLocalSeqEdit();
   m_plocks.remove(plockKey(m_editTrack, step));
   emit plocksChanged();
   emit stepsChanged();
@@ -2463,7 +2569,7 @@ void SynthController::setSong(const QVariantList& chain) {
     entries.append({m.value("pattern").toInt(), qMax(1, m.value("repeats").toInt())});
   }
   send(OP_SEQ_SONG, payloadSeqSongSet(entries), true);
-  m_lastLocalSeqEditMs = nowMs();
+  noteLocalSeqEdit();
   m_song = chain;
   emit songChanged();
 }
@@ -2802,7 +2908,13 @@ void SynthController::handleSeqInfo(const QByteArray& payload) {
                              info.patterns != m_seqInfo.patterns ||
                              info.maxSteps != m_seqInfo.maxSteps;
   m_seqInfo = info;
-  if (m_editTrack >= info.tracks) m_editTrack = 0;
+  // Clamping moves the edit target without a user gesture, so the firmware has
+  // to be told — otherwise the app silently falls back to track 1 while the
+  // synth keeps recording onto the out-of-range one.
+  if (m_editTrack >= info.tracks) {
+    m_editTrack = 0;
+    syncEditTrack();
+  }
   if (m_editPattern >= info.patterns) m_editPattern = 0;
   emit seqInfoChanged();
   if (sizingChanged) emit editTargetChanged();
@@ -2835,7 +2947,15 @@ void SynthController::handleSeqSteps(const QByteArray& payload, bool more) {
   if (m_steps.size() != len) m_steps.resize(len);
   for (int i = 0; i < m_stepsAccum.size(); ++i) {
     const int at = m_stepsAccumFirst + i;
-    if (at >= 0 && at < m_steps.size()) m_steps[at] = m_stepsAccum.at(i);
+    if (at < 0 || at >= m_steps.size()) continue;
+    // A step the user has edited since this read cycle began keeps the app's
+    // value. The request went out before the write did, so the answer cannot
+    // contain it — merging it would resurrect exactly what was just deleted,
+    // which is what "I deleted the note and it came back" was. Cleared when the
+    // next refresh asks for the truth (refreshSequencer), by which point the
+    // revision guard has given the write time to land.
+    if (m_localStepEdits.contains(at)) continue;
+    m_steps[at] = m_stepsAccum.at(i);
   }
   const int next = m_stepsAccumFirst + int(m_stepsAccum.size());
   m_stepsAccum.clear();
