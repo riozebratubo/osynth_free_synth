@@ -137,6 +137,21 @@ std::atomic<uint32_t> s_ring_head{0}; /* written by producers */
 std::atomic<uint32_t> s_ring_tail{0}; /* written by the audio task */
 portMUX_TYPE s_ring_lock = portMUX_INITIALIZER_UNLOCKED;
 
+/* ---- per-block hit tap (S34), for the FX bus sidechain key ----
+ *
+ * Deliberately *not* fed from drums_trigger(): a queued hit is not a sounding
+ * hit. These are written by start_voice(), so a trigger dropped by a full
+ * ring, aimed at an empty slot, or arriving while a kit swap is in flight
+ * never keys the ducker — and the velocity recorded is the one the voice
+ * actually plays at.
+ *
+ * Plain statics, no atomics: the only producer (start_voice, from
+ * drums_pre_fx) and the only consumer (fx_process) both run on the audio
+ * task, in that order, inside one render callback. Cleared at the top of
+ * every drums_pre_fx() so a stale hit cannot key a second block. */
+uint8_t s_hit_vel[DRUM_SLOTS];
+uint16_t s_hit_delay[DRUM_SLOTS];
+
 /* ---- kits ---- */
 drum_kit_t s_kits[2];              /* double-buffered for the swap protocol */
 std::atomic<drum_kit_t*> s_kit{nullptr}; /* what the audio task plays */
@@ -284,6 +299,14 @@ void start_voice(const drum_kit_t* kit, int slot, int vel, uint32_t delay) {
     v.slot = (uint8_t)slot;
     v.choke = s.choke_group;
     v.active = true;
+
+    /* Publish the hit for this block's sidechain key. Several hits on one
+     * slot in one block keep the loudest: a ducker should follow the strongest
+     * onset, and 1.33 ms apart they are one event to the ear anyway. */
+    if (slot < DRUM_SLOTS && (uint8_t)vel > s_hit_vel[slot]) {
+        s_hit_vel[slot] = (uint8_t)vel;
+        s_hit_delay[slot] = (uint16_t)delay;
+    }
 }
 
 void SYNTH_RENDER_IRAM render_voices(const drum_kit_t* kit, size_t frames) {
@@ -425,6 +448,12 @@ void drums_click(bool accent) {
     s_click_pending.store(accent ? 2 : 1, std::memory_order_release);
 }
 
+uint8_t SYNTH_RENDER_IRAM drums_block_hit(int slot, uint16_t* delay_frames) {
+    if (slot < 0 || slot >= DRUM_SLOTS) return 0;
+    if (delay_frames != nullptr) *delay_frames = s_hit_delay[slot];
+    return s_hit_vel[slot];
+}
+
 void drums_trigger(int slot, int velocity, int micro_frames) {
     if (slot < 0 || slot >= DRUM_SLOTS || velocity <= 0) return;
     if (micro_frames < 0) micro_frames = 0;
@@ -462,6 +491,10 @@ bool drums_note_on(uint8_t channel, uint8_t note, uint8_t velocity) {
 void SYNTH_RENDER_IRAM drums_pre_fx(float* l, float* r, size_t frames) {
     if (frames > SYNTH_BLOCK_SIZE) frames = SYNTH_BLOCK_SIZE;
     s_scratch_frames = frames;
+
+    /* Before anything can set one: the tap describes this block only, and
+     * every early exit below still has to leave it empty. */
+    memset(s_hit_vel, 0, sizeof(s_hit_vel));
 
     const drum_kit_t* kit = s_kit.load(std::memory_order_acquire);
 

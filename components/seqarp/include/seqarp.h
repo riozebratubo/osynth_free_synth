@@ -117,6 +117,15 @@ void seqarp_set_beat_callback(seqarp_beat_fn fn, void* ctx);
 int seqarp_ticks_per_beat(void);
 int seqarp_beat_in_bar(void);
 
+/* The tempo the clock is *running* at, in BPM — derived from the live tick
+ * period, not from seq.tempo, so it reads the recovered tempo when slaved to
+ * an external MIDI clock (where seq.tempo is meaningless). The FX bus reads
+ * this every block for note-division delay times and LFO rates.
+ *
+ * Lock-free and safe from any task including the audio task, and safe to call
+ * before seqarp_init(): until the clock task has run once it reports 120. */
+float seqarp_bpm(void);
+
 /* Which pattern the app/preset system is currently pointed at. */
 int seqarp_edit_pattern(void);
 

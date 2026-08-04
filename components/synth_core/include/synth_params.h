@@ -95,10 +95,13 @@ public:
      * a fixed engine: 12 slots x up to 6 parameters is 73 ids where the
      * widest fixed engine registers 30. With the drum bus (71), the
      * sequencer, the FX bus, the matrix and the looper all resident, a full
-     * graph lands near 270. 384 keeps a real margin, because overflow is
-     * per-parameter and partial — a patch would come up with some of a
-     * node's controls missing rather than failing outright. */
-    static constexpr size_t kMaxParams = 384;
+     * graph lands near 270 — 323 since S34, which added 53 to the FX bus
+     * (six units, note-division sync and two LFOs). Raised from 384 to 448 in
+     * the same session to keep the margin that number was chosen for, because
+     * overflow is per-parameter and partial — a patch would come up with some
+     * of a node's controls missing rather than failing outright, which is a
+     * far more confusing thing to debug than a refusal. */
+    static constexpr size_t kMaxParams = 448;
     /* One per subscribing component: engines, presets, looper, drums,
      * ble_ctrl, persist, and codec on an ES8388 build — 7 as of S31b.
      * Raised from 8 to leave headroom,

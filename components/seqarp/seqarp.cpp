@@ -140,6 +140,13 @@ std::atomic<uint32_t> s_ticks{0};      /* sub-ticks produced by the timer */
 std::atomic<uint32_t> s_ext_clocks{0}; /* 0xF8 bytes received */
 std::atomic<uint64_t> s_ext_last_us{0};
 std::atomic<uint32_t> s_ext_period_us{20833 / kSubTicks};
+/* The tick period the timer is *actually* running at, republished by
+ * clk_task whenever it changes. seqarp_bpm() derives the effective tempo
+ * from this rather than from seq.tempo, so a consumer slaved to an external
+ * MIDI clock reads the recovered tempo instead of a stale internal setting.
+ * Seeded at 120 BPM: it is read from the audio task, which starts before the
+ * clock task has run once. */
+std::atomic<uint32_t> s_tick_period_us{(uint32_t)(20833 / kSubTicks)};
 std::atomic<uint32_t> s_flags{0};
 constexpr uint32_t kFlagStart = 1u << 0;    /* MIDI 0xFA */
 constexpr uint32_t kFlagContinue = 1u << 1; /* MIDI 0xFB */
@@ -591,6 +598,8 @@ void clk_task(void* arg) {
         }
         if (!timer_running || want_us != period_us) {
             period_us = want_us;
+            s_tick_period_us.store((uint32_t)period_us,
+                                   std::memory_order_relaxed);
             if (timer_running) {
                 esp_timer_restart(s_timer, period_us);
             } else {
@@ -930,6 +939,12 @@ void seqarp_set_beat_callback(seqarp_beat_fn fn, void* ctx) {
 
 int seqarp_ticks_per_beat(void) { return kPpqn; }
 int seqarp_beat_in_bar(void) { return s_beat_in_bar; }
+
+float seqarp_bpm(void) {
+    const uint32_t us = s_tick_period_us.load(std::memory_order_relaxed);
+    if (us == 0) return 120.0f; /* cannot happen; a division guard, not a case */
+    return 60000000.0f / ((float)us * (float)kPpqn);
+}
 
 int seqarp_edit_pattern(void) {
     if (s_p[PATTERN] == nullptr) return 0;

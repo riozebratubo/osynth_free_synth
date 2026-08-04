@@ -104,6 +104,21 @@ void drums_click(bool accent);
  * pass 0 for "as soon as possible". */
 void drums_trigger(int slot, int velocity, int micro_frames);
 
+/* Sidechain key tap (S34): the velocity (1..127) at which `slot` *started a
+ * voice* during the block currently being rendered, or 0 for "did not sound".
+ * `delay_frames`, when not null, receives the hit's offset inside the block,
+ * so a detector can place the impulse where the transient actually lands
+ * rather than at the block boundary.
+ *
+ * Reports what sounded, not what was requested: a hit dropped by a full
+ * trigger ring, aimed at an empty slot, or swallowed by a kit swap never
+ * appears here. Several hits on one slot in one block report the loudest.
+ *
+ * Audio task only, and only from *after* drums_pre_fx() has run in the same
+ * render callback — that is where it is filled in and where the previous
+ * block's value is cleared. The FX bus compressor is the caller. */
+uint8_t drums_block_hit(int slot, uint16_t* delay_frames);
+
 /* MIDI note → slot, using the note map stored in the kit (a General-MIDI
  * drum map for the factory kit). Returns true if a slot claimed the note, so
  * the MIDI router can swallow it instead of playing it on the synth engine.

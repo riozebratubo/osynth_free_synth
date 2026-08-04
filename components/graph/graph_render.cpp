@@ -176,24 +176,11 @@ inline float mod_in_prev(const PlanNode& n, int port, int v, size_t frames,
 
 /* ---- small shared math ----
  *
- * Rational tanh (Padé): within ~0.3% over |x| < 3 and monotone beyond it,
- * for four flops and no libm call in the sample loop. */
-inline float fast_tanh(float x) {
-    if (x < -3.0f) return -1.0f;
-    if (x > 3.0f) return 1.0f;
-    const float x2 = x * x;
-    return x * (27.0f + x2) / (27.0f + 9.0f * x2);
-}
-
-/* Triangle wavefolder: reflects at ±1 instead of clipping, so overdrive
- * adds harmonics rather than removing them. */
-inline float fold(float x) {
-    while (x > 1.0f || x < -1.0f) {
-        if (x > 1.0f) x = 2.0f - x;
-        if (x < -1.0f) x = -2.0f - x;
-    }
-    return x;
-}
+ * fast_tanh() and fold() moved to synth_dsp.h in S34, when the FX bus grew a
+ * drive unit that has to be the same two curves. Kept as names in this file's
+ * namespace so the Shaper kernel below reads unchanged. */
+using osynth::dsp::fast_tanh;
+using osynth::dsp::fold;
 
 /* ---- per-kind block state ----
  *

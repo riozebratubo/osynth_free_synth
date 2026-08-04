@@ -6,7 +6,7 @@ an ESP32S3 (or ESP32) and played from your phone (or Windows, Mac, Linux) over
 Bluetooth.
 
 ```
-  4 engines · 8 voices · 5 effects · 8×256-step sequencer
+  4 engines · 8 voices · 12 effects · 8×256-step sequencer
   16-slot drum kit · 8-track looper max 160s · USB audio + MIDI · BLE app
   presets + sequencer + looper persists
 ```
@@ -88,7 +88,18 @@ stopped.
 
 ### ✨ Modulation and FX
 
-- **FX bus:** chorus → delay → granular delay → reverb → bitcrush
+- **FX bus:** drive → chorus → flanger → phaser → delay → granular delay →
+  reverb → bitcrush → filter → EQ → compressor → stereo/output. Every unit is
+  skipped outright while its mix is 0, so the ones you aren't using are free.
+- **Compressor with a sidechain key** — glue the whole mix, or duck it off a
+  drum slot's trigger for the pumping that a groovebox is bought for. It sits
+  late enough in the chain to catch the reverb tail, which is what makes a
+  duck read as a duck.
+- **Tempo sync** — the delay locks to a note division (1/8, 1/8., 1/8T…) and
+  follows an external MIDI clock, not just the internal tempo.
+- **2 FX LFOs**, free or locked to anything from 8 bars to 1/32, reaching 27
+  destinations across the bus — including tremolo and auto-pan. The per-voice
+  mod matrix cannot touch the master bus; this is what does.
 - **8-slot mod matrix** — any source to any parameter, evaluated per voice
 - 2 LFOs, 2 envelopes, unison with stereo spread, glide, sustain pedal
 - **Module gating:** each engine declares the DSP blocks it uses; the rest are

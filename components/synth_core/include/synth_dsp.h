@@ -71,6 +71,34 @@ inline float soft_clip(float x) {
     return (x < 0.0f) ? -y : y;
 }
 
+/* ---- waveshapers (S28, shared with the FX bus in S34) ----
+ *
+ * Distinct from soft_clip() above, which is the *output stage* saturator and
+ * is the identity below its knee. These are the ones a patch reaches for on
+ * purpose. They live here rather than in one caller so that "fold" means the
+ * same curve in a graph patch and on the master bus — the two are routinely
+ * A/B'd against each other and a private copy that drifted would be a
+ * genuinely confusing bug to chase.
+ *
+ * Rational tanh (Padé): within ~0.3% over |x| < 3 and monotone beyond it,
+ * for four flops and no libm call in the sample loop. */
+inline float fast_tanh(float x) {
+    if (x < -3.0f) return -1.0f;
+    if (x > 3.0f) return 1.0f;
+    const float x2 = x * x;
+    return x * (27.0f + x2) / (27.0f + 9.0f * x2);
+}
+
+/* Triangle wavefolder: reflects at ±1 instead of clipping, so overdrive
+ * adds harmonics rather than removing them. */
+inline float fold(float x) {
+    while (x > 1.0f || x < -1.0f) {
+        if (x > 1.0f) x = 2.0f - x;
+        if (x < -1.0f) x = -2.0f - x;
+    }
+    return x;
+}
+
 /* ---- white noise (xorshift32) ---- */
 
 struct Noise {
