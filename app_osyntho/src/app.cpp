@@ -206,30 +206,6 @@ void App::setKeepScreenOn(bool on) {
 #endif
 }
 
-void App::setAndroidImmersiveMode(bool enabled) {
-#if defined(Q_OS_ANDROID)
-  // runOnAndroidMainThread takes a std::function<QVariant()>, so the lambda
-  // returns a QVariant.
-  QNativeInterface::QAndroidApplication::runOnAndroidMainThread([enabled]() -> QVariant {
-    QJniObject activity = QNativeInterface::QAndroidApplication::context();
-    if (not activity.isValid()) return {};
-    QJniObject window = activity.callObjectMethod("getWindow", "()Landroid/view/Window;");
-    if (not window.isValid()) return {};
-    QJniObject decorView = window.callObjectMethod("getDecorView", "()Landroid/view/View;");
-    if (not decorView.isValid()) return {};
-
-    // Deprecated in API 30 but still functional and simplest across versions:
-    // IMMERSIVE_STICKY | LAYOUT_STABLE | LAYOUT_HIDE_NAVIGATION |
-    // LAYOUT_FULLSCREEN | HIDE_NAVIGATION | FULLSCREEN.
-    const jint immersiveFlags = 0x1000 | 0x100 | 0x200 | 0x400 | 0x2 | 0x4;
-    decorView.callMethod<void>("setSystemUiVisibility", "(I)V", enabled ? immersiveFlags : 0);
-    return {};
-  });
-#else
-  Q_UNUSED(enabled);
-#endif
-}
-
 QString App::getVersionNumber() {
 #ifdef APP_VERSION_NUMBER
   return APP_VERSION_NUMBER;

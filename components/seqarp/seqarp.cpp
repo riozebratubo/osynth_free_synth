@@ -83,7 +83,7 @@ enum PIdx {
     SWING, PATTERN, SONG, SCALE, ROOT, FILL, ACCENT, POS, CURPAT, QUANT,
     EDIT_TRACK, EDIT_STEP,
     ARP_MODE, ARP_OCT, ARP_HOLD,
-    SEQ_MODE, SEQ_STEPS, COUNTIN,
+    SEQ_MODE, SEQ_STEPS, COUNTIN, REV,
     P_FIXED
 };
 constexpr int P_COUNT = P_FIXED + SEQ_TRACKS * 2;
@@ -170,8 +170,22 @@ int s_pattern_prev = 0;
 int s_scale_prev = -1;
 int s_root_prev = -1;
 int s_edit_track_prev = 1;
+/* The seq.steps mirror keeps two "last seen" values, and keeping them apart is
+ * load-bearing — see the mirror in poll_edges(). s_steps_prev is the last value
+ * of the *parameter*; s_len_prev is the last *track length* observed. They
+ * agree except in the window where one side has moved and the other has not,
+ * which is exactly the window the mirror has to reason about. */
 int s_steps_prev = -1;
+int s_len_prev = -1;
+/* Which pattern the mirror last described. seq.pattern can move on its own (a
+ * queued switch reaching its bar, a song chain), and that changes the subject
+ * just as much as switching track does. */
+int s_mirror_pat_prev = -1;
 bool s_fill_prev = false;
+/* Last seq.rev published. UINT32_MAX rather than 0 so the very first poll
+ * publishes — the model starts at revision 0, and a client that connects
+ * before any edit should still be told what "unchanged" looks like. */
+uint32_t s_rev_prev = 0xFFFFFFFFu;
 
 struct Pending {
     uint8_t note;
@@ -441,27 +455,76 @@ void poll_edges() {
         s_scale_prev = scale;
         s_root_prev = root;
     }
-    /* seq.steps mirrors the edited track's length in both directions: the
-     * app can drive it as a knob, and selecting another track updates it. */
+    /* seq.steps mirrors the edited track's length in both directions: the app
+     * can drive it as a knob (the generic seq.* page has one), a MIDI NRPN can,
+     * and selecting another track updates it.
+     *
+     * Two "last seen" values, not one, and that is the whole of S23d. This used
+     * to keep a single s_steps_prev doing both jobs — the last parameter value
+     * published *and* the last track length observed — which is only sound
+     * while the parameter is the sole way to change a length. It is not: the
+     * app sets lengths over OP_SEQ_TRACK, a completely different channel that
+     * never touches this parameter. So the parameter could sit holding a value
+     * from an earlier track while the track itself moved underneath, the
+     * "parameter changed" test fired on that stale difference, and the
+     * write-back put the old length straight back over the new one — about
+     * 20 ms after the user set it, which reads exactly as "the change does not
+     * apply". It needed a track switch first, because that is what left the
+     * parameter and the track describing different things.
+     *
+     * With the two split, precedence is what closes it: the *track* wins. A
+     * length that arrived over OP_SEQ_TRACK is a deliberate edit of that track,
+     * where a stale parameter is only ever an echo of somewhere else. */
     const int edit_track = pi(EDIT_TRACK);
     const int steps = pi(SEQ_STEPS);
     seq_track_cfg_t tc;
     const int trk = (edit_track >= 1 && edit_track <= SEQ_TRACKS)
                         ? edit_track - 1
                         : 0;
-    seq_track_cfg_get(seqarp_edit_pattern(), trk, &tc);
-    if (edit_track != s_edit_track_prev) {
+    /* Latched once: seqarp_edit_pattern() reads seq.pattern, which the
+     * transport can queue to a bar boundary, so reading it twice in one pass
+     * could publish from one pattern and write to another. */
+    const int mirror_pat = seqarp_edit_pattern();
+    seq_track_cfg_get(mirror_pat, trk, &tc);
+    if (edit_track != s_edit_track_prev || mirror_pat != s_mirror_pat_prev) {
+        /* A different track (or pattern) is being edited: neither previous
+         * value describes it, so resync both from what is actually there. */
         s_edit_track_prev = edit_track;
+        s_mirror_pat_prev = mirror_pat;
+        s_steps_prev = tc.length;
+        s_len_prev = tc.length;
+        ParamStore::instance().set(SEQ_PID_SEQ_STEPS, (float)tc.length,
+                                   ParamOrigin::Internal);
+    } else if (tc.length != s_len_prev) {
+        /* The track moved — an OP_SEQ_TRACK write, a preset load, a euclid
+         * fill. Publish it and adopt it as the parameter's value too, so the
+         * next pass cannot mistake the parameter's old contents for an edit. */
+        s_len_prev = tc.length;
         s_steps_prev = tc.length;
         ParamStore::instance().set(SEQ_PID_SEQ_STEPS, (float)tc.length,
                                    ParamOrigin::Internal);
     } else if (steps != s_steps_prev && steps >= 1) {
+        /* Only now is a parameter change unambiguous: the track has not moved
+         * since the last pass, so this really is the knob (or an NRPN). */
         tc.length = (uint16_t)steps;
-        seq_track_cfg_set(seqarp_edit_pattern(), trk, &tc);
+        seq_track_cfg_set(mirror_pat, trk, &tc);
         s_steps_prev = steps;
-    } else if (tc.length != s_steps_prev) {
-        s_steps_prev = tc.length;
-        ParamStore::instance().set(SEQ_PID_SEQ_STEPS, (float)tc.length,
+        s_len_prev = (uint16_t)steps;
+    }
+
+    /* seq.rev: "the pattern data changed", for anything holding a copy of it.
+     * Published from here rather than from seq_model.cpp so that a bulk edit
+     * — a Euclidean fill, a preset load, a 64-step BLE write — becomes one
+     * notification at the poll rate instead of one per step, and so that
+     * ParamStore::set() is never called from the tick path. Change-filtered,
+     * so a synth nobody is editing generates no traffic at all.
+     *
+     * Masked into the registered range: the store holds a float, and the app
+     * only ever compares this for inequality. See the descriptor. */
+    const uint32_t rev = seq_model_revision() & 0x00FFFFFFu;
+    if (rev != s_rev_prev) {
+        s_rev_prev = rev;
+        ParamStore::instance().set(SEQ_PID_REV, (float)rev,
                                    ParamOrigin::Internal);
     }
 }
@@ -716,6 +779,18 @@ bool note_tap(uint8_t note, uint8_t vel, bool on, void* ctx) {
     return consumed;
 }
 
+/* A note the drum bus claimed on its MIDI channel. It has already sounded;
+ * all that is left is to record it if the transport is armed. Runs on whichever
+ * input task delivered the note (USB or serial), never on seq_clk — the
+ * sequencer's own drum hits go straight to drums_trigger() and never pass
+ * through the router, so there is no self-recording loop to guard against. */
+void drum_tap(uint8_t note, uint8_t vel, void* ctx) {
+    (void)ctx;
+    if (pi(SEQ_MODE) != SEQ_REC) return;
+    const int slot = drums_slot_for_note(note);
+    if (slot >= 0) (void)seq_play_record_drum(slot, vel);
+}
+
 void realtime_cb(uint8_t status, void* ctx) {
     (void)ctx;
     switch (status) {
@@ -817,6 +892,17 @@ void build_params() {
                      (float)SEQ_DEFAULT_STEPS, nullptr, 0};
     s_params[n++] = {SEQ_PID_COUNTIN, "seq.countin", ParamType::Bool,
                      ParamCurve::Linear, 0.0f, 1.0f, 0.0f, nullptr, 0};
+    /* Read-only; mirrored from seq_model_revision() by the control poll. The
+     * range is what a float can still count exactly (2^24) rather than the
+     * counter's real 32-bit width: ParamStore holds floats, and past that
+     * point increments would start landing on the same value — which for a
+     * "has it changed?" signal means missing changes. It wraps there instead,
+     * which the app handles because it only ever compares for inequality.
+     *
+     * ~16.7 million edits is a long way past any session: at four steps a
+     * second it is a month and a half of continuous recording. */
+    s_params[n++] = {SEQ_PID_REV, "seq.rev", ParamType::Int,
+                     ParamCurve::Linear, 0.0f, 16777215.0f, 0.0f, nullptr, 0};
 
     for (int t = 0; t < SEQ_TRACKS; ++t) {
         char* mute = s_track_names[t * 2 + 0];
@@ -849,6 +935,13 @@ int seqarp_edit_pattern(void) {
     if (s_p[PATTERN] == nullptr) return 0;
     const int p = (int)(s_p[PATTERN]->load(std::memory_order_relaxed) + 0.5f);
     return (p >= 0 && p < SEQ_PATTERNS) ? p : 0;
+}
+
+int seqarp_record_drum(int slot, uint8_t velocity) {
+    /* Before the parameters are bound s_p[] is null and there is no transport
+     * to be armed, so this is also the "too early to record" test. */
+    if (s_p[SEQ_MODE] == nullptr || pi(SEQ_MODE) != SEQ_REC) return -1;
+    return seq_play_record_drum(slot, velocity);
 }
 
 size_t seqarp_pattern_export(int pattern, void* buf, size_t cap) {
@@ -945,6 +1038,7 @@ esp_err_t seqarp_init(void) {
     }
 
     midi_set_note_tap(note_tap, nullptr);
+    midi_set_drum_tap(drum_tap, nullptr);
     midi_set_realtime_callback(realtime_cb, nullptr);
 
     ESP_LOGI(TAG,

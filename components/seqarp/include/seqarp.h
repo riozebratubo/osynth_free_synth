@@ -60,6 +60,18 @@ extern "C" {
 #define SEQ_PID_SEQ_MODE  0x0420 /* enum stop | play | rec */
 #define SEQ_PID_SEQ_STEPS 0x0421 /* int, length of the edited track */
 #define SEQ_PID_COUNTIN   0x0422 /* bool, 4-beat count-in before play/rec */
+/* Read-only mirror of seq_model_revision(): "the pattern data changed".
+ *
+ * Pattern data is not parameter space and has no event opcode of its own, so
+ * a control surface had no way to learn about a change it did not make — a
+ * step recorded live, a Euclidean fill, a preset load. It could only re-read
+ * on a gesture, which is why a note recorded into a drum lane appeared on the
+ * app's grid when you left the track and came back, and not before.
+ *
+ * A read-only parameter needs neither: the S14 listener batches non-BLE writes
+ * out at ~20 Hz already. Same mechanism `graph.rev` uses for the modular
+ * patch. Only inequality is meaningful — see seq_model_revision(). */
+#define SEQ_PID_REV       0x0423 /* int, read-only pattern-data revision */
 
 /* ---- per-track live performance controls ----
  * Only mute and solo: everything else about a track is pattern data and is
@@ -107,6 +119,22 @@ int seqarp_beat_in_bar(void);
 
 /* Which pattern the app/preset system is currently pointed at. */
 int seqarp_edit_pattern(void);
+
+/* Records a drum hit as a step, when — and only when — seq.mode is rec.
+ * `slot` is a kit slot index; velocity 0 is ignored. Returns the step it wrote
+ * to, or -1 (not armed, no lane that can play this slot, sequencer disabled).
+ *
+ * This exists because a drum hit deliberately never reaches the MIDI note tap:
+ * midi_route_channel_message() hands drum-channel notes to the drum bus before
+ * the tap so they cannot become arpeggiator input, and the app's pads use their
+ * own opcode for velocity. Both therefore bypassed the recorder entirely —
+ * arming rec and hitting pads recorded nothing at all. Callers that trigger a
+ * drum outside the sequencer call this alongside; it is a no-op when not armed,
+ * so there is nothing to guard at the call site.
+ *
+ * Safe from any control task. Not from the audio task — it writes the pattern
+ * store and may touch the ParamStore. */
+int seqarp_record_drum(int slot, uint8_t velocity);
 
 #ifdef __cplusplus
 }

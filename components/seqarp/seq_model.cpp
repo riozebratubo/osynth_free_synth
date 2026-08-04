@@ -3,6 +3,7 @@
  */
 #include "seq_model.h"
 
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -25,6 +26,24 @@ int s_plock_count = 0;
 seq_song_entry_t s_song[SEQ_SONG_MAX];
 int s_song_len = 0;
 size_t s_bytes = 0;
+
+/* Bumped by every function below that changes pattern data. Its only job is to
+ * let a reader ask "is what I last read still current?" without diffing 128 KB
+ * — the app has no other way to find out, because pattern data is not
+ * parameter space and there is no event opcode carrying it.
+ *
+ * Deliberately outside the spinlock and deliberately not exact. A bulk edit
+ * bumps once per step, and a reader that catches the counter mid-burst simply
+ * reads again on the next one; what has to hold is only that the value
+ * *differs* from what a stale reader is holding, and a monotonic counter gives
+ * that for free. Relaxed ordering for the same reason: it guards nothing.
+ *
+ * The three tasks that mutate the store — BLE commands, the clock task's live
+ * recording, the preset task's loads — all go through the functions below, so
+ * there is no fourth path that could change data without moving this. */
+std::atomic<uint32_t> s_revision{0};
+
+inline void touch() { s_revision.fetch_add(1, std::memory_order_relaxed); }
 
 uint32_t s_rng = 0x9e3779b9u;
 
@@ -191,6 +210,10 @@ esp_err_t seq_model_init(void) {
 bool seq_model_ready(void) { return s_steps != nullptr; }
 size_t seq_model_bytes(void) { return s_bytes; }
 
+uint32_t seq_model_revision(void) {
+    return s_revision.load(std::memory_order_relaxed);
+}
+
 /* ======================= step access =================================== */
 
 void seq_step_get(int pattern, int track, int step, seq_step_t* out) {
@@ -221,6 +244,7 @@ void seq_step_set(int pattern, int track, int step, const seq_step_t* in) {
     taskENTER_CRITICAL(&s_lock);
     s_steps[step_index(pattern, track, step)] = s;
     taskEXIT_CRITICAL(&s_lock);
+    touch();
 }
 
 void seq_step_clear(int pattern, int track, int step) {
@@ -228,6 +252,7 @@ void seq_step_clear(int pattern, int track, int step) {
     taskENTER_CRITICAL(&s_lock);
     memset(&s_steps[step_index(pattern, track, step)], 0, sizeof(seq_step_t));
     taskEXIT_CRITICAL(&s_lock);
+    touch();
     seq_plock_clear_step(pattern, track, step);
 }
 
@@ -251,6 +276,7 @@ bool seq_step_toggle(int pattern, int track, int step, uint8_t note) {
         filled = true;
     }
     taskEXIT_CRITICAL(&s_lock);
+    touch();
     if (!filled) seq_plock_clear_step(pattern, track, step);
     return filled;
 }
@@ -292,6 +318,7 @@ void seq_track_cfg_set(int pattern, int track, const seq_track_cfg_t* in) {
     taskENTER_CRITICAL(&s_lock);
     s_pattern[pattern].track[track] = c;
     taskEXIT_CRITICAL(&s_lock);
+    touch();
 }
 
 void seq_pattern_cfg_get(int pattern, seq_pattern_cfg_t* out) {
@@ -320,6 +347,7 @@ void seq_pattern_cfg_set(int pattern, const seq_pattern_cfg_t* in) {
     for (int t = 0; t < SEQ_TRACKS; ++t) p.track[t] = s_pattern[pattern].track[t];
     s_pattern[pattern] = p;
     taskEXIT_CRITICAL(&s_lock);
+    touch();
 }
 
 int seq_track_length(int pattern, int track) {
@@ -359,6 +387,7 @@ void seq_track_clear(int pattern, int track) {
         }
     }
     taskEXIT_CRITICAL(&s_lock);
+    touch();
 }
 
 void seq_pattern_clear(int pattern) {
@@ -377,6 +406,7 @@ void seq_pattern_clear(int pattern) {
     taskENTER_CRITICAL(&s_lock);
     s_pattern[pattern] = fresh;
     taskEXIT_CRITICAL(&s_lock);
+    touch();
 }
 
 void seq_pattern_copy(int src, int dst) {
@@ -411,6 +441,7 @@ void seq_pattern_copy(int src, int dst) {
         s_plock[s_plock_count++] = l;
     }
     taskEXIT_CRITICAL(&s_lock);
+    touch();
 }
 
 void seq_track_rotate(int pattern, int track, int delta) {
@@ -447,6 +478,7 @@ void seq_track_rotate(int pattern, int track, int delta) {
         }
     }
     taskEXIT_CRITICAL(&s_lock);
+    touch();
 }
 
 void seq_track_euclid(int pattern, int track, int pulses, int steps,
@@ -494,6 +526,7 @@ void seq_track_euclid(int pattern, int track, int pulses, int steps,
     taskENTER_CRITICAL(&s_lock);
     s_pattern[pattern].track[track].length = (uint16_t)steps;
     taskEXIT_CRITICAL(&s_lock);
+    touch();
 }
 
 void seq_track_humanize(int pattern, int track, int amount) {
@@ -518,6 +551,7 @@ void seq_track_humanize(int pattern, int track, int amount) {
         }
         taskEXIT_CRITICAL(&s_lock);
     }
+    touch();
 }
 
 /* ======================= parameter locks =============================== */
@@ -550,6 +584,10 @@ bool plock_forbidden(uint16_t pid) {
         case 0x040F: /* seq.edit.step */
         case 0x0420: /* seq.mode       — transport */
         case 0x0421: /* seq.steps */
+        case 0x0423: /* seq.rev        — this counter; locking it would have a
+                      * step overwrite the "did anything change?" signal with a
+                      * fixed number, which is the one value that must never be
+                      * fixed */
         case 0x0703: /* drums.kit */
         case 0x0704: /* drums.trig */
             return true;
@@ -640,6 +678,7 @@ bool seq_plock_set(int pattern, int track, int step, uint16_t pid,
         }
     }
     taskEXIT_CRITICAL(&s_lock);
+    touch();
     return ok;
 }
 
@@ -656,6 +695,7 @@ void seq_plock_clear_step(int pattern, int track, int step) {
             (uint8_t)~SEQ_STEP_F_PLOCK;
     }
     taskEXIT_CRITICAL(&s_lock);
+    touch();
 }
 
 void seq_plock_clear_pattern(int pattern) {
@@ -664,6 +704,7 @@ void seq_plock_clear_pattern(int pattern) {
         if (s_plock[i].pattern == pattern) s_plock[i] = s_plock[--s_plock_count];
     }
     taskEXIT_CRITICAL(&s_lock);
+    touch();
 }
 
 /* ======================= song chain ==================================== */
@@ -692,6 +733,7 @@ void seq_song_set_length(int len) {
     }
     s_song_len = len;
     taskEXIT_CRITICAL(&s_lock);
+    touch();
 }
 
 void seq_song_set(int index, const seq_song_entry_t* in) {
@@ -714,6 +756,7 @@ void seq_song_set(int index, const seq_song_entry_t* in) {
     s_song[index] = e;
     if (index >= s_song_len) s_song_len = index + 1;
     taskEXIT_CRITICAL(&s_lock);
+    touch();
 }
 
 /* ======================= scale quantiser =============================== */

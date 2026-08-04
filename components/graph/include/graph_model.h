@@ -100,6 +100,13 @@ enum class Kind : uint8_t {
     Ladder,   /* 4-pole Moog, saturated feedback */
     Dual,     /* lowpass + highpass, spread apart */
     Vowel,    /* three morphing formants */
+    /* The analogue input as a source (S31f), audio rate. Appended for the same
+     * reason the filters above were: the value is the on-wire patch format.
+     *
+     * Registered on every build, including ones with no line input at all, so
+     * that the kind indices a saved patch stores mean the same thing
+     * everywhere; without the hardware it renders silence. */
+    LineIn,
     Count
 };
 
@@ -151,7 +158,30 @@ enum SahP { SAH_RATE = 0, SAH_N };
 enum ModMapP { MM_SCALE = 0, MM_OFFSET, MM_QUANT, MM_N };
 enum MidiP { MS_SRC = 0, MS_N };
 enum OutP { OUT_LEVEL = 0, OUT_PAN, OUT_N };
+/* LineIn (S31f). `mode` leads because it is the parameter that decides whether
+ * the node costs anything at all — see LineMode below. */
+enum LineP { LIN_MODE = 0, LIN_LEVEL, LIN_CHAN, LIN_N };
 } // namespace pidx
+
+/* What a LineIn node does with the keyboard.
+ *
+ * The graph is a *per-voice* engine: every node is evaluated once per sounding
+ * voice, and the output stage sums those voices. A source that is the same for
+ * all of them therefore needs an explicit answer to "how many times does it
+ * appear?", and there is no single right one — hence a parameter rather than a
+ * choice baked into the node.
+ *
+ *   Off   Renders silence and, more to the point, does not ask the engine to
+ *         keep rendering while nothing is held. Parking a node here costs
+ *         nothing; it is the switch, not a mute.
+ *   Free  One copy, always, whether or not a key is down — a line input that
+ *         behaves like a line input. The graph renders one extra voice row to
+ *         hold it (see graph_render.h), which is what this mode costs.
+ *   Gate  One copy per sounding voice, shaped by that voice's own chain. Three
+ *         keys held means three copies, each with its own envelope and filter
+ *         — which is the point: it turns the patch into a processor the
+ *         keyboard plays. */
+enum class LineMode : uint8_t { Off = 0, Free, Gate, Count };
 
 /* What a MidiSrc node emits. These are the graph's replacement for the S9
  * mod matrix's global sources — in a patchable graph a "source" is just a

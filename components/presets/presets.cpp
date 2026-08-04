@@ -326,6 +326,7 @@ bool skip_id(uint16_t id) {
         case SEQ_PID_FILL:    /* momentary performance control */
         case SEQ_PID_POS:     /* firmware-written telemetry */
         case SEQ_PID_CURPAT:
+        case SEQ_PID_REV:     /* pattern-data revision: a counter, not a setting */
         case SEQ_PID_PATTERN: /* navigation, owned by the sequence slots */
         case SEQ_PID_EDIT_TRACK:
         case SEQ_PID_EDIT_STEP:
@@ -696,6 +697,7 @@ bool seqset_id(uint16_t id) {
         case SEQ_PID_FILL:       /* momentary performance control */
         case SEQ_PID_POS:        /* firmware-written telemetry */
         case SEQ_PID_CURPAT:
+        case SEQ_PID_REV:        /* pattern-data revision, not a setting */
         case SEQ_PID_EDIT_TRACK: /* editor cursors */
         case SEQ_PID_EDIT_STEP:
         case SEQ_PID_SCALE:      /* pattern data, restored with the pattern */

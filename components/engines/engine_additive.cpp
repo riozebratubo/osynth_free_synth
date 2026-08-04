@@ -15,6 +15,17 @@
  * paying for 16 partials (watch the heartbeat's dsp/pk while sweeping
  * brightness).
  *
+ * That cull is not a budget, though, and S33b is where the difference
+ * mattered. It is a *threshold*, so it says nothing about the worst case —
+ * and at the default patch there is no worst case to speak of: brightness
+ * sits at 0.85 through every attack, the rolloff is 0.96 per partial, and
+ * all sixteen clear −60 dB comfortably. Eight voices of that is 128 partial
+ * oscillators, which measured 83 % of the block on an S3 against a 52 %
+ * total for subtractive — continuous underruns and, eventually, a task
+ * watchdog on the audio core. kPartialBudget below is the missing bound: a
+ * fixed number of partial oscillators shared over the sounding voices, so
+ * polyphony trades against harmonics instead of against the deadline.
+ *
  * Render shape: a partial-outer loop accumulates into a mono scratch buffer
  * (each partial's phase stays in a register), then one pass applies the
  * filter, the per-sample amp env and the voice gains. Culled partials keep
@@ -48,6 +59,7 @@
 #include "synth_mod.h"
 #include "synth_params.h"
 #include "synth_smooth.h"
+#include "synth_voice.h"
 
 static const char* TAG = "eng_add";
 
@@ -62,7 +74,19 @@ namespace {
 constexpr int kPartials = ADD_PARTIALS;
 
 struct AddVoice {
-    float phase[kPartials]; /* cycles, [0, 1) */
+    /* Phase as a 32-bit fraction of a cycle rather than a float in [0, 1).
+     *
+     * The wrap is the point. A float phase needs `if (ph >= 1) ph -= 1` after
+     * every advance — a compare and a branch inside the hottest loop in the
+     * firmware, executed 16 partials x 64 samples x 8 voices = 8192 times a
+     * block. An unsigned accumulator wraps by overflowing, which is free, and
+     * the LUT index falls out of a shift instead of a float multiply and a
+     * float-to-int conversion.
+     *
+     * Exactly as accurate: 32 bits of phase is far finer than the 2048-entry
+     * table's 11 bits of index plus the 21 bits of interpolation fraction this
+     * derives from the remainder, so nothing about the output changes. */
+    uint32_t phase[kPartials];
     dsp::Filt filt;         /* S33; off unless flt.on */
     dsp::Adsr env1;         /* amplitude, per sample */
     dsp::Adsr env2;         /* brightness + filter, block rate */
@@ -197,6 +221,7 @@ struct BlockCache {
     dsp::SvfMode fmode;
     dsp::FltType ftype;
     float cutoff, reso, fenv_oct, fkbd, fdrive, fspread, fvowel;
+    int max_partials; /* this block's share of kPartialBudget, per voice */
 };
 
 BlockCache s_bc;
@@ -222,6 +247,54 @@ constexpr float kInvSr = 1.0f / (float)SYNTH_SAMPLE_RATE;
 constexpr float kMaxStep = 0.49f;    /* keep phase increments below Nyquist */
 constexpr float kCullLevel = 1e-3f;  /* -60 dB: partials below drop out */
 constexpr float kBrightSlope = 1.8f; /* rolloff strength at brightness 0 */
+
+/* Cycles-to-fraction for the phase accumulator above, and the split of that
+ * accumulator into the sine table's index and the interpolation fraction. */
+constexpr float kPhaseScale = 4294967296.0f; /* 2^32 */
+constexpr int kIdxShift = 32 - 11;           /* detail::kSineN is 2048 = 2^11 */
+constexpr uint32_t kFracMask = (1u << kIdxShift) - 1u;
+constexpr float kFracScale = 1.0f / (float)(1u << kIdxShift);
+
+/* ---- polyphony budget (S33b) ----
+ *
+ * The one number that decides whether this engine fits. Everything else here
+ * is per-partial arithmetic; the cost is that arithmetic times how many
+ * partial oscillators are running, and nothing before this bounded that
+ * product. Sixteen partials times eight voices is 128 of them, and 128 does
+ * not fit — measured on an ESP32-S3 at 240 MHz:
+ *
+ *     subtractive, 8 voices:  dsp  52 %  [voi 30]   underruns flat
+ *     additive,    8 voices:  dsp 105 %  [voi 83]   underruns climbing,
+ *                                                   task watchdog on IDLE1
+ *
+ * So one partial oscillator costs 83/128 = 0.65 % of a block, on the
+ * pre-S33b loop. The engine is not sharing the chip with nothing: the FX bus
+ * measured 18.3 % and the looper 0.4 % in that same run, and the peak-to-EMA
+ * ratio across those readings was about 1.15 (51.6/57.6, 46.8/53.8) — so a
+ * peak ceiling of 90 % allows an EMA of 78 %, leaving the voices about 57 %,
+ * which is 88 partial oscillators.
+ *
+ * 64, not 88, because the figure above is measured against a loop this same
+ * session rewrote, and sizing a budget from a cost that is about to fall is
+ * how you end up back at 105 %. 64 is safe under the *old* per-partial cost
+ * and therefore safe under any improvement to it. Raising it is the intended
+ * next step once there is a fresh `voi` reading to raise it against.
+ *
+ * Distributed across whatever is sounding, so the budget only ever binds under
+ * polyphony: one to four voices still get all sixteen partials, five get
+ * twelve, eight get eight. Partials are dropped from the top, which is what
+ * the brightness rolloff already does continuously — a dense chord gets darker
+ * rather than glitching, and that is the trade this engine has to make
+ * somewhere. It used to make it by missing its deadline.
+ *
+ * Retune it against the heartbeat, not against taste: play the densest chord
+ * the patch allows and read `voi`. Room to raise this is `(64 - voi) / 0.65`
+ * more partials, less whatever margin the FX settings want. */
+constexpr int kPartialBudget = 64;
+/* Never below this, however many voices are sounding: a partial or two is not
+ * an additive engine, and past this point the honest answer is fewer voices,
+ * which the voice manager's stealing already provides. */
+constexpr int kMinPartialsPerVoice = 4;
 
 /* log2(n) for n = 1..16 — the tilt exponent in octaves; 4.0 = log2(16) */
 const float kLog2N[kPartials] = {
@@ -252,8 +325,10 @@ esp_err_t add_init(void) {
     s_sm = Smoothers{}; /* unprimed: the first block snaps to the patch */
     ESP_LOGI(TAG,
              "additive engine up: %u params, caps 0x%02x (%d partials, cull "
-             "< -60 dB / > Nyquist)",
-             (unsigned)P_COUNT, (unsigned)g_engine_additive.caps, kPartials);
+             "< -60 dB / > Nyquist, budget %d partial osc = %d each at %d "
+             "voices)",
+             (unsigned)P_COUNT, (unsigned)g_engine_additive.caps, kPartials,
+             kPartialBudget, kPartialBudget / SYNTH_VOICES, SYNTH_VOICES);
     return ESP_OK;
 }
 
@@ -304,6 +379,20 @@ void SYNTH_RENDER_IRAM add_begin_block(size_t frames) {
     b.fdrive = dsp::smooth_lin(s_sm.fdrive, pv(FLT_DRIVE));
     b.fspread = dsp::smooth_lin(s_sm.fspread, pv(FLT_SPREAD));
     b.fvowel = dsp::smooth_lin(s_sm.fvowel, pv(FLT_VOWEL));
+
+    /* Share the partial budget out over what is sounding (see kPartialBudget).
+     * The count is last block's — voice_manager_render() publishes it after
+     * the render — which is exactly right: it is the number of voices about to
+     * be rendered in all but the block a note starts or ends on, and being one
+     * block late on a limit that only bites at full polyphony costs nothing.
+     * Guarded at 1 so a first note gets the whole budget rather than a
+     * division by zero. */
+    size_t active = voice_manager_active_voices();
+    if (active < 1) active = 1;
+    int per = kPartialBudget / (int)active;
+    if (per < kMinPartialsPerVoice) per = kMinPartialsPerVoice;
+    if (per > kPartials) per = kPartials;
+    b.max_partials = per;
 }
 
 void add_voice_reset(void* vs) {
@@ -318,7 +407,7 @@ void add_note_on(void* vs, uint8_t note, float vel01, bool was_sounding) {
     const float vel = fmaxf(vel01, 1.0f / 127.0f);
     if (!was_sounding) {
         /* deterministic attack transient: all partials from phase zero */
-        for (int n = 0; n < kPartials; ++n) v.phase[n] = 0.0f;
+        for (int n = 0; n < kPartials; ++n) v.phase[n] = 0u;
         dsp::lfo_retrig(v.lfo1);
         dsp::lfo_retrig(v.lfo2);
     } else if (v.env1.level > 0.0f && v.vel > 0.0f) {
@@ -373,18 +462,23 @@ void SYNTH_RENDER_IRAM add_render(void* vs, const synth_voice_frame_t* f,
     const float dark = 1.0f - bright;
     const float r = expf(-kBrightSlope * dark * dark); /* per-partial rolloff */
 
-    /* cull: keep partials below Nyquist and above -60 dB */
-    float step[kPartials], gain[kPartials];
+    /* Cull: keep partials below Nyquist and above -60 dB, then stop at this
+     * block's share of the partial budget (kPartialBudget). The list is built
+     * in ascending n and the gains fall with n for any spectrum a drawbar set
+     * describes, so cutting it short drops the quietest and highest — the same
+     * end the brightness rolloff works from. */
+    float gain[kPartials];
+    uint32_t step[kPartials];
     uint8_t idx[kPartials];
     int count = 0;
     float rp = 1.0f; /* r^(n-1) */
-    for (int n = 0; n < kPartials; ++n) {
+    for (int n = 0; n < kPartials && count < b.max_partials; ++n) {
         const float g = b.base[n] * rp;
         rp *= r;
         const float st = step0 * b.ratio[n];
         if (g < kCullLevel || st > kMaxStep) continue;
         idx[count] = (uint8_t)n;
-        step[count] = st;
+        step[count] = (uint32_t)(st * kPhaseScale);
         gain[count] = g;
         ++count;
     }
@@ -395,21 +489,24 @@ void SYNTH_RENDER_IRAM add_render(void* vs, const synth_voice_frame_t* f,
         /* provably silent block: advance the live partials' phases in bulk
          * (culled partials keep their phase, same as the live behavior) */
         for (int k = 0; k < count; ++k) {
-            float ph = v.phase[idx[k]] + step[k] * (float)frames;
-            v.phase[idx[k]] = ph - floorf(ph);
+            v.phase[idx[k]] += step[k] * (uint32_t)frames;
         }
         return;
     }
 
+    /* The hot loop. 32-bit phase, so the wrap is the accumulator overflowing
+     * and the table index is a shift — see AddVoice::phase. */
     memset(s_acc, 0, frames * sizeof(float));
+    const float* const tbl = dsp::detail::g_sine;
     for (int k = 0; k < count; ++k) {
-        float ph = v.phase[idx[k]];
-        const float st = step[k];
+        uint32_t ph = v.phase[idx[k]];
+        const uint32_t st = step[k];
         const float g = gain[k];
         for (size_t i = 0; i < frames; ++i) {
-            s_acc[i] += g * dsp::sine01(ph);
+            const float* const e = tbl + (ph >> kIdxShift);
+            const float fr = (float)(ph & kFracMask) * kFracScale;
+            s_acc[i] += g * (e[0] + fr * (e[1] - e[0]));
             ph += st;
-            if (ph >= 1.0f) ph -= 1.0f;
         }
         v.phase[idx[k]] = ph;
     }

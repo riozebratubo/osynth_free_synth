@@ -1191,6 +1191,14 @@ void handle_frame(const uint8_t* d, size_t n) {
                 send_status(op, seq, ST_MALFORMED);
             } else {
                 drums_trigger(p[0], p[1], 0);
+                /* ...and into the sequencer if it is armed. A pad addresses a
+                 * kit slot directly rather than going through the MIDI router,
+                 * so it never met the recorder: arming rec and playing the pads
+                 * used to record nothing at all. A no-op unless seq.mode is
+                 * rec, so the hit costs the same as before while just playing.
+                 * Velocity 0 is the capability probe the app fires at discovery
+                 * and is dropped inside. */
+                (void)seqarp_record_drum(p[0], p[1]);
             }
             break;
         case OP_RENAME_PRESET:

@@ -32,6 +32,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "audio_io.h"
 #include "synth_config.h"
 #include "synth_mod.h"
 #include "synth_params.h"
@@ -59,8 +60,8 @@ float* s_zero = nullptr; /* one row of silence, shared by every unpatched
  * block's value for the ramp described in the file header. 12 x 8 x 4 B x 2
  * is under 800 bytes, which is why control-rate routing is effectively
  * free and audio-rate routing is not. */
-float s_ctl[kMaxNodes][SYNTH_VOICES];
-float s_ctl_prev[kMaxNodes][SYNTH_VOICES];
+float s_ctl[kMaxNodes][kRenderRows];
+float s_ctl_prev[kMaxNodes][kRenderRows];
 
 /* Per-slot parameter smoothers (S21). Keyed by slot rather than stored in
  * the plan so that a cable edit — which rebuilds the plan but leaves every
@@ -86,6 +87,49 @@ std::atomic<uint16_t> s_live_cost{0};
  * the same rate the voice manager's engine-switch mute uses. */
 float s_gain = 1.0f;
 constexpr float kGainStep = 0.125f;
+
+/* ---- the voiceless row (S31f) ----
+ *
+ * The state and the per-voice frame for the extra row a free-running LineIn
+ * renders into. It is a voice in every mechanical sense — the kernels index it
+ * like any other — and in no musical sense: no key is ever pressed on it.
+ *
+ * That last part is deliberate and worth knowing before patching. `gate` stays
+ * 0, so every Env node on this row sits idle and a MidiSrc `gate` reads 0:
+ * LineIn -> Filter -> Out passes audio, and LineIn -> VCA(env) -> Out is
+ * silent, because nothing ever opened that envelope. Which is the honest
+ * answer — the alternative, a permanently held phantom key, would make any
+ * patch start droning the moment a LineIn node was added — and `gate` mode
+ * exists for exactly the case where the input *should* be played by the
+ * keyboard.
+ *
+ * Reset once, by render_init(), and never again: the filter and shaper state
+ * on this row has to run continuously across blocks, which is the whole reason
+ * it is not borrowed from a real voice.
+ *
+ * Storage rather than a VoiceState object, because VoiceState has no default
+ * constructor — NodeState is a union of dsp types whose default constructors
+ * are non-trivial (constexpr, but non-trivial), which deletes the union's and
+ * so VoiceState's in turn. That is not an oversight to work around: it is
+ * exactly why the voice manager allocates its pool with heap_caps_calloc() and
+ * hands out raw bytes rather than constructing anything (synth_voice.cpp).
+ * Every VoiceState in this firmware begins as zeroed memory that voice_reset()
+ * then seeds, and this one is no different — static storage is zero-initialised
+ * and render_init() seeds it before any block can reference it. The accessor
+ * keeps the cast in one place and avoids a namespace-scope reference that would
+ * need dynamic initialisation. */
+alignas(VoiceState) uint8_t s_idle_voice_bytes[sizeof(VoiceState)];
+
+inline VoiceState& idle_voice() {
+    return *reinterpret_cast<VoiceState*>(s_idle_voice_bytes);
+}
+
+synth_voice_frame_t s_idle_frame = {
+    261.626f, /* middle C, for anything that tracks pitch on this row */
+    1.0f / (float)SYNTH_VOICES, /* the same headroom every voice gets, so the
+                                 * input sits at the level one held note would */
+    1.0f / (float)SYNTH_VOICES,
+};
 
 inline float* buf_row(int b, int v) {
     return s_buf[b] + (size_t)v * kStride;
@@ -191,7 +235,7 @@ esp_err_t render_init() {
                                       MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (s_zero == nullptr) return ESP_ERR_NO_MEM;
     for (int i = 0; i < kMaxBufs; ++i) {
-        s_buf[i] = (float*)heap_caps_calloc(kStride * SYNTH_VOICES,
+        s_buf[i] = (float*)heap_caps_calloc(kStride * kRenderRows,
                                             sizeof(float),
                                             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         if (s_buf[i] == nullptr) {
@@ -201,13 +245,17 @@ esp_err_t render_init() {
     }
     memset(s_ctl, 0, sizeof(s_ctl));
     memset(s_ctl_prev, 0, sizeof(s_ctl_prev));
+    /* The voiceless row is never pooled, so nothing else ever resets it — and
+     * a zero xorshift word is zero forever, which would make a Noise or S&H
+     * node on that row permanently silent. Seeded here, once. */
+    voice_reset(idle_voice());
     s_empty = Plan{};
     s_live.store(&s_empty, std::memory_order_release);
     s_pending.store(nullptr, std::memory_order_release);
     s_gain = 1.0f;
-    ESP_LOGI(TAG, "buffers: %d x %u voices x %u frames (%u B internal)",
-             kMaxBufs, (unsigned)SYNTH_VOICES, (unsigned)kStride,
-             (unsigned)(kMaxBufs * kStride * SYNTH_VOICES * sizeof(float)));
+    ESP_LOGI(TAG, "buffers: %d x %u rows x %u frames (%u B internal)",
+             kMaxBufs, (unsigned)kRenderRows, (unsigned)kStride,
+             (unsigned)(kMaxBufs * kStride * kRenderRows * sizeof(float)));
     return ESP_OK;
 }
 
@@ -388,8 +436,8 @@ float voice_level(const VoiceState& v) {
 
 /* ---- the render ---- */
 
-void SYNTH_RENDER_IRAM render_block(void* const* states,
-                                    const synth_voice_frame_t* frames,
+void SYNTH_RENDER_IRAM render_block(void* const* in_states,
+                                    const synth_voice_frame_t* in_frames,
                                     size_t n_voices, float* out_l,
                                     float* out_r, size_t n) {
     /* Adopt a staged plan at the bottom of the duck; ramp back up after.
@@ -413,9 +461,45 @@ void SYNTH_RENDER_IRAM render_block(void* const* states,
 
     const Plan* pl = s_live.load(std::memory_order_acquire);
     s_render_seq.fetch_add(1, std::memory_order_release);
-    if (pl->n_nodes == 0 || n_voices == 0 || (g0 == 0.0f && g1 == 0.0f)) return;
+    if (pl->n_nodes == 0 || (g0 == 0.0f && g1 == 0.0f)) return;
 
-    const int nv = (int)n_voices;
+    /* Does this patch want the voiceless row? Only a LineIn node set to `free`
+     * does, and only that mode makes the graph render with nothing held —
+     * which is why `off` is a real saving and not just a mute. The mode is a
+     * parameter rather than plan structure (changing it must not duck the
+     * output), so the question is asked per block; it is a walk of at most
+     * twelve kind comparisons, with a parameter read only where one matches. */
+    int idle_row = -1;
+    for (int t = 0; t < pl->n_nodes; ++t) {
+        if (pl->nodes[t].kind != Kind::LineIn) continue;
+        const int m = (int)pval(*pl, pl->nodes[t].slot, pidx::LIN_MODE,
+                                (float)(int)LineMode::Free);
+        if (m == (int)LineMode::Free) {
+            idle_row = (int)n_voices;
+            break;
+        }
+    }
+    if (n_voices == 0 && idle_row < 0) return; /* nothing sounding, nothing free */
+
+    /* The kernels below index `states` and `frames` per row and neither knows
+     * nor cares that the last one may be voiceless. Extending here rather than
+     * inside every kernel is what keeps that true. */
+    void* const* states = in_states;
+    const synth_voice_frame_t* frames = in_frames;
+    void* ext_states[kRenderRows];
+    synth_voice_frame_t ext_frames[kRenderRows];
+    if (idle_row >= 0) {
+        for (size_t v = 0; v < n_voices; ++v) {
+            ext_states[v] = in_states[v];
+            ext_frames[v] = in_frames[v];
+        }
+        ext_states[idle_row] = &idle_voice();
+        ext_frames[idle_row] = s_idle_frame;
+        states = ext_states;
+        frames = ext_frames;
+    }
+
+    const int nv = (idle_row >= 0) ? idle_row + 1 : (int)n_voices;
     const size_t nf = n;
     const float inv_nf = 1.0f / (float)nf;
     const float blk_rate = kSr * inv_nf; /* one update per block */
@@ -505,6 +589,63 @@ void SYNTH_RENDER_IRAM render_block(void* const* states,
                 float* dst = buf_row(node.out_buf, v);
                 for (size_t i = 0; i < nf; ++i) {
                     dst[i] = level * dsp::noise_next(rng);
+                }
+            }
+            break;
+        }
+
+        /* The analogue input, as a node (S31f). Reads the block audio_io
+         * captured at the top of this one — deliberately not through
+         * `in.route`, which names the three fixed bus mix points and has
+         * nothing to say about a patch; a graph patch is expected to run with
+         * that at off, and nothing here double-mixes if it is not.
+         *
+         * `mode` decides which rows get a copy, and it is the whole design:
+         *   off   every row silent, and the free-row pre-pass above did not
+         *         ask for the extra row, so this costs one memset per row
+         *   free  the voiceless row only, so the input appears exactly once
+         *         however many keys are down, and keeps flowing when none are
+         *   gate  every sounding voice, so each one's chain processes its own
+         *         copy — the keyboard plays the input
+         *
+         * A build with no line input (or one whose RX half never came up) gets
+         * a null block and renders silence. The kind stays registered either
+         * way: its index is what a saved patch stores. */
+        case Kind::LineIn: {
+            const int mode = (int)pval(*pl, slot, pidx::LIN_MODE,
+                                       (float)(int)LineMode::Free);
+            const int chan = (int)pval(*pl, slot, pidx::LIN_CHAN, 0.0f);
+            const float level = psm(*pl, slot, pidx::LIN_LEVEL, 1.0f);
+            const int16_t* in = audio_io_line_in_block();
+            for (int v = 0; v < nv; ++v) {
+                float* dst = buf_row(node.out_buf, v);
+                /* Which rows this mode feeds; the rest are cleared rather than
+                 * left holding the previous block, which a downstream filter
+                 * would ring on. */
+                const bool feed =
+                    in != nullptr &&
+                    ((mode == (int)LineMode::Gate && v != idle_row) ||
+                     (mode == (int)LineMode::Free && v == idle_row));
+                if (!feed) {
+                    memset(dst, 0, nf * sizeof(float));
+                    continue;
+                }
+                /* int16 -> [-1, 1) folded into the gain, so the loop is one
+                 * multiply per sample. `mix` halves the sum, so a mono source
+                 * on both channels comes back at its own level rather than
+                 * 6 dB up. */
+                const float g = level * (1.0f / 32768.0f);
+                if (chan == 1) {
+                    for (size_t i = 0; i < nf; ++i) dst[i] = (float)in[2 * i] * g;
+                } else if (chan == 2) {
+                    for (size_t i = 0; i < nf; ++i) {
+                        dst[i] = (float)in[2 * i + 1] * g;
+                    }
+                } else {
+                    const float gh = g * 0.5f;
+                    for (size_t i = 0; i < nf; ++i) {
+                        dst[i] = ((float)in[2 * i] + (float)in[2 * i + 1]) * gh;
+                    }
                 }
             }
             break;

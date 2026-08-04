@@ -202,8 +202,10 @@ Pane {
                             text: t.t("Fullscreen (immersive)")
                             checked: App.settingIsTrue("android_immersive")
                             onToggled: {
-                                App.saveSetting("android_immersive", checked ? "true" : "false")
-                                App.setAndroidImmersiveMode(checked)  // no-op off Android
+                                // Saves the setting and moves the window; a
+                                // live toggle has to do both. See setImmersive()
+                                // in Main.qml.
+                                UI.window.setImmersive(checked)
                             }
                         }
                         Text {

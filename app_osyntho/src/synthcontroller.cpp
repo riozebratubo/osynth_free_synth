@@ -55,6 +55,21 @@ constexpr int kInfoPumpIntervalMs = 60;    // pump/watchdog cadence
 constexpr int kInfoTimeoutMs = 700;        // resend a request unanswered this long
 constexpr int kInfoBusyBackoffMs = 300;    // pause new sends after a BUSY
 constexpr int kDiscoveryBudgetMs = 40000;  // overall safety cap
+// Same idea, for an out-of-band metadata top-up (requestInfoTopUp). Far
+// shorter: a top-up is a node's worth of ids on an otherwise idle link, not a
+// whole registry competing with a connect burst.
+constexpr int kInfoTopUpBudgetMs = 5000;
+// How long a seq.rev change settles before the app re-reads. Recording live
+// bumps the revision once per note, and each re-read is a sequencer refresh —
+// so this is the trade between how quickly a recorded step appears and how much
+// of the link a fast drum roll eats. Not restarted while it is already running,
+// so a burst costs one refresh per window rather than deferring forever.
+constexpr int kSeqRevSettleMs = 400;
+// Ignore a bump this soon after the app's own pattern write. Every edit this
+// app makes already refreshes (or applies optimistically), so its echo would
+// only re-read what it just sent — and mid-drag, re-reading is what makes the
+// grid flicker under the finger.
+constexpr int kSeqRevLocalGuardMs = 700;
 // The list request is the linchpin (no list -> no ids). Resend if unanswered.
 constexpr int kListWatchdogMs = 1200;
 constexpr int kListRetries = 8;
@@ -95,6 +110,12 @@ constexpr quint16 ID_ENGINE_LAST = 0x02FF;
 // costs no extra traffic.
 constexpr quint16 ID_SEQ_POS = 0x040B;
 constexpr quint16 ID_SEQ_CURPAT = 0x040C;
+// seq.rev: read-only, bumped by the firmware whenever pattern data changes.
+// Pattern data is not parameter space and has no event opcode, so this is the
+// only way the app hears about a change it did not make — a step recorded from
+// the keyboard or a drum pad, a preset load. Absent on firmware older than
+// S23c, in which case nothing below ever runs. Only inequality is meaningful.
+constexpr quint16 ID_SEQ_REV = 0x0423;
 // Modular graph telemetry (S28). graph.rev is how the app learns the patch
 // changed without a dedicated event opcode — including changes it did not
 // cause, such as a preset load replacing the whole graph.
@@ -161,6 +182,14 @@ SynthController::SynthController(QObject* parent) : QObject(parent) {
   m_followPatternTimer.setSingleShot(true);
   m_followPatternTimer.setInterval(kFollowPatternMs);
   connect(&m_followPatternTimer, &QTimer::timeout, this,
+          &SynthController::refreshSequencer);
+
+  // Debounces a seq.rev change into one re-read. A full refresh rather than
+  // just the steps: the revision also covers track and pattern configuration
+  // and the parameter locks, and a preset load moves all of them at once.
+  m_seqRevTimer.setSingleShot(true);
+  m_seqRevTimer.setInterval(kSeqRevSettleMs);
+  connect(&m_seqRevTimer, &QTimer::timeout, this,
           &SynthController::refreshSequencer);
 
   m_discoveredCoalesceTimer.setSingleShot(true);
@@ -384,6 +413,11 @@ void SynthController::resetState() {
   m_infoSeqToId.clear();
   m_infoBackoffUntilMs = 0;
   m_discoveryStartMs = 0;
+  m_infoTopUp = false;
+  m_infoTopUpUntilMs = 0;
+  m_seqRevision = -1;  // the next connection's first value is not a change
+  m_seqRevTimer.stop();
+  m_lastLocalSeqEditMs = 0;
   m_infoListAccum.clear();
   m_presetsAccum.clear();
   m_seqInfo = SynthProto::SeqInfo();
@@ -428,6 +462,9 @@ void SynthController::onInfoRead(const QByteArray& info) {
 
 void SynthController::beginDiscovery(DiscoveryScope scope) {
   m_discovering = true;
+  // A pass supersedes any top-up: it fetches the firmware's own id list, which
+  // by definition includes everything a top-up was chasing.
+  m_infoTopUp = false;
   m_discoveryScope = scope;
   m_awaitingInfoList = true;
   m_listRetries = kListRetries;
@@ -550,19 +587,39 @@ void SynthController::sendInfoRequest(quint16 id) {
 // call back into here to fill the freed slot immediately, so throughput tracks
 // the link/firmware speed without ever flooding it.
 void SynthController::pumpInfoRequests() {
-  if (!m_discovering) return;
+  // Two callers share this pump and its flow-control window: a discovery pass,
+  // and the small top-ups requestInfoTopUp() queues for ids the firmware
+  // registered after discovery finished. Only a pass has an id list to wait
+  // for, a budget to spend, or an end to declare — a top-up just drains.
+  if (!m_discovering && !m_infoTopUp) return;
   // Nothing to pump — and nothing to conclude from an empty pending set —
   // until the id list has landed.
-  if (m_awaitingInfoList) return;
+  if (m_discovering && m_awaitingInfoList) return;
 
   if (m_pendingInfoIds.isEmpty()) {
-    finishDiscovery();
+    if (m_discovering) {
+      finishDiscovery();
+    } else {
+      m_infoTopUp = false;
+      m_infoRequestTimer.stop();
+    }
     return;
   }
-  if (nowMs() - m_discoveryStartMs > kDiscoveryBudgetMs) {
+  if (m_discovering && nowMs() - m_discoveryStartMs > kDiscoveryBudgetMs) {
     qDebug() << "Synth | Discovery: budget spent;" << m_pendingInfoIds.size()
              << "infos still missing.";
     finishDiscovery();
+    return;
+  }
+  if (!m_discovering && nowMs() > m_infoTopUpUntilMs) {
+    qDebug() << "Synth | Info top-up: budget spent;" << m_pendingInfoIds.size()
+             << "infos still missing.";
+    m_infoTopUp = false;
+    m_infoRequestTimer.stop();
+    m_pendingInfoIds.clear();
+    m_infoInflight.clear();
+    m_infoSeqToId.clear();
+    m_infoQueue.clear();
     return;
   }
 
@@ -628,8 +685,39 @@ void SynthController::onInfoBadArg(quint8 seq) {
   if (m_discovering && !m_awaitingInfoList && m_pendingInfoIds.isEmpty()) finishDiscovery();
 }
 
+// Metadata for a handful of ids that were not in the connect-time listing,
+// because the firmware had not registered them yet. Deliberately routed through
+// the discovery pump rather than sent straight out: these ids are exactly the
+// ones a dropped request strands for good — there is no later pass that would
+// notice they are missing — and the pump is where the retry, the timeout reap
+// and the BUSY back-off already live.
+//
+// A no-op while a discovery pass is running: that pass fetches the id list from
+// the firmware, so anything registered by then is already on its work queue.
+void SynthController::requestInfoTopUp(const QList<quint16>& ids) {
+  if (!m_connected || m_discovering || ids.isEmpty()) return;
+  int queued = 0;
+  for (quint16 id : ids) {
+    const auto it = m_params.constFind(id);
+    if (it != m_params.constEnd() && it->infoKnown) continue;
+    if (m_pendingInfoIds.contains(id)) continue;
+    m_pendingInfoIds.insert(id);
+    queueInfoId(id);
+    ++queued;
+  }
+  if (queued == 0) return;
+  m_infoTopUp = true;
+  // Extended, not reset, if one is already running: two node edits in a row
+  // share a pass rather than the second cutting the first short.
+  const qint64 until = nowMs() + kInfoTopUpBudgetMs;
+  if (until > m_infoTopUpUntilMs) m_infoTopUpUntilMs = until;
+  pumpInfoRequests();          // prime the window
+  m_infoRequestTimer.start();  // keep it topped up + reap timeouts
+}
+
 void SynthController::finishDiscovery() {
   m_discovering = false;
+  m_infoTopUp = false;
   m_infoRequestTimer.stop();
   m_infoInflight.clear();
   m_infoSeqToId.clear();
@@ -919,6 +1007,8 @@ void SynthController::handleParamInfoSingle(const QByteArray& payload) {
     } else if (wasPending) {
       pumpInfoRequests();  // a slot freed — send the next one right away
     }
+  } else if (m_infoTopUp && wasPending) {
+    pumpInfoRequests();  // same, for the out-of-band top-up path
   }
 }
 
@@ -975,6 +1065,23 @@ void SynthController::applyValue(quint16 id, float value, bool echo) {
     if (pos != m_playhead) {
       m_playhead = pos;
       emit playheadChanged();
+    }
+  } else if (id == ID_SEQ_REV) {
+    // The firmware changed pattern data. Until this existed there was no
+    // notification at all: a note recorded into a track did not appear on the
+    // grid until something else made the app re-read, which in practice meant
+    // switching away from the track and back.
+    const int rev = int(std::lround(value));
+    if (rev != m_seqRevision) {
+      const bool first = m_seqRevision < 0;
+      m_seqRevision = rev;
+      // Never on the first value seen. That one arrives from discovery's own
+      // value sweep and says nothing about a change — and the same pass is
+      // already reading the sequencer in full.
+      if (!first && nowMs() - m_lastLocalSeqEditMs > kSeqRevLocalGuardMs &&
+          !m_seqRevTimer.isActive()) {
+        m_seqRevTimer.start();
+      }
     }
   } else if (id == ID_SEQ_CURPAT) {
     // The firmware moved to another pattern (song chain, or a queued switch
@@ -1399,6 +1506,7 @@ static bool isNotPatchMaterial(const QString& name) {
       // Read-only status the synth reports; writing them means nothing.
       QStringLiteral("seq.pos"),
       QStringLiteral("seq.curpat"),
+      QStringLiteral("seq.rev"),  // pattern-data revision counter
       QStringLiteral("loop.pos"),
       QStringLiteral("loop.len"),
       QStringLiteral("loop.filled"),
@@ -2018,6 +2126,7 @@ void SynthController::writeSteps(int first, int count) {
     if (batch.isEmpty()) break;
     send(OP_SEQ_STEPS,
          payloadSeqSetSteps(m_editPattern, m_editTrack, at, batch), true);
+  m_lastLocalSeqEditMs = nowMs();
   }
 }
 
@@ -2070,6 +2179,7 @@ void SynthController::toggleStep(int step, int note) {
     // Match the firmware's seq_step_clear(): clearing a step drops its locks.
     send(OP_SEQ_PLOCK,
          payloadSeqPlockClearStep(m_editPattern, m_editTrack, step), false);
+    m_lastLocalSeqEditMs = nowMs();
     m_plocks.remove(plockKey(m_editTrack, step));
     emit plocksChanged();
   }
@@ -2118,6 +2228,7 @@ void SynthController::writeStep(int index) {
   send(OP_SEQ_STEPS,
        payloadSeqSetSteps(m_editPattern, m_editTrack, index, {m_steps.at(index)}),
        false);
+  m_lastLocalSeqEditMs = nowMs();
 }
 
 QVariantMap SynthController::trackConfig() const {
@@ -2194,6 +2305,7 @@ void SynthController::setTrackField(const QString& field, double value) {
   }
   emit trackConfigChanged();
   send(OP_SEQ_TRACK, payloadSeqSetTrack(m_editPattern, m_editTrack, c), true);
+  m_lastLocalSeqEditMs = nowMs();
   // A length change moves the grid's extent: re-read from the top.
   if (field == QLatin1String("length")) {
     m_steps.resize(c.length);
@@ -2228,6 +2340,7 @@ void SynthController::setPatternField(const QString& field, double value) {
        payloadSeqSetPattern(m_editPattern, m_patternLength, m_patternScale,
                             m_patternRoot, m_patternSwing, m_patternName),
        true);
+  m_lastLocalSeqEditMs = nowMs();
 }
 
 void SynthController::setPatternName(const QString& name) {
@@ -2239,27 +2352,32 @@ void SynthController::setPatternName(const QString& name) {
        payloadSeqSetPattern(m_editPattern, m_patternLength, m_patternScale,
                             m_patternRoot, m_patternSwing, m_patternName),
        true);
+  m_lastLocalSeqEditMs = nowMs();
 }
 
 void SynthController::clearPattern(int pattern) {
   const int p = pattern < 0 ? m_editPattern : pattern;
   send(OP_SEQ_EDIT, payloadSeqClearPattern(p), true);
+  m_lastLocalSeqEditMs = nowMs();
   if (p == m_editPattern) refreshSequencer();
 }
 
 void SynthController::clearTrack(int track) {
   const int t = track < 0 ? m_editTrack : track;
   send(OP_SEQ_EDIT, payloadSeqClearTrack(m_editPattern, t), true);
+  m_lastLocalSeqEditMs = nowMs();
   if (t == m_editTrack) refreshSequencer();
 }
 
 void SynthController::copyPattern(int src, int dst) {
   send(OP_SEQ_EDIT, payloadSeqCopyPattern(src, dst), true);
+  m_lastLocalSeqEditMs = nowMs();
   if (dst == m_editPattern) refreshSequencer();
 }
 
 void SynthController::rotateTrack(int delta) {
   send(OP_SEQ_EDIT, payloadSeqRotate(m_editPattern, m_editTrack, delta), true);
+  m_lastLocalSeqEditMs = nowMs();
   refreshSequencer();
 }
 
@@ -2269,11 +2387,13 @@ void SynthController::euclidFill(int pulses, int steps, int rotate, int note,
        payloadSeqEuclid(m_editPattern, m_editTrack, pulses, steps, rotate, note,
                         velocity),
        true);
+  m_lastLocalSeqEditMs = nowMs();
   refreshSequencer();
 }
 
 void SynthController::humanizeTrack(int amount) {
   send(OP_SEQ_EDIT, payloadSeqHumanize(m_editPattern, m_editTrack, amount), true);
+  m_lastLocalSeqEditMs = nowMs();
   refreshSequencer();
 }
 
@@ -2285,6 +2405,7 @@ void SynthController::setPlock(int step, int pid, double value) {
   send(OP_SEQ_PLOCK,
        payloadSeqPlockSet(m_editPattern, m_editTrack, step, pid, float(value)),
        true);
+  m_lastLocalSeqEditMs = nowMs();
   // Reflect locally so the grid shades the step without a round trip.
   QVariantList& locks = m_plocks[plockKey(m_editTrack, step)];
   for (int i = 0; i < locks.size(); ++i) {
@@ -2312,6 +2433,7 @@ void SynthController::clearPlock(int step, int pid) {
        payloadSeqPlockSet(m_editPattern, m_editTrack, step, pid,
                           std::numeric_limits<float>::quiet_NaN()),
        true);
+  m_lastLocalSeqEditMs = nowMs();
   QVariantList& locks = m_plocks[plockKey(m_editTrack, step)];
   for (int i = 0; i < locks.size(); ++i) {
     if (locks.at(i).toMap().value("pid").toInt() == pid) {
@@ -2326,6 +2448,7 @@ void SynthController::clearPlock(int step, int pid) {
 void SynthController::clearStepPlocks(int step) {
   send(OP_SEQ_PLOCK, payloadSeqPlockClearStep(m_editPattern, m_editTrack, step),
        true);
+  m_lastLocalSeqEditMs = nowMs();
   m_plocks.remove(plockKey(m_editTrack, step));
   emit plocksChanged();
   emit stepsChanged();
@@ -2340,6 +2463,7 @@ void SynthController::setSong(const QVariantList& chain) {
     entries.append({m.value("pattern").toInt(), qMax(1, m.value("repeats").toInt())});
   }
   send(OP_SEQ_SONG, payloadSeqSongSet(entries), true);
+  m_lastLocalSeqEditMs = nowMs();
   m_song = chain;
   emit songChanged();
 }
@@ -2415,9 +2539,28 @@ void SynthController::handleGraphKind(const QByteArray& payload) {
   while (m_graphKinds.size() <= k.kind) m_graphKinds.append(QVariantMap());
   m_graphKinds[k.kind] = m;
   emit graphKindsChanged();
+  // syncGraphParamInfo() needs a kind's parameter count to know how many ids
+  // that slot actually uses, so a model read that arrived before the kind table
+  // could not do its job. Re-run as each kind lands; it is a no-op once every
+  // occupied slot's metadata is known.
+  syncGraphParamInfo();
 }
 
 void SynthController::rebuildGraphNodes(const GraphModel& gm) {
+  // What each slot held before this read. Node parameter ids are positional —
+  // slot k owns the same block forever, whatever is in it (graph_model.h) — so
+  // a slot that changed kind keeps its ids and changes what they *mean*: index
+  // 1 was an oscillator's semitone offset and is a mixer's second level now.
+  // The metadata the app is holding for those ids describes the outgoing kind,
+  // and nothing would ever replace it, so the panel would draw the old node's
+  // controls under the new node's name. Forget the block and let
+  // syncGraphParamInfo() below fetch it again.
+  QList<int> prevKinds;
+  prevKinds.reserve(m_graphNodes.size());
+  for (const QVariant& v : std::as_const(m_graphNodes)) {
+    prevKinds.append(v.toMap().value("kind").toInt());
+  }
+
   m_graphNodes.clear();
   for (int i = 0; i < gm.nodes.size(); ++i) {
     const GraphNode& n = gm.nodes[i];
@@ -2431,8 +2574,79 @@ void SynthController::rebuildGraphNodes(const GraphModel& gm) {
     m["y"] = n.y;
     m_graphNodes.append(m);
   }
+  bool forgot = false;
+  for (int slot = 0; slot < prevKinds.size() && slot < m_graphNodes.size();
+       ++slot) {
+    const int now = m_graphNodes.at(slot).toMap().value("kind").toInt();
+    if (now == prevKinds.at(slot)) continue;
+    forgetNodeParamInfo(slot);
+    forgot = true;
+  }
+  // Tell the UI straight away rather than only when the replacement metadata
+  // lands: for the round trip in between, the panel should show nothing for
+  // those ids instead of the outgoing kind's controls.
+  if (forgot) scheduleParamsDiscovered();
+
   m_graphRevision = gm.revision;
   emit graphChanged();
+  syncGraphParamInfo();
+}
+
+// Drops everything the app knows about one slot's parameter block: metadata,
+// values and its place in the parameter order. Called when the slot's kind
+// changes, and deliberately thorough — a half-forgotten id (metadata dropped,
+// stale value kept) shows the new control sitting at the old node's number.
+void SynthController::forgetNodeParamInfo(int slot) {
+  for (int p = 0; p < m_graphParamsPerNode; ++p) {
+    const int id = graphNodeParamId(slot, p);
+    if (id < 0) continue;
+    m_params.remove(quint16(id));
+    m_paramOrder.removeAll(quint16(id));
+    m_pendingInfoIds.remove(quint16(id));
+  }
+}
+
+// A node's parameters do not exist until its slot has a kind — the firmware
+// registers that slot's block at the edit, which is long after the connect-time
+// PARAM_INFO listing discovery walked. Nothing else ever asks for them, so an
+// id belonging to a node added during the session stayed metadata-less, and
+// ParamControl.qml hides a control it cannot describe: adding a mixer drew a
+// node with no level knobs on it, and only a reconnect brought them back.
+//
+// Hung off the model read rather than off the edit, because every way the graph
+// can change ends here — a kind edit, a preset load replacing the whole patch,
+// the connect-time read — and each pass re-checks every occupied slot instead
+// of tracking what moved. That makes it self-healing: a top-up the link dropped
+// is picked up by the next model read rather than lost.
+void SynthController::syncGraphParamInfo() {
+  // During a discovery pass the firmware's own id list already covers every
+  // registered id, node parameters included; asking again would only duplicate
+  // it, kindCount times over, while the link is at its busiest.
+  if (!m_connected || !m_graphAvailable || m_discovering) return;
+
+  QList<quint16> missing;
+  for (int slot = 0; slot < m_graphNodes.size(); ++slot) {
+    const int kind = m_graphNodes.at(slot).toMap().value("kind").toInt();
+    if (kind == 0) continue;  // empty slot: registers nothing
+    // Only the ids the *kind* declares. A slot owns paramsPerNode ids whatever
+    // is in it, but a kind uses as many as it has parameters — asking for the
+    // rest would earn a BAD_ARG apiece on every model read. Zero while the kind
+    // table is still arriving, which is why handleGraphKind() calls back here.
+    const int nparams = graphKind(kind).value("params").toList().size();
+    for (int p = 0; p < nparams; ++p) {
+      const int id = graphNodeParamId(slot, p);
+      if (id < 0) continue;
+      const auto it = m_params.constFind(quint16(id));
+      if (it != m_params.constEnd() && it->infoKnown) continue;
+      missing.append(quint16(id));
+    }
+  }
+  if (missing.isEmpty()) return;
+  requestInfoTopUp(missing);
+  // Values as well as metadata: paramValue() falls back to the parameter's
+  // default until one lands, so a fresh node's knobs would otherwise show
+  // plausible numbers that are not what the synth is holding.
+  requestParamValues(missing);
 }
 
 void SynthController::handleGraphNodes(const QByteArray& payload) {

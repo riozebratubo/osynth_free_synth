@@ -375,11 +375,20 @@ void SYNTH_RENDER_IRAM audio_io_line_in_mon(float* l, float* r, size_t frames) {
     osynth::dsp::simd_mix_i16lr_f32(s_in, g * kInScale, l, r, frames);
 }
 
+const int16_t* SYNTH_RENDER_IRAM audio_io_line_in_block(void) {
+    /* NULL rather than a buffer of stale samples when the capture is not
+     * running: s_in is only refilled by line_in_capture(), which returns
+     * immediately in that case, so what is in it is whatever was there at
+     * boot. A caller that gets NULL renders silence and knows why. */
+    return s_line_in_ok ? s_in : nullptr;
+}
+
 #else /* empty bodies so render_chain() needs no #if of its own */
 
 void audio_io_line_in_fx(float*, float*, size_t) {}
 void audio_io_line_in_dry(float*, float*, size_t) {}
 void audio_io_line_in_mon(float*, float*, size_t) {}
+const int16_t* audio_io_line_in_block(void) { return nullptr; }
 
 #endif /* SYNTH_ENABLE_LINE_IN */
 

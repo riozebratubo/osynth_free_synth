@@ -32,6 +32,9 @@ const char* const kLfoWaves[] = {"sine", "triangle", "saw", "square", "s&h"};
 const char* const kShaperModes[] = {"tanh", "fold", "clip"};
 const char* const kMidiSources[] = {"vel", "note", "gate", "bend", "wheel",
                                     "rand"};
+/* LineIn (S31f). Order matches LineMode; append-only, like every list here. */
+const char* const kLineModes[] = {"off", "free", "gate"};
+const char* const kLineChans[] = {"mix", "left", "right"};
 
 /* ---- input port names (the app labels its cable jacks with these) ---- */
 
@@ -69,6 +72,21 @@ const ParamSpec kPOsc[] = {
 
 const ParamSpec kPNoise[] = {
     {"level", ParamType::Float, ParamCurve::Linear, 0, 1, 1, nullptr, 0},
+};
+
+/* LineIn (S31f). `mode` defaults to free rather than off: dropping this node
+ * onto the canvas should make the input audible, the same way dropping an
+ * oscillator makes a tone — an added node that does nothing until a second
+ * control is found is a worse first impression than one that costs a voice
+ * row. `off` is there to park it, and is the only setting that costs nothing.
+ *
+ * `level` runs to 2 because a line input is often well below full scale and
+ * the analogue trims (in.pga, and whatever is upstream) are not always enough;
+ * this is a digital gain and the output stage's soft clip catches the rest. */
+const ParamSpec kPLineIn[] = {
+    {"mode", ParamType::Enum, ParamCurve::Linear, 0, 2, 1 /*free*/, kLineModes, 3},
+    {"level", ParamType::Float, ParamCurve::Linear, 0, 2, 1, nullptr, 0},
+    {"chan", ParamType::Enum, ParamCurve::Linear, 0, 2, 0 /*mix*/, kLineChans, 3},
 };
 
 /* The S33 filter block, shared by "filter" (12 dB) and "filter24" (24 dB):
@@ -259,6 +277,13 @@ const KindDesc kKinds[(int)Kind::Count] = {
     {"ladder", Rate::Audio, 2, kInFilter, pidx::LAD_N, kPLadder, 120},
     {"dual", Rate::Audio, 2, kInFilter, pidx::DUA_N, kPDual, 190},
     {"vowel", Rate::Audio, 2, kInVowel, pidx::VOW_N, kPVowel, 280},
+    /* LineIn (S31f). Audio rate, no inputs. Cheaper than Noise: one int16 to
+     * float convert, one multiply and one store per sample, against noise's
+     * xorshift — but priced at the same 28 rather than lower, because in
+     * `free` mode it also brings an extra voice row's worth of *everything
+     * downstream of it* into the block. That is not something the per-node
+     * cost model can express, so the node carries a little of it. */
+    {"linein", Rate::Audio, 0, nullptr, pidx::LIN_N, kPLineIn, 28},
 };
 
 /* ---- registered parameter names ----

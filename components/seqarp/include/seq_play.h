@@ -66,6 +66,13 @@ int seq_play_position(int track);
  * step it wrote to, or -1 if it wrote nothing. */
 int seq_play_record_note(uint8_t note, uint8_t velocity);
 
+/* The same, for a drum hit addressed by kit slot: the app's pads and MIDI
+ * notes on the drum channel, neither of which passes the note tap. Picks the
+ * drum lane that can honestly play this slot — the edited track first — and
+ * records nothing if there is none. See the implementation for the full rule.
+ * Returns the step it wrote to, or -1. */
+int seq_play_record_drum(int slot, uint8_t velocity);
+
 #ifdef __cplusplus
 }
 #endif

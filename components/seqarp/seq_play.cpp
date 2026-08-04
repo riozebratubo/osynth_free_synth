@@ -684,44 +684,46 @@ int seq_play_position(int track) {
     return s_trk[track].step;
 }
 
-int seq_play_record_note(uint8_t note, uint8_t velocity) {
-    if (!seq_model_ready() || velocity == 0) return -1;
-    int track = pi(s_p_edit_trk) - 1;
-    if (track < 0) track = 0;
-    if (track >= SEQ_TRACKS) track = SEQ_TRACKS - 1;
+namespace {
 
-    seq_track_cfg_t cfg;
-    seq_track_cfg_get(s_pattern, track, &cfg);
-    const int len = seq_track_length(s_pattern, track);
-
-    int at;
-    if (s_running) {
-        /* Quantise to the grid the player can hear: the note lands on
-         * whichever step boundary is nearest, so playing slightly early
-         * records as "on the beat" rather than one step back. */
-        const TrackState& t = s_trk[track];
-        const int step_ticks = seq_div_ticks(cfg.div);
-        const int32_t into = s_tick - (t.base_tick - step_ticks);
-        at = t.step - 1;
-        if (into * 2 >= step_ticks) at = t.step; /* closer to the next one */
-        const int q = pi(s_p_quant);
-        if (q > 0) {
-            /* Coarser quantise: 1 = 1/4, 2 = 1/8, 3 = 1/16. */
-            static const int kQuantTicks[] = {0, 96, 48, 24};
-            const int qt = kQuantTicks[q < 4 ? q : 3];
-            if (qt > 0 && step_ticks > 0) {
-                const int per = qt / step_ticks;
-                if (per > 1) at = (at / per) * per;
-            }
-        }
-        while (at < 0) at += len;
-        at %= len;
-    } else {
-        at = pi(s_p_edit_stp);
+/* Which step a hit arriving *now* belongs on, for `track`. Split out of
+ * seq_play_record_note() when drum input joined it (S23c): the two differ only
+ * in which track they land on and what they write, and the placement — which
+ * is the part with the quantise arithmetic in it — must stay identical, or a
+ * kick played on a pad and the same kick played on the keyboard would land on
+ * different steps. */
+int record_step_for(int track, const seq_track_cfg_t& cfg, int len) {
+    if (!s_running) {
+        /* Stopped: step input. The cursor is where the hit goes. */
+        int at = pi(s_p_edit_stp);
         if (at < 0) at = 0;
         if (at >= len) at = 0;
+        return at;
     }
+    /* Quantise to the grid the player can hear: the note lands on
+     * whichever step boundary is nearest, so playing slightly early
+     * records as "on the beat" rather than one step back. */
+    const TrackState& t = s_trk[track];
+    const int step_ticks = seq_div_ticks(cfg.div);
+    const int32_t into = s_tick - (t.base_tick - step_ticks);
+    int at = t.step - 1;
+    if (into * 2 >= step_ticks) at = t.step; /* closer to the next one */
+    const int q = pi(s_p_quant);
+    if (q > 0) {
+        /* Coarser quantise: 1 = 1/4, 2 = 1/8, 3 = 1/16. */
+        static const int kQuantTicks[] = {0, 96, 48, 24};
+        const int qt = kQuantTicks[q < 4 ? q : 3];
+        if (qt > 0 && step_ticks > 0) {
+            const int per = qt / step_ticks;
+            if (per > 1) at = (at / per) * per;
+        }
+    }
+    while (at < 0) at += len;
+    return at % len;
+}
 
+/* Writes one recorded trig and advances the step-input cursor. */
+void record_write(int track, int at, int len, uint8_t note, uint8_t velocity) {
     seq_step_t st = {};
     st.note = note & 0x7F;
     st.vel = velocity & 0x7F;
@@ -735,7 +737,119 @@ int seq_play_record_note(uint8_t note, uint8_t velocity) {
         ParamStore::instance().set(SEQ_PID_EDIT_STEP, (float)((at + 1) % len),
                                    ParamOrigin::Internal);
     }
+}
+
+} // namespace
+
+int seq_play_record_note(uint8_t note, uint8_t velocity) {
+    if (!seq_model_ready() || velocity == 0) return -1;
+    int track = pi(s_p_edit_trk) - 1;
+    if (track < 0) track = 0;
+    if (track >= SEQ_TRACKS) track = SEQ_TRACKS - 1;
+
+    seq_track_cfg_t cfg;
+    seq_track_cfg_get(s_pattern, track, &cfg);
+    const int len = seq_track_length(s_pattern, track);
+    const int at = record_step_for(track, cfg, len);
+    record_write(track, at, len, note, velocity);
     ESP_LOGD(TAG, "rec: track %d step %d note %d vel %d", track + 1, at, note,
+             velocity);
+    return at;
+}
+
+/* Records a *drum slot* rather than a note — a pad on the app, or a MIDI note
+ * on the drum channel. Both reach the drum bus without ever passing the note
+ * tap (deliberately: a drum hit must not become arpeggiator input), which is
+ * why they were not recorded at all until now.
+ *
+ * Choosing the lane is the whole problem here, because a drum lane usually
+ * *is* one drum: it has a fixed `slot`, and its steps' notes are ignored. So
+ * writing a kick onto a lane bound to the snare would record a step that plays
+ * the wrong drum — the pattern would end up sounding nothing like what was
+ * played. The rule is therefore "the lane that can honestly represent this
+ * hit", preferring the one the user is looking at:
+ *
+ *   1. the edited track, if it is a drum lane in note-picks-the-slot mode
+ *      (it can hold any drum) or already bound to this slot;
+ *   2. otherwise any other drum lane bound to this slot, lowest first;
+ *   3. otherwise any other drum lane in note-picks-the-slot mode;
+ *   4. otherwise nothing is recorded — the hit still sounds.
+ *
+ * Case 4 is the one to know about: with every lane bound to a different drum
+ * and none in note mode, hitting a pad no lane owns records nothing rather
+ * than recording a lie. */
+int seq_play_record_drum(int slot, uint8_t velocity) {
+    if (!seq_model_ready() || velocity == 0 || slot < 0) return -1;
+    /* The note a lane in note-picks-the-slot mode has to store for the kit to
+     * resolve this slot again on playback. A slot the kit leaves empty has no
+     * note, so those lanes cannot represent it. */
+    const int slot_note = drums_slot_note(slot);
+
+    int edit = pi(s_p_edit_trk) - 1;
+    if (edit < 0) edit = 0;
+    if (edit >= SEQ_TRACKS) edit = SEQ_TRACKS - 1;
+
+    /* Can lane `t` play this slot, and if so what note does its step store?
+     * A fixed-slot lane ignores the step's note on playback, but the kit's note
+     * is stored anyway so switching that lane to note mode later does not
+     * silence the pattern — the same courtesy the app performs when the user
+     * makes that switch by hand. */
+    const auto lane_note = [&](int t, uint8_t* out) {
+        seq_track_cfg_t c;
+        seq_track_cfg_get(s_pattern, t, &c);
+        if (c.target != SEQ_TARGET_DRUM) return false;
+        if (c.slot == (uint8_t)slot) {
+            *out = (uint8_t)(slot_note >= 0 ? slot_note : 0);
+            return true;
+        }
+        if (c.slot == SEQ_SLOT_FROM_NOTE && slot_note >= 0) {
+            *out = (uint8_t)slot_note;
+            return true;
+        }
+        return false;
+    };
+
+    int track = -1;
+    uint8_t note = 0;
+    /* The track the user is looking at wins outright when it can hold the hit,
+     * in either mode: that is where they expect a recorded step to appear. */
+    if (lane_note(edit, &note)) {
+        track = edit;
+    } else {
+        /* Otherwise the lane that owns this drum, before any catch-all note
+         * lane — a kick belongs on the kick lane rather than on whichever
+         * general-purpose lane happens to come first. */
+        for (int t = 0; t < SEQ_TRACKS && track < 0; ++t) {
+            if (t == edit) continue;
+            seq_track_cfg_t c;
+            seq_track_cfg_get(s_pattern, t, &c);
+            if (c.target != SEQ_TARGET_DRUM || c.slot != (uint8_t)slot) continue;
+            note = (uint8_t)(slot_note >= 0 ? slot_note : 0);
+            track = t;
+        }
+        for (int t = 0; t < SEQ_TRACKS && track < 0; ++t) {
+            if (t == edit) continue;
+            seq_track_cfg_t c;
+            seq_track_cfg_get(s_pattern, t, &c);
+            if (c.target != SEQ_TARGET_DRUM ||
+                c.slot != SEQ_SLOT_FROM_NOTE || slot_note < 0) {
+                continue;
+            }
+            note = (uint8_t)slot_note;
+            track = t;
+        }
+    }
+    if (track < 0) {
+        ESP_LOGD(TAG, "rec: slot %d has no drum lane to land on", slot);
+        return -1;
+    }
+
+    seq_track_cfg_t cfg;
+    seq_track_cfg_get(s_pattern, track, &cfg);
+    const int len = seq_track_length(s_pattern, track);
+    const int at = record_step_for(track, cfg, len);
+    record_write(track, at, len, note, velocity);
+    ESP_LOGD(TAG, "rec: track %d step %d slot %d vel %d", track + 1, at, slot,
              velocity);
     return at;
 }

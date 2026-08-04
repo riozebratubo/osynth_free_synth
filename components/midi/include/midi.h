@@ -40,6 +40,16 @@ typedef bool (*midi_note_tap_fn)(uint8_t note, uint8_t velocity, bool on,
                                  void* ctx);
 void midi_set_note_tap(midi_note_tap_fn fn, void* ctx);
 
+/* Drum tap: a note the drum bus claimed on `drums.midich`, reported *after* it
+ * has been played. Those notes never reach the note tap above — the router
+ * gives them to the drum bus first, on purpose, so a drum note cannot become
+ * arpeggiator input — which also meant the sequencer's recorder never saw one.
+ * This is that path back, and only that: it observes, it cannot consume, and
+ * the hit sounds either way. Registered by seqarp_init(); the drum component
+ * does not know the sequencer exists, and this keeps it that way. */
+typedef void (*midi_drum_tap_fn)(uint8_t note, uint8_t velocity, void* ctx);
+void midi_set_drum_tap(midi_drum_tap_fn fn, void* ctx);
+
 /* Real-time callback: receives 0xF8/0xFA/0xFB/0xFC on the input's task. */
 typedef void (*midi_realtime_fn)(uint8_t status, void* ctx);
 void midi_set_realtime_callback(midi_realtime_fn fn, void* ctx);

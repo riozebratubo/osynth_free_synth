@@ -2,6 +2,9 @@ import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls.Material
 import QtQuick.Dialogs
+// Window.FullScreen (applyImmersive) and the Screen attached property. Needed
+// by real code, not only by the #7 diagnostics — do not drop it with them.
+import QtQuick.Window
 import QtCore
 
 import org.osynth.osyntho
@@ -14,6 +17,31 @@ ApplicationWindow {
     height: 720
     visible: true
     title: "Osyntho"
+
+    // Declared, deliberately, and not assigned from Component.onCompleted.
+    //
+    // On Android only the *show* sets the window's geometry:
+    // QAndroidPlatformWindow::setVisible() picks screen geometry for a
+    // fullscreen window and available geometry otherwise, while
+    // setWindowState() updates the system UI and nothing else. So a fullscreen
+    // state applied after the window is already visible hides the system bars
+    // and leaves the window the size it was — which is exactly the bug this
+    // went through: the top band went away (bars hidden, safe-area insets back
+    // to zero) and the bottom one stayed, because the window was still
+    // 1138x637 on a 1138x711 screen.
+    //
+    // A declared binding is evaluated before componentComplete, so
+    // QQuickWindowQmlImpl::applyWindowVisibility() takes the "visibility was
+    // set explicitly" branch and calls setVisibility() — which is
+    // setWindowStates(FullScreen) *then* setVisible(true), in that order, and
+    // the platform sees the state in time to size the window to the screen.
+    //
+    // Desktop is untouched: this evaluates to AutomaticVisibility there, which
+    // is the default anyway, and WindowStateSaver's Component.onCompleted
+    // assigns window.visibility imperatively afterwards — breaking this binding
+    // and restoring the saved state, exactly as before.
+    visibility: App.isAndroid() && App.settingIsTrue("android_immersive")
+                ? Window.FullScreen : Window.AutomaticVisibility
 
     Material.theme: App.theme.type === "dark" ? Material.Dark : Material.Light
     Material.accent: App.theme.materialAccent
@@ -32,18 +60,65 @@ ApplicationWindow {
         isEnabled: App.isDesktop()
     }
 
+    // Fullscreen on Android is a *window state*, not a pile of decor flags.
+    //
+    // Qt 6.11's Android plugin already implements immersive mode, and does it
+    // properly: Qt::WindowFullScreen makes QAndroidPlatformWindow size the
+    // window to the screen's full geometry rather than its available geometry,
+    // and calls QtWindowInsetsController.showFullScreen(), which does
+    // setDecorFitsSystemWindows(false) + WindowInsetsController.hide(systemBars)
+    // + BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE, and then posts
+    // requestApplyInsets() so the relayout actually happens.
+    //
+    // Setting the decor flags by hand — which this used to do, through
+    // App.setAndroidImmersiveMode() — fought all of that. The window stayed at
+    // *available* geometry (1138x637 of a 1138x711 screen), leaving the
+    // navigation-bar strip uncovered; and poking the flags behind the plugin's
+    // back left the insets stale, so ApplicationWindow's Qt 6.9+ automatic
+    // safe-area padding put another 64-91 px of dead space above the toolbar.
+    // Those were the black band at the top and the grey band at the bottom, and
+    // no amount of re-applying flags could have fixed either — task-switching
+    // "fixed" it only because that forced the insets to be recomputed.
+    // Re-assert the state. Safe to call as often as you like: it sets a window
+    // state and nothing else. The *initial* state comes from the `visibility`
+    // binding above, not from here — see there for why that ordering matters.
     function applyImmersive() {
-        if (App.isAndroid())
-            App.setAndroidImmersiveMode(App.settingIsTrue("android_immersive"))
+        if (!App.isAndroid()) return
+        mainWindow.visibility = App.settingIsTrue("android_immersive")
+            ? Window.FullScreen : Window.AutomaticVisibility
+    }
+
+    // The settings toggle, which is the one case that has to move the window as
+    // well as its state. QWindowPrivate::setVisible() returns early when the
+    // window is already visible, so the show — the only thing that resizes an
+    // Android window — never runs for a live toggle, and the window would keep
+    // the size the other mode gave it. Setting it here by hand is confined to
+    // this explicit user action; nothing on the launch or resume paths touches
+    // geometry, which is Qt's to own.
+    function setImmersive(on) {
+        App.saveSetting("android_immersive", on ? "true" : "false")
+        applyImmersive()
+        if (!App.isAndroid()) return
+        mainWindow.width = on ? Screen.width : Screen.desktopAvailableWidth
+        mainWindow.height = on ? Screen.height : Screen.desktopAvailableHeight
     }
 
     Component.onCompleted: {
         UI.window = mainWindow
-        applyImmersive()
+        // No applyImmersive() here on purpose. This runs *after* the window has
+        // been shown, so it could only ever set the state too late to affect
+        // geometry — which is the whole bug. The `visibility` binding above is
+        // what establishes it in time.
     }
 
-    // Re-apply on return to the app (a transient system-bar show or a dialog can
-    // clear the flags). SettingsScreen also calls applyImmersive() on toggle.
+    // Re-assert on return to the app. Belt and braces now rather than the load-
+    // bearing thing it used to be: Qt owns the fullscreen state, and a window
+    // state survives a resume on its own. Re-applying is safe because
+    // setWindowStates() has no early-out — it goes to the platform every time,
+    // and Qt's showFullScreen() ends with requestApplyInsets(), so the insets
+    // are recomputed rather than left stale. That last part is exactly what the
+    // hand-rolled decor flags never did, and why re-applying *those* could only
+    // ever make things worse.
     Connections {
         target: Qt.application
         function onStateChanged() {

@@ -19,7 +19,7 @@ import org.osynth.osyntho
 // below the app. Fixes are device-side: turn off ALL MIUI 3-finger gestures
 // (the screenshot toggle alone is insufficient; a reboot is often needed), or
 // enable per-app full screen / Game Turbo. The app also requests immersive
-// fullscreen (App.setAndroidImmersiveMode, gated by the android_immersive
+// fullscreen (Main.qml's applyImmersive, gated by the android_immersive
 // setting), which makes MIUI stop intercepting. The user confirmed disabling the
 // Xiaomi optimizations resolved it.
 Rectangle {

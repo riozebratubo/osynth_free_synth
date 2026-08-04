@@ -195,6 +195,23 @@ esp_err_t seq_model_init(void);
 bool seq_model_ready(void);
 size_t seq_model_bytes(void);
 
+/* Monotonic counter, bumped by every function below that changes pattern data
+ * — steps, track and pattern configuration, the generators, parameter locks
+ * and the song chain. Only its *inequality* means anything: a reader that
+ * remembers the value it last read alongside its copy of the data can tell
+ * that copy is stale without comparing 128 KB.
+ *
+ * That reader is the app. Pattern data is not parameter space and has no event
+ * opcode, so nothing told it when the firmware changed a pattern under it —
+ * steps recorded live, a Euclidean fill, a preset load. seqarp mirrors this
+ * into the read-only `seq.rev` parameter, which the S14 listener already
+ * batches out at ~20 Hz, and the app re-reads when it moves. Exactly the trick
+ * `graph.rev` plays for the modular patch (graph_model.h).
+ *
+ * Not a change *count*: a bulk edit bumps it once per step, and callers must
+ * not read anything into the size of a jump. */
+uint32_t seq_model_revision(void);
+
 /* ---- step access ---- */
 void seq_step_get(int pattern, int track, int step, seq_step_t* out);
 void seq_step_set(int pattern, int track, int step, const seq_step_t* in);

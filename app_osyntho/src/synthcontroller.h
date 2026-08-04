@@ -453,6 +453,10 @@ class SynthController : public QObject, public DatabaseClient {
   void onInfoBusy(quint8 seq);    // BUSY (queue full): back off, re-queue that id
   void onInfoBadArg(quint8 seq);  // BAD_ARG: id not registered; stop retrying it
   void finishDiscovery();         // all infos in (or budget spent): stop the pump
+  // A few ids' metadata, outside a discovery pass. Same queue, same flow
+  // control, no id list and no budget — for parameters the firmware registers
+  // *after* discovery has been and gone (see syncGraphParamInfo).
+  void requestInfoTopUp(const QList<quint16>& ids);
   void requestAllParamValues();   // GET_PARAM for every registered id
   void requestParamValues(const QList<quint16>& ids);  // GET_PARAM, batched
   QList<quint16> engineParamIds() const;  // the registered 0x02xx ids
@@ -489,6 +493,14 @@ class SynthController : public QObject, public DatabaseClient {
   void handleGraphNodes(const QByteArray& payload);
   void handleGraphEdit(const QByteArray& payload, quint8 status);
   void rebuildGraphNodes(const SynthProto::GraphModel& m);
+  // Fetches metadata and values for the node parameters this app does not know
+  // about yet. A node's parameters only exist once its slot has a kind, which
+  // is long after discovery listed the ids — so without this a node added
+  // during the session has controls the UI cannot draw.
+  void syncGraphParamInfo();
+  // Forgets one slot's parameter block, for when its kind changes: the ids stay
+  // the same and stop meaning what the app recorded about them.
+  void forgetNodeParamInfo(int slot);
   // Requests the edited track's steps; the firmware caps one response at the
   // MTU, so this walks the track in windows.
   void requestSteps();
@@ -543,6 +555,15 @@ class SynthController : public QObject, public DatabaseClient {
   qint64 m_discoveryStartMs = 0;        // for the overall safety budget
   QTimer m_infoRequestTimer;            // drives the flow-controlled pump
   bool m_discovering = false;
+  // A top-up is running: the pump has work but no list to wait for, no budget
+  // to spend and no discovery to declare finished. Never set while
+  // m_discovering — a pass in flight already covers every registered id.
+  bool m_infoTopUp = false;
+  // Deadline for the running top-up. A discovery pass has kDiscoveryBudgetMs to
+  // stop it retrying an id that will never answer; a top-up needs its own, or a
+  // node whose slot was cleared under it would keep the pump spinning for the
+  // rest of the session.
+  qint64 m_infoTopUpUntilMs = 0;
   DiscoveryScope m_discoveryScope = DiscoveryScope::Full;
   QTimer m_discoveryTimer;              // list-response watchdog (single-shot)
   int m_listRetries = 0;                // remaining list-request resends
@@ -654,6 +675,16 @@ class SynthController : public QObject, public DatabaseClient {
   // patterns advances every bar, and one full pattern re-read per bar would
   // saturate the link.
   QTimer m_followPatternTimer;
+
+  // Pattern-data revision the app last saw (seq.rev), -1 before the first
+  // value. Only compared for inequality — the firmware bumps it once per
+  // changed step, and the size of a jump means nothing.
+  int m_seqRevision = -1;
+  QTimer m_seqRevTimer;  // debounces the re-read a revision change triggers
+  // When this app last wrote pattern data. A revision bump inside the guard
+  // window is this app's own echo, and re-reading on it would fight the
+  // optimistic local edit that a grid drag depends on.
+  qint64 m_lastLocalSeqEditMs = 0;
 
   QVariantList m_kitSlots;
   QVariantList m_kitSlotsAccum;

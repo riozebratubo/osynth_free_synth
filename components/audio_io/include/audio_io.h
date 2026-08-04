@@ -110,6 +110,21 @@ void audio_io_line_in_fx(float* l, float* r, size_t frames);
 void audio_io_line_in_dry(float* l, float* r, size_t frames);
 void audio_io_line_in_mon(float* l, float* r, size_t frames);
 
+/* The block just captured, interleaved L/R int16 — SYNTH_BLOCK_SIZE frames, or
+ * NULL when this build has no input or the RX half never came up.
+ *
+ * A fourth destination, and deliberately not a fourth stage: the modular
+ * graph's LineIn node (S31f) is *inside* an engine, so it mixes the input at a
+ * point only the patch knows, and it needs the samples rather than somewhere to
+ * add them. Read-only, valid for the current block, audio task only.
+ *
+ * Independent of `in.route`, on purpose. That parameter names one of the three
+ * bus mix points above; a patched-in node is a different question, and making
+ * the two interact would mean either a node that goes silent when the route is
+ * off or an input heard twice when it is not. So a graph patch works with
+ * `in.route` at off, which is also how you would set it up. */
+const int16_t* audio_io_line_in_block(void);
+
 /* Picks and starts the output sink, then starts the audio task.
  * `render` may be NULL (silence). Falls back to the null sink (no output,
  * timer pacing) if the hardware sink fails to start. */

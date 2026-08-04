@@ -554,9 +554,17 @@ void on_param(uint16_t id, float value, osynth::ParamOrigin, void*) {
     }
 }
 
-} // namespace
+/* Opens the control bus and finds the chip, once. Both entry points below start
+ * with this and the second one finds the work already done — the bus, the
+ * address and the device handle are exactly what codec_init() would have built
+ * for itself, so an early mute costs it nothing and changes nothing about the
+ * sequence that follows.
+ *
+ * On failure everything is torn back down and the statics are null, so a later
+ * call is free to try again from scratch. */
+esp_err_t ensure_bus(void) {
+    if (s_dev != nullptr) return ESP_OK;
 
-esp_err_t codec_init(void) {
     i2c_master_bus_config_t bus_cfg = {};
     bus_cfg.i2c_port = -1; /* let the driver pick a free controller */
     bus_cfg.sda_io_num = OSYNTH_ES8388_SDA;
@@ -622,6 +630,36 @@ esp_err_t codec_init(void) {
         s_dev = nullptr;
         return err;
     }
+    return ESP_OK;
+}
+
+} // namespace
+
+esp_err_t codec_early_mute(void) {
+    const esp_err_t err = ensure_bus();
+    if (err != ESP_OK) return err; /* ensure_bus already said what and why */
+
+    /* The same two writes kInit opens with, in the same order: mute the DAC,
+     * then drop the output drivers. Deliberately nothing else — every other
+     * register in that table is part of a power sequence that has to run as a
+     * unit, and half of one left standing for the length of boot would be
+     * worse than the noise this is here to stop. */
+    esp_err_t e = write_reg(REG_DACCONTROL3, 0x04);
+    if (e == ESP_OK) e = write_reg(REG_DACPOWER, 0xc0);
+    if (e != ESP_OK) {
+        ESP_LOGW(TAG, "early mute failed at 0x%02x (%s); the output may be "
+                      "noisy until codec_init()",
+                 (unsigned)s_addr, esp_err_to_name(e));
+        return e;
+    }
+    ESP_LOGI(TAG, "muted at 0x%02x ahead of init", (unsigned)s_addr);
+    return ESP_OK;
+}
+
+esp_err_t codec_init(void) {
+    esp_err_t err = ensure_bus();
+    if (err != ESP_OK) return err;
+    const uint16_t addr = s_addr;
 
     for (size_t i = 0; i < sizeof(kInit) / sizeof(kInit[0]); ++i) {
         err = write_reg(kInit[i].reg, kInit[i].val);
@@ -694,6 +732,7 @@ const char* codec_name(void) { return s_name; }
 
 #else /* discrete front end: the converters configure themselves from straps */
 
+esp_err_t codec_early_mute(void) { return ESP_OK; }
 esp_err_t codec_init(void) { return ESP_OK; }
 const char* codec_name(void) { return "none"; }
 

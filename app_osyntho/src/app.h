@@ -58,10 +58,19 @@ class App : public QObject {
   Q_INVOKABLE int saveSetting(const QString& name, const QString& value);
 
   Q_INVOKABLE void setKeepScreenOn(bool on);
-  // Android only: enable immersive-sticky fullscreen (hides the status/nav bars).
-  // Also tends to make MIUI/HyperOS stop intercepting multi-finger system
-  // gestures over the app. No-op elsewhere.
-  Q_INVOKABLE void setAndroidImmersiveMode(bool enabled);
+
+  /* Immersive fullscreen is deliberately NOT here. It used to be a JNI call
+   * writing View.setSystemUiVisibility() directly, which fought Qt's own
+   * Android handling: the window kept *available* geometry instead of the
+   * screen's, and poking the decor flags behind the platform plugin's back
+   * left the insets stale, so ApplicationWindow's automatic safe-area padding
+   * added a second band. Qt 6.11 does all of it from Qt::WindowFullScreen, so
+   * this is one line of QML — the `visibility` binding in Main.qml, which also
+   * explains why it must be declared rather than assigned.
+   *
+   * (It still hides the status/nav bars, and still tends to make MIUI/HyperOS
+   * stop intercepting multi-finger gestures over the app — see Keyboard.qml.) */
+
   Q_INVOKABLE QString getVersionNumber();
   Q_INVOKABLE QString getVersionFull();
 

@@ -48,6 +48,23 @@
 
 namespace osynth::graph {
 
+/* Voice rows the render path allocates: the polyphony, plus one.
+ *
+ * The extra row is the voiceless one a LineIn node in `free` mode renders
+ * into (S31f). The graph is a per-voice engine, so a source that is the same
+ * for every voice has nowhere honest to live: emitting it on every row
+ * multiplies it by the polyphony, and emitting it on row 0 makes the chain
+ * downstream of it inherit whichever voice happens to be first in the active
+ * set — its filter state and its envelope, both changing as notes come and
+ * go. A row of its own has neither problem, and it is also what lets the
+ * input keep flowing when no key is held at all.
+ *
+ * The cost is one row across the buffer pool and the control-rate arrays,
+ * about 1.6 KB of internal RAM, and one row's worth of DSP — but only while a
+ * patch actually holds a free-running LineIn node. Every other patch, and
+ * every build without line input, renders exactly the rows it did before. */
+inline constexpr int kRenderRows = SYNTH_VOICES + 1;
+
 /* Per-node, per-voice state. A union because a slot holds one kind at a
  * time; sized by the widest member. The S33 filters widened it from 12 to
  * 24 bytes (dsp::Vowel, three SVFs), so a twelve-node voice is now under

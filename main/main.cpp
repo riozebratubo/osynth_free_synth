@@ -1,6 +1,8 @@
 /*
  * osynth — application entry point.
- * Boot order: banner -> NVS -> global params -> voice manager (S4; owns the
+ * Boot order: codec mute (S31e; two I2C writes before anything else, so an
+ * ES8388 is not driving its outputs unconfigured for the length of the boot)
+ * -> banner -> NVS -> global params -> voice manager (S4; owns the
  * render callback, registers the 0x01xx params) -> mod matrix (S9; 0x05xx
  * slot params — all parameter registration must precede the audio task,
  * whose matrix plan reads the registry) -> engines (S5/S6; registers the
@@ -210,6 +212,18 @@ static void SYNTH_RENDER_IRAM render_chain(float* out_l, float* out_r,
 }
 
 extern "C" void app_main(void) {
+    /* First, ahead of the banner: an ES8388 powers up with its output drivers
+     * live and unconfigured, and everything below — NVS, ~250 parameter
+     * registrations, the FX lines, the drum kit, the LittleFS mount, the
+     * looper's PSRAM sizing — happens before codec_init() can do anything about
+     * it. That gap is the scratch heard at power-on. Muting the DAC and
+     * dropping the drivers takes one bus open and two register writes, needs
+     * nothing that has been initialised yet, and leaves the chip in the state
+     * codec_init()'s table starts from anyway. Ignored on failure: a board with
+     * no codec has nothing to mute, and codec_init() is where that gets
+     * reported properly. */
+    (void)codec_early_mute();
+
     ESP_LOGI(TAG, "osynth v0.1.0 — multi-engine synthesizer");
     ESP_LOGI(TAG,
              "target %s | usb:%d ble:%d i2s_dac:%d line_in:%d local_ui:%d "
@@ -252,9 +266,12 @@ extern "C" void app_main(void) {
 
     /* Before the port starts, on purpose: the codec's control bus shares the
      * connector with MCLK and BCLK, and it is only reliably quiet while those
-     * are stopped. Deliberately not ESP_ERROR_CHECKed — a codec that fails to
-     * answer leaves the board silent, which is worth an error in the log but
-     * not a bootloop. See codec.h for what moved and why. */
+     * are stopped. It also has to be after persist_init(), because it applies
+     * in.pga and out.level from the ParamStore — which is the reason the mute
+     * alone runs at the top of this function instead. Deliberately not
+     * ESP_ERROR_CHECKed — a codec that fails to answer leaves the board silent,
+     * which is worth an error in the log but not a bootloop. See codec.h for
+     * what moved and why. */
     (void)codec_init();
 
     ESP_ERROR_CHECK(audio_io_start(render_chain, nullptr));
