@@ -2,12 +2,15 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <!-- Keep CFBundleIdentifier in sync with APP_ID in CMakeLists.txt: it is
+         also the single-instance lock name, and deploy_macos_multi.sh checks
+         the built bundle against it. -->
     <key>CFBundleIdentifier</key>
-    <string>org.poproaster.caramel</string>
+    <string>org.osynth.osyntho</string>
     <key>CFBundleName</key>
-    <string>Caramel 2</string>
+    <string>Osyntho</string>
     <key>CFBundleDisplayName</key>
-    <string>Caramel 2</string>
+    <string>Osyntho</string>
     <key>CFBundleShortVersionString</key>
     <string>@MACOSX_BUNDLE_SHORT_VERSION_STRING@</string>
     <key>CFBundleVersion</key>
@@ -20,21 +23,19 @@
     <string>@MACOSX_BUNDLE_EXECUTABLE_NAME@</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <!-- Required for CoreBluetooth: without a usage string macOS terminates the
+         process the first time QBluetoothDeviceDiscoveryAgent starts a scan.
+         No location keys here — unlike iOS/Android, macOS does not gate BLE
+         scanning behind location permission. No camera/photo keys either: the
+         only QtMultimedia user (src/camerapreviewitem.cpp) is not in the build. -->
     <key>NSBluetoothAlwaysUsageDescription</key>
-    <string>Caramel 2 needs Bluetooth to connect to your roaster device.</string>
+    <string>Osyntho uses Bluetooth to connect to your Osynth synthesizer.</string>
     <key>NSBluetoothPeripheralUsageDescription</key>
-    <string>Caramel 2 needs Bluetooth to connect to your roaster device.</string>
-    <key>NSLocationWhenInUseUsageDescription</key>
-    <string>Caramel 2 uses location to scan for nearby Bluetooth roaster devices.</string>
-    <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-    <string>Caramel 2 uses location to scan for nearby Bluetooth roaster devices.</string>
-    <key>NSCameraUsageDescription</key>
-    <string>Caramel 2 uses the camera to take pictures of your roast.</string>
-    <key>NSPhotoLibraryUsageDescription</key>
-    <string>Caramel 2 saves roast pictures to your photo library.</string>
-    <key>NSPhotoLibraryAddUsageDescription</key>
-    <string>Caramel 2 saves roast pictures to your photo library.</string>
+    <string>Osyntho uses Bluetooth to connect to your Osynth synthesizer.</string>
+    <!-- Matches CMAKE_OSX_DEPLOYMENT_TARGET in CMakeLists.txt. Declaring an
+         older floor here than the toolchain built for lets the app launch on
+         systems where it then dies on a missing symbol. -->
     <key>LSMinimumSystemVersion</key>
-    <string>12.0</string>
+    <string>14.0</string>
 </dict>
 </plist>
