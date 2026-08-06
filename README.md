@@ -11,7 +11,7 @@ Bluetooth.
   presets + sequencer + looper persists
 ```
 
-![Osyntho app screenshot](screenshots/screenshot1.png)
+![Osyntho app screenshots](screenshots/screenshots.gif)
 
 ---
 
