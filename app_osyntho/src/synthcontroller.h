@@ -17,6 +17,7 @@
 
 #include "src/ble/synthprotocol.h"
 #include "src/business/databaseclient.h"
+#include "src/loopwav.h"
 
 // Drives one connected osynth over SynthCtl v1.
 //
@@ -99,6 +100,17 @@ class SynthController : public QObject, public DatabaseClient {
   // [{slot,kind,in:[..],x,y}] — one entry per slot, empty slots included
   Q_PROPERTY(QVariantList graphNodes READ graphNodes NOTIFY graphChanged)
   Q_PROPERTY(QString graphError READ graphError NOTIFY graphErrorChanged)
+
+  // ---- loop track download (S33) ----
+  // False until an OP_LOOP_DUMP request has actually been answered, so the
+  // looper page keeps its download controls off the screen on firmware that
+  // has no such opcode rather than showing a button that can only fail.
+  Q_PROPERTY(bool loopExportSupported READ loopExportSupported NOTIFY loopExportChanged)
+  Q_PROPERTY(bool loopExportActive READ loopExportActive NOTIFY loopExportChanged)
+  Q_PROPERTY(double loopExportProgress READ loopExportProgress NOTIFY loopExportChanged)
+  // What the last probe found: {valid,source,slot,filled,tracks,frames,rate,
+  // seconds,codec,mono,trackBytes}. `filled` is a bitmask, track 1 = bit 0.
+  Q_PROPERTY(QVariantMap loopExportInfo READ loopExportInfo NOTIFY loopExportInfoChanged)
 
  public:
   explicit SynthController(QObject* parent = nullptr);
@@ -299,6 +311,34 @@ class SynthController : public QObject, public DatabaseClient {
   Q_INVOKABLE int graphFreeSlot() const;
   Q_INVOKABLE void clearGraphError();
 
+  // --- loop track download (S33) -----------------------------------------
+  // Sources: 0 = the live set (in PSRAM or streamed off the card — the app
+  // cannot tell and does not need to), 1 = a saved slot.
+  bool loopExportSupported() const { return m_expSupported; }
+  bool loopExportActive() const;
+  double loopExportProgress() const;
+  QVariantMap loopExportInfo() const { return m_expInfoMap; }
+
+  // Asks what is recorded in one source, for the page's track picker. Cheap
+  // and idempotent; ignored while a transfer is running (it would be asking
+  // about the thing it is already downloading).
+  Q_INVOKABLE void probeLoopExport(int source, int slot = 0);
+  // Downloads one track (0-based) and decodes it to a WAV held in memory,
+  // announced by loopExportReady(). The track is fetched in windows, so this
+  // takes as long as the link and the loop length say — tens of seconds for a
+  // long take — and reports loopExportProgress throughout. The track comes out
+  // as recorded: loop.lvlN is a mix control and has no business in it.
+  Q_INVOKABLE void startLoopExport(int source, int slot, int track);
+  // Every recorded track, summed into one WAV at the levels the looper page is
+  // showing (loop.lvlN) — the set as it sounds. Downloads each track in turn,
+  // so it costs as many transfers as there are tracks; tracks at level 0 are
+  // skipped rather than fetched to be multiplied away.
+  Q_INVOKABLE void startLoopMixExport(int source, int slot);
+  Q_INVOKABLE void cancelLoopExport();
+  // Writes the WAV loopExportReady() announced. Kept until the next transfer
+  // starts, so a user who cancels the save picker can be offered it again.
+  Q_INVOKABLE bool saveLoopExportTo(const QString& path);
+
   // --- local patch library ----------------------------------------------
   Q_INVOKABLE int saveCurrentAsPatch(const QString& name);  // snapshot live params
   Q_INVOKABLE void loadPatch(int patchId);                  // push snapshot to synth
@@ -375,6 +415,14 @@ class SynthController : public QObject, public DatabaseClient {
   void graphChanged();
   void graphCostChanged();
   void graphErrorChanged();
+
+  // Loop download: supported/active/progress, the probe result, and the two
+  // endings. `suggestedName` is a file name, not a path — where it goes is the
+  // platform's business (a save picker on desktop, the share sheet on Android).
+  void loopExportChanged();
+  void loopExportInfoChanged();
+  void loopExportReady(const QString& suggestedName);
+  void loopExportFailed(const QString& reason);
   // Emitted when switching a drum lane to "from step note": the lane's old
   // fixed slot becomes the sensible note to keep placing, so QML seeds
   // UI.paintNote from it rather than leaving the melodic default (60), which
@@ -397,6 +445,12 @@ class SynthController : public QObject, public DatabaseClient {
     float value = 0.0f;
     bool valueKnown = false;
   };
+
+  // Where a loop download is. Probe is a standalone "what is in there?" for
+  // the page's pickers; Info is the same question asked as the first step of a
+  // transfer, and only that one goes on to Read. Kept apart so a probe landing
+  // late cannot be mistaken for the start of a download that was cancelled.
+  enum class ExpStage { Idle, Probe, Info, Read };
 
   quint8 nextSeq();
   void send(quint8 op, const QByteArray& payload, bool withResponse);
@@ -505,6 +559,25 @@ class SynthController : public QObject, public DatabaseClient {
   void handleGraphKind(const QByteArray& payload);
   void handleGraphNodes(const QByteArray& payload);
   void handleGraphEdit(const QByteArray& payload, quint8 status);
+
+  // Loop download. The transfer is a two-step conversation — INFO to learn the
+  // codec, the length and how many bytes a track is, then a walk of READ
+  // windows — and its own retries: a lost window is re-asked from the first
+  // byte still missing, which is why every data frame carries its offset.
+  void handleLoopDump(const QByteArray& payload, bool more);
+  void handleLoopDumpStatus(quint8 status);
+  void sendLoopDumpInfo(int source, int slot);
+  void requestLoopWindow();          // the window starting at m_expOffset
+  void onLoopWindowTimeout();
+  // One track has arrived in full: mix it in and move to the next, or — for a
+  // single-track export, and for the last track of a mix — build the file.
+  void finishLoopTrack();
+  void startLoopExportCommon(int source, int slot);  // shared reset + INFO
+  void failLoopExport(const QString& reason);
+  void setLoopExportStage(ExpStage stage);
+  // The level the looper page is showing for a track (loop.lvlN, 1-based in
+  // the parameter's name), or 1.0 on firmware that does not register it.
+  double loopTrackLevel(int track) const;
   void rebuildGraphNodes(const SynthProto::GraphModel& m);
   // Fetches metadata and values for the node parameters this app does not know
   // about yet. A node's parameters only exist once its slot has a kind, which
@@ -728,6 +801,38 @@ class SynthController : public QObject, public DatabaseClient {
   // probe once at discovery, and fall back to the drums.trig parameter if the
   // synth answers UNKNOWN_OP.
   bool m_drumTrigOpcode = true;
+
+  // --- loop track download (S33) ---
+  // The opposite default to m_drumTrigOpcode above, because the consequence is
+  // the opposite: a wrong guess there is a pad that does not sound until the
+  // probe answers, a wrong guess here is a panel that appears and then
+  // vanishes. So the page stays quiet until a LOOP_DUMP request comes back.
+  bool m_expSupported = false;
+  ExpStage m_expStage = ExpStage::Idle;
+  int m_expSource = 0;
+  int m_expSlot = 0;
+  int m_expTrack = 0;
+  quint32 m_expOffset = 0;  // first byte still missing — where a retry resumes
+  quint32 m_expTotal = 0;   // bytes in a full pass of this track
+  quint32 m_expFrames = 0;
+  int m_expCodec = SynthProto::LOOP_CODEC_ADPCM;
+  int m_expRate = 48000;
+  QByteArray m_expData;     // track bytes as they arrive, in the synth's codec
+  QByteArray m_expWav;      // the finished file, held for saveLoopExportTo
+  QString m_expName;
+  int m_expRetries = 0;
+  QTimer m_expTimer;        // window watchdog; a lost frame stalls nothing else
+  QVariantMap m_expInfoMap;
+  // Mixdown. m_expQueue is what is left to fetch (one entry for a single-track
+  // export), m_expQueueTotal what it started as — progress spans the whole run,
+  // not each track's own transfer. The sum lives in a wide accumulator so
+  // eight tracks are never decoded side by side (loopwav.h).
+  bool m_expMix = false;
+  QList<int> m_expQueue;
+  int m_expQueueTotal = 1;
+  int m_expQueueDone = 0;
+  LoopWav::Accumulator m_expMixAcc;
+  int m_expChannels = 2;
 
   static quint32 plockKey(int track, int step) {
     return (quint32(track) << 16) | quint32(step);

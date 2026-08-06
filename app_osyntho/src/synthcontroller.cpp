@@ -1,9 +1,11 @@
 #include "synthcontroller.h"
 
+#include "src/apputils.h"
 #include "translator.h"
 
 #include <QDateTime>
 #include <QDebug>
+#include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -109,6 +111,25 @@ constexpr int kTrackGetFallbackMs = 1500;
 constexpr int kStepsWindowTimeoutMs = 1500;
 constexpr int kStepsWindowRetries = 3;
 
+// --- loop track download (S33) -----------------------------------------
+// Bytes asked for per round trip. The firmware caps its own read at 2 KB, so
+// this is the ceiling rather than a preference: below it the transfer pays a
+// round trip per window for nothing, above it the extra is silently dropped.
+// One window is ~9 notification frames at the documented MTU.
+constexpr int kLoopWindowBytes = 2048;
+// A window unanswered this long is re-asked, from the first byte still
+// missing. Generous: the synth may be reading the card, and the window itself
+// is several frames that a busy link spaces out.
+constexpr int kLoopWindowTimeoutMs = 4000;
+constexpr int kLoopWindowRetries = 5;
+// Longest loop this app will try to pull down. Not a protocol limit — the
+// firmware would serve any length — but a decoded track is ~200 KB per second
+// per channel and a mixdown holds a wider accumulator on top of that, and the
+// streamed backend records up to half an hour. At BLE speeds anything near
+// this ceiling is already hours of transfer, so the cap costs nothing real and
+// keeps a phone from being asked for a few hundred megabytes.
+constexpr double kLoopExportMaxSeconds = 300.0;
+
 // Well-known ids the controller tracks directly.
 constexpr quint16 ID_PRESET_LOAD = 0x0002;
 // The engine-specific block: whatever engine is bound owns it, and its meaning
@@ -190,6 +211,10 @@ SynthController::SynthController(QObject* parent) : QObject(parent) {
     requestSteps();
   });
 
+  m_expTimer.setSingleShot(true);
+  m_expTimer.setInterval(kLoopWindowTimeoutMs);
+  connect(&m_expTimer, &QTimer::timeout, this, &SynthController::onLoopWindowTimeout);
+
   m_infoRequestTimer.setSingleShot(false);
   m_infoRequestTimer.setInterval(kInfoPumpIntervalMs);
   connect(&m_infoRequestTimer, &QTimer::timeout, this, &SynthController::pumpInfoRequests);
@@ -260,6 +285,11 @@ bool isRetryableRequest(quint8 op) {
     case OP_NOTE_ON:
     case OP_NOTE_OFF:
     case OP_DRUM_TRIG:
+    // LOOP_DUMP retries itself, from the first byte still missing rather than
+    // from the top of the request — a blind resend of a READ would re-send a
+    // window the app may already have most of, and a resend of the *first*
+    // window of a cancelled transfer would restart one.
+    case OP_LOOP_DUMP:
     case OP_PING:
       return false;
     default:
@@ -438,6 +468,20 @@ void SynthController::resetState() {
   m_localStepEdits.clear();
   m_infoListAccum.clear();
   m_presetsAccum.clear();
+  // A transfer cannot survive the link it was running over. The finished WAV
+  // does: it is already decoded and the user may still be picking a folder for
+  // it when the synth goes away.
+  if (m_expStage != ExpStage::Idle) {
+    m_expStage = ExpStage::Idle;
+    m_expTimer.stop();
+    m_expData.clear();
+    emit loopExportChanged();
+    emit loopExportFailed(Translator::instance().t("The synth disconnected."));
+  }
+  m_expSupported = false;
+  m_expInfoMap.clear();
+  emit loopExportChanged();
+  emit loopExportInfoChanged();
   m_seqInfo = SynthProto::SeqInfo();
   m_steps.clear();
   m_stepsAccum.clear();
@@ -892,6 +936,14 @@ void SynthController::handleFrame(const Frame& f) {
       m_drumTrigOpcode = false;
       return;
     }
+    if (f.requestOp() == OP_LOOP_DUMP) {
+      // Every refusal means something specific to a download in flight — the
+      // opcode is missing, a take is open, the slot is empty — so the transfer
+      // reads them itself rather than being resent blindly by the generic BUSY
+      // path below and then timing out with nothing to say.
+      handleLoopDumpStatus(f.status);
+      return;
+    }
     if (f.requestOp() == OP_SET_PARAM && f.status == ST_BUSY) {
       // The firmware's command queue overflowed and dropped this frame. It is
       // the only feedback a write-without-response ever gets, and ignoring it
@@ -980,6 +1032,9 @@ void SynthController::handleFrame(const Frame& f) {
       break;
     case OP_KIT_INFO:
       handleKitInfo(f.payload, f.continuation);
+      break;
+    case OP_LOOP_DUMP:
+      handleLoopDump(f.payload, f.continuation);
       break;
     case OP_GRAPH_INFO:
       // A refusal here is the normal answer from firmware without the
@@ -1494,6 +1549,396 @@ void SynthController::setArp(int enable, int mode, int octaves, int division) {
 }
 
 void SynthController::ping() { send(OP_PING, QByteArray(), true); }
+
+/* --------------------------------------------------- loop track download */
+//
+// A track's audio comes back in the codec it is stored in and is decoded here
+// (loopwav.h). Two steps: an INFO to learn the codec, the loop length and how
+// many bytes a full pass is, then a walk of READ windows. Only the app holds
+// the transfer's state — the synth answers exactly what the last window asked
+// for and remembers nothing — so a cancel is just "stop asking", and a lost
+// frame costs one re-ask from the first byte still missing rather than the
+// whole track.
+
+bool SynthController::loopExportActive() const {
+  return m_expStage == ExpStage::Info || m_expStage == ExpStage::Read;
+}
+
+double SynthController::loopExportProgress() const {
+  if (m_expStage != ExpStage::Read || m_expTotal == 0 || m_expQueueTotal <= 0) {
+    return 0.0;
+  }
+  // Spans the whole run: a mixdown of four tracks moves its bar a quarter per
+  // track rather than resetting it four times.
+  const double within = double(m_expOffset) / double(m_expTotal);
+  return qBound(0.0, (double(m_expQueueDone) + within) / double(m_expQueueTotal), 1.0);
+}
+
+double SynthController::loopTrackLevel(int track) const {
+  const int id = paramIdForName(QStringLiteral("loop.lvl%1").arg(track + 1));
+  if (id < 0) return 1.0;  // no such parameter: nothing to scale by
+  return paramValue(id);
+}
+
+void SynthController::setLoopExportStage(ExpStage stage) {
+  if (m_expStage == stage) return;
+  m_expStage = stage;
+  emit loopExportChanged();
+}
+
+void SynthController::sendLoopDumpInfo(int source, int slot) {
+  send(OP_LOOP_DUMP, payloadLoopDumpInfo(source, slot), true);
+  m_expTimer.start();
+}
+
+void SynthController::probeLoopExport(int source, int slot) {
+  if (!m_connected) return;
+  // A transfer already knows what it is downloading, and answering a probe in
+  // the middle of one would overwrite the info it is walking by.
+  if (loopExportActive()) return;
+  m_expSource = source;
+  m_expSlot = slot;
+  setLoopExportStage(ExpStage::Probe);
+  sendLoopDumpInfo(source, slot);
+}
+
+void SynthController::startLoopExportCommon(int source, int slot) {
+  m_expSource = source;
+  m_expSlot = slot;
+  m_expOffset = 0;
+  m_expTotal = 0;
+  m_expFrames = 0;
+  m_expQueue.clear();
+  m_expQueueDone = 0;
+  m_expQueueTotal = 1;
+  m_expMixAcc.clear();
+  m_expRetries = kLoopWindowRetries;
+  m_expData.clear();
+  m_expWav.clear();
+  m_expName.clear();
+  setLoopExportStage(ExpStage::Info);
+  // Asked even if a probe just answered it: between the probe and here the
+  // user may have recorded over the set, and the length, the codec and the
+  // filled mask are what everything below is bounded by.
+  sendLoopDumpInfo(source, slot);
+}
+
+void SynthController::startLoopExport(int source, int slot, int track) {
+  if (!m_connected) {
+    emit loopExportFailed(Translator::instance().t("Connect to the synth first."));
+    return;
+  }
+  if (loopExportActive()) return;
+  m_expMix = false;
+  m_expTrack = track;
+  startLoopExportCommon(source, slot);
+}
+
+void SynthController::startLoopMixExport(int source, int slot) {
+  if (!m_connected) {
+    emit loopExportFailed(Translator::instance().t("Connect to the synth first."));
+    return;
+  }
+  if (loopExportActive()) return;
+  m_expMix = true;
+  m_expTrack = 0;  // the INFO response picks the first track of the queue
+  startLoopExportCommon(source, slot);
+}
+
+void SynthController::cancelLoopExport() {
+  if (!loopExportActive()) return;
+  m_expTimer.stop();
+  m_expData.clear();
+  m_expMixAcc.clear();
+  m_expQueue.clear();
+  setLoopExportStage(ExpStage::Idle);
+  emit loopExportChanged();  // progress went back to 0
+}
+
+void SynthController::failLoopExport(const QString& reason) {
+  m_expTimer.stop();
+  m_expData.clear();
+  m_expMixAcc.clear();
+  m_expQueue.clear();
+  const bool wasActive = loopExportActive();
+  setLoopExportStage(ExpStage::Idle);
+  emit loopExportChanged();
+  if (wasActive) emit loopExportFailed(reason);
+}
+
+void SynthController::requestLoopWindow() {
+  const quint32 left = m_expTotal > m_expOffset ? m_expTotal - m_expOffset : 0;
+  const quint16 len = quint16(qMin<quint32>(left, kLoopWindowBytes));
+  send(OP_LOOP_DUMP,
+       payloadLoopDumpRead(m_expSource, m_expSlot, m_expTrack, m_expOffset, len), true);
+  m_expTimer.start();
+}
+
+void SynthController::onLoopWindowTimeout() {
+  if (m_expStage == ExpStage::Probe) {
+    // Nobody is waiting on a probe: an unanswered one is just no answer, and
+    // the page asks again on the next transport edge or the next visit.
+    setLoopExportStage(ExpStage::Idle);
+    return;
+  }
+  if (!loopExportActive()) return;
+  if (!m_connected) {
+    failLoopExport(Translator::instance().t("The synth disconnected."));
+    return;
+  }
+  if (m_expRetries <= 0) {
+    failLoopExport(Translator::instance().t("The synth stopped answering."));
+    return;
+  }
+  m_expRetries--;
+  // m_expOffset is the first byte still missing, so both stages resume exactly
+  // where they stalled — an INFO that was lost is simply asked again.
+  if (m_expStage == ExpStage::Info) {
+    sendLoopDumpInfo(m_expSource, m_expSlot);
+  } else {
+    requestLoopWindow();
+  }
+}
+
+void SynthController::handleLoopDumpStatus(quint8 status) {
+  // The one status that says something about the firmware rather than about
+  // this request: no such opcode, so there is nothing to offer on this synth.
+  if (status == ST_UNKNOWN_OP || status == ST_UNSUPPORTED) {
+    if (m_expSupported) {
+      m_expSupported = false;
+      emit loopExportChanged();
+    }
+    failLoopExport(Translator::instance().t(
+        "This firmware cannot send loop tracks to the app."));
+    return;
+  }
+  if (!m_expSupported) {
+    m_expSupported = true;
+    emit loopExportChanged();  // a refusal still proves the opcode is there
+  }
+  QString reason;
+  switch (status) {
+    case ST_BUSY:
+      // Two different things wear this status, and waiting suits both: the
+      // firmware's four-deep command queue overflowing behind someone else's
+      // burst (transient), and a read refused because a take is open or the
+      // flash backend wants the transport stopped (standing until the user
+      // acts). So a refusal mid-transfer just re-arms the window watchdog,
+      // which re-asks from where the track stops — and only once that budget
+      // is spent is the standing case named, since that is the one the user
+      // has to do something about.
+      if (loopExportActive() && m_expRetries > 0) {
+        m_expTimer.start();
+        return;
+      }
+      reason = Translator::instance().t(
+          "The synth cannot read that right now — stop the recording (and the "
+          "loop, on flash storage).");
+      break;
+    case ST_BAD_ARG:
+      reason = Translator::instance().t("Nothing is recorded on that track.");
+      break;
+    default:
+      reason = Translator::instance().ts("The synth refused the download (status %1).",
+                                         QString::number(status));
+      break;
+  }
+  if (m_expStage == ExpStage::Probe) {
+    // A probe is the page asking what is there; a refusal is an answer, not an
+    // error to interrupt the user with. It leaves the picker empty.
+    m_expTimer.stop();
+    m_expInfoMap.clear();
+    setLoopExportStage(ExpStage::Idle);
+    emit loopExportInfoChanged();
+    return;
+  }
+  failLoopExport(reason);
+}
+
+void SynthController::handleLoopDump(const QByteArray& payload, bool more) {
+  if (payload.isEmpty()) return;
+  if (!m_expSupported) {
+    m_expSupported = true;
+    emit loopExportChanged();
+  }
+  if (quint8(payload.at(0)) == 0) {  // INFO
+    const LoopDumpInfo info = parseLoopDumpInfo(payload);
+    if (!info.valid) return;
+    m_expTimer.stop();
+    m_expInfoMap = QVariantMap{
+        {QStringLiteral("valid"), true},
+        {QStringLiteral("source"), info.source},
+        {QStringLiteral("slot"), info.slot},
+        {QStringLiteral("filled"), info.filled},
+        {QStringLiteral("tracks"), info.tracks},
+        {QStringLiteral("frames"), double(info.frames)},
+        {QStringLiteral("rate"), double(info.rate)},
+        {QStringLiteral("seconds"),
+         info.rate > 0 ? double(info.frames) / double(info.rate) : 0.0},
+        {QStringLiteral("codec"), info.codec},
+        {QStringLiteral("mono"), info.codec == LOOP_CODEC_ADPCM_MONO},
+        {QStringLiteral("trackBytes"), double(info.trackBytes)},
+    };
+    emit loopExportInfoChanged();
+    if (m_expStage != ExpStage::Info) {  // a plain probe: nothing follows
+      setLoopExportStage(ExpStage::Idle);
+      return;
+    }
+    if (info.frames == 0 || info.filled == 0) {
+      failLoopExport(Translator::instance().t("Nothing is recorded there."));
+      return;
+    }
+    const double seconds =
+        info.rate > 0 ? double(info.frames) / double(info.rate) : 0.0;
+    if (seconds > kLoopExportMaxSeconds) {
+      failLoopExport(Translator::instance().ts(
+          "That loop is %1 s long — more than this app will download (%2 s).",
+          QString::number(seconds, 'f', 0),
+          QString::number(kLoopExportMaxSeconds, 'f', 0)));
+      return;
+    }
+    m_expFrames = info.frames;
+    m_expCodec = info.codec;
+    m_expRate = int(info.rate);
+    m_expTotal = info.trackBytes;
+    m_expChannels = LoopWav::channelsFor(info.codec);
+
+    m_expQueue.clear();
+    if (m_expMix) {
+      for (int t = 0; t < info.tracks; ++t) {
+        if ((info.filled & (1 << t)) == 0) continue;
+        // A track the user has turned all the way down contributes nothing,
+        // and fetching it would be minutes of link time to multiply by zero.
+        if (loopTrackLevel(t) <= 0.0) continue;
+        m_expQueue.append(t);
+      }
+      if (m_expQueue.isEmpty()) {
+        failLoopExport(Translator::instance().t(
+            "Every recorded track is at level 0 — the mix would be silent."));
+        return;
+      }
+      m_expMixAcc.assign(qsizetype(info.frames) * m_expChannels, 0);
+    } else {
+      if ((info.filled & (1 << m_expTrack)) == 0) {
+        failLoopExport(Translator::instance().t("Nothing is recorded on that track."));
+        return;
+      }
+      m_expQueue.append(m_expTrack);
+    }
+    m_expQueueTotal = int(m_expQueue.size());
+    m_expQueueDone = 0;
+
+    const QString where = info.source == LOOP_SRC_SLOT
+                              ? QStringLiteral("slot%1").arg(info.slot)
+                              : QStringLiteral("live");
+    m_expName = m_expMix
+                    ? QStringLiteral("osynth-%1-mix.wav").arg(where)
+                    : QStringLiteral("osynth-%1-t%2.wav").arg(where).arg(m_expTrack + 1);
+
+    m_expTrack = m_expQueue.constFirst();
+    m_expOffset = 0;
+    m_expData.clear();
+    m_expData.reserve(int(info.trackBytes));
+    setLoopExportStage(ExpStage::Read);
+    requestLoopWindow();
+    return;
+  }
+
+  if (m_expStage != ExpStage::Read) return;  // a late frame of a dead transfer
+  const LoopDumpChunk chunk = parseLoopDumpChunk(payload);
+  if (!chunk.valid || chunk.track != m_expTrack) return;
+
+  // Only a chunk that starts exactly where the track stops can be used. A
+  // frame that starts anywhere else means one was dropped, and ADPCM has no
+  // mid-stream re-entry (loop_adpcm.h) — splicing over a hole would leave the
+  // decoder wrong for everything after it, which is worse than asking again.
+  const bool contiguous = chunk.offset == m_expOffset;
+  if (contiguous) {
+    m_expData.append(chunk.data);
+    m_expOffset += quint32(chunk.data.size());
+    emit loopExportChanged();
+  }
+  if (more) {
+    m_expTimer.start();  // more of this window is on the way
+    return;
+  }
+  m_expTimer.stop();
+  if (!contiguous) {
+    // The window arrived with a gap. Re-ask from the first byte still missing
+    // — but on the retry budget, not a fresh one: nothing was gained here, and
+    // a link dropping every window would otherwise loop for ever.
+    if (m_expRetries <= 0) {
+      failLoopExport(Translator::instance().t("The link kept dropping data."));
+      return;
+    }
+    m_expRetries--;
+    requestLoopWindow();
+    return;
+  }
+  // An empty last frame is the end of the track. Normal, not an error: a
+  // punch-in the transport stopped keeps what it recorded and the looper plays
+  // silence for the rest of the pass, so a streamed track's file can be
+  // shorter than a full one. The decoder pads it back out.
+  if (chunk.data.isEmpty() || m_expOffset >= m_expTotal) {
+    finishLoopTrack();
+    return;
+  }
+  m_expRetries = kLoopWindowRetries;  // progress was made; full budget again
+  requestLoopWindow();
+}
+
+void SynthController::finishLoopTrack() {
+  const QByteArray pcm = LoopWav::decode(m_expData, m_expCodec, m_expFrames);
+  m_expData.clear();
+  if (pcm.isEmpty()) {
+    failLoopExport(
+        Translator::instance().t("The synth sent a track this app cannot decode."));
+    return;
+  }
+  if (m_expMix) {
+    LoopWav::mixInto(m_expMixAcc, pcm, loopTrackLevel(m_expTrack));
+  } else {
+    m_expWav = LoopWav::wrap(pcm, m_expChannels, m_expRate);
+  }
+  if (!m_expQueue.isEmpty()) m_expQueue.removeFirst();
+  ++m_expQueueDone;
+
+  if (!m_expQueue.isEmpty()) {  // a mixdown with tracks still to fetch
+    m_expTrack = m_expQueue.constFirst();
+    m_expOffset = 0;
+    m_expRetries = kLoopWindowRetries;
+    m_expData.reserve(int(m_expTotal));
+    emit loopExportChanged();
+    requestLoopWindow();
+    return;
+  }
+
+  if (m_expMix) {
+    m_expWav = LoopWav::buildMixed(m_expMixAcc, m_expChannels, m_expRate);
+    m_expMixAcc.clear();
+  }
+  const QString name = m_expName;
+  setLoopExportStage(ExpStage::Idle);
+  emit loopExportChanged();
+  if (m_expWav.isEmpty()) {
+    emit loopExportFailed(
+        Translator::instance().t("The synth sent a track this app cannot decode."));
+    return;
+  }
+  emit loopExportReady(name);
+}
+
+bool SynthController::saveLoopExportTo(const QString& path) {
+  if (m_expWav.isEmpty()) return false;
+  QFile f(AppUtils::getFilePathFromCanonical(path));
+  if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+    qWarning() << "Synth | loop export: cannot write" << path << f.errorString();
+    return false;
+  }
+  const bool ok = f.write(m_expWav) == m_expWav.size();
+  f.close();
+  return ok;
+}
 
 /* --------------------------------------------------------- patch library */
 

@@ -194,7 +194,7 @@ CONFIG_OSYNTH_ES8388_OUT1=y
 #          and no XIP interference, so save/load work while the loop plays.
 #
 # CONFIG_OSYNTH_LOOP_STORE_FLASH=y
-# CONFIG_OSYNTH_LOOP_STORE_SD=y
+CONFIG_OSYNTH_LOOP_STORE_SD=y
 
 # --- SD card ----------------------------------------------------------------
 

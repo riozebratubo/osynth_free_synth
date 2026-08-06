@@ -240,6 +240,42 @@ Translator::Translator() {
   pt["applies to the next loop (after clear all)"] =
       "vale para o próximo loop (após limpar tudo)";
   pt["max loop %1 s"] = "loop de no máx. %1 s";
+  // Track download (S33). "Slot %1" reads the same in pt_BR.
+  pt["Download"] = "Baixar";
+  pt["Cancel"] = "Cancelar";
+  pt["Track WAV"] = "WAV da faixa";
+  pt["Mix WAV"] = "WAV da mixagem";
+  pt["Live set"] = "Conjunto atual";
+  pt["Track %1"] = "Faixa %1";
+  pt["mono"] = "mono";
+  pt["stereo"] = "estéreo";
+  pt["downloading… %1%"] = "baixando… %1%";
+  pt["nothing recorded there"] = "nada gravado aí";
+  pt["%1 track(s), %2 s %3 — a download runs at BLE speed, so allow a while; "
+     "the mix uses the track levels below"] =
+      "%1 faixa(s), %2 s %3 — o download roda na velocidade do BLE, então "
+      "leva um tempo; a mixagem usa os volumes das faixas abaixo";
+  pt["Audio (*.wav)"] = "Áudio (*.wav)";
+  // ...and what the download itself can answer (SynthController).
+  pt["Nothing is recorded there."] = "Não há nada gravado aí.";
+  pt["Nothing is recorded on that track."] = "Não há nada gravado nessa faixa.";
+  pt["Every recorded track is at level 0 — the mix would be silent."] =
+      "Todas as faixas gravadas estão no volume 0 — a mixagem sairia muda.";
+  pt["The synth cannot read that right now — stop the recording (and the "
+     "loop, on flash storage)."] =
+      "O sintetizador não consegue ler isso agora — pare a gravação (e o "
+      "loop, se o armazenamento for em flash).";
+  pt["The link kept dropping data."] = "A conexão continuou perdendo dados.";
+  pt["That loop is %1 s long — more than this app will download (%2 s)."] =
+      "Esse loop tem %1 s — mais do que este aplicativo baixa (%2 s).";
+  pt["This firmware cannot send loop tracks to the app."] =
+      "Este firmware não envia faixas do looper para o aplicativo.";
+  pt["The synth stopped answering."] = "O sintetizador parou de responder.";
+  pt["The synth disconnected."] = "O sintetizador desconectou.";
+  pt["The synth refused the download (status %1)."] =
+      "O sintetizador recusou o download (status %1).";
+  pt["The synth sent a track this app cannot decode."] =
+      "O sintetizador enviou uma faixa que o aplicativo não sabe decodificar.";
 
   // ── Presets (PresetsScreen.qml) ────────────────────────────────────────
   pt["Refresh"] = "Atualizar";

@@ -78,6 +78,13 @@ enum Op : quint8 {
   OP_GRAPH_KIND    = 0x3A,
   OP_GRAPH_NODES   = 0x3B,
   OP_GRAPH_EDIT    = 0x3C,
+  // Reading a recorded loop track back out (S33), so the app can decode it to
+  // a WAV. Windowed: the app asks for a byte range and the synth answers it in
+  // as many frames as the MTU needs, nothing more — so a cancel is just "stop
+  // asking" and there is no transfer state on the synth to get out of step
+  // with. Firmware without the looper answers UNSUPPORTED, which is how the
+  // page decides whether to offer the download at all.
+  OP_LOOP_DUMP     = 0x3D,
   OP_PING          = 0x7F,
 };
 
@@ -922,6 +929,92 @@ inline GraphEditReply parseGraphEditReply(const QByteArray& payload) {
   e.revision = r.u16();
   e.cost = r.u16();
   return e;
+}
+
+// ---- loop track download (S33) --------------------------------------------
+
+// Where a track's audio is read from. Live is whatever is loaded now — in
+// PSRAM or streamed off the card, the app cannot tell and does not need to;
+// Slot is a saved set (flash backend: slot 0 only, SD: 0..7).
+enum LoopSource : quint8 { LOOP_SRC_LIVE = 0, LOOP_SRC_SLOT = 1 };
+
+// How the bytes are packed. The synth never re-encodes for us — decoding is
+// this side's job either way, and transcoding on an ESP32 would only cost
+// quality. RAW appears only for pre-S20 slot blobs.
+enum LoopCodec : quint8 {
+  LOOP_CODEC_RAW = 0,         // interleaved stereo int16, already PCM
+  LOOP_CODEC_ADPCM = 1,       // IMA-ADPCM stereo, one byte per frame
+  LOOP_CODEC_ADPCM_MONO = 2,  // IMA-ADPCM mono, two frames per byte
+};
+
+inline QByteArray payloadLoopDumpInfo(int source, int slot) {
+  QByteArray p;
+  appendU8(p, 0);  // sub: info
+  appendU8(p, quint8(source));
+  appendU8(p, quint8(slot));
+  return p;
+}
+inline QByteArray payloadLoopDumpRead(int source, int slot, int track,
+                                      quint32 offset, quint16 len) {
+  QByteArray p;
+  appendU8(p, 1);  // sub: read
+  appendU8(p, quint8(source));
+  appendU8(p, quint8(slot));
+  appendU8(p, quint8(track));  // 0-based
+  appendU32(p, offset);
+  appendU16(p, len);
+  return p;
+}
+
+struct LoopDumpInfo {
+  bool valid = false;
+  int source = 0;
+  int slot = 0;
+  int filled = 0;  // bitmask, track 1 = bit 0; 0 = nothing to download
+  int codec = LOOP_CODEC_ADPCM;
+  int tracks = 8;
+  quint32 frames = 0;      // loop length, in frames
+  quint32 rate = 48000;
+  quint32 trackBytes = 0;  // a full pass in `codec`
+};
+inline LoopDumpInfo parseLoopDumpInfo(const QByteArray& payload) {
+  LoopDumpInfo i;
+  Reader r(payload);
+  if (r.u8() != 0) return i;  // not an INFO response
+  i.source = r.u8();
+  i.slot = r.u8();
+  i.filled = r.u8();
+  i.codec = r.u8();
+  i.tracks = r.u8();
+  r.u8();  // reserved
+  i.frames = r.u32();
+  i.rate = r.u32();
+  i.trackBytes = r.u32();
+  i.valid = r.ok;
+  return i;
+}
+
+// One data frame. `offset` is this chunk's own position in the track, which is
+// what lets a receiver notice a gap and re-ask from exactly there rather than
+// splicing a hole into the audio. An empty `data` on the last frame of a
+// window means the track ended.
+struct LoopDumpChunk {
+  bool valid = false;
+  int track = 0;
+  quint32 offset = 0;
+  QByteArray data;
+};
+inline LoopDumpChunk parseLoopDumpChunk(const QByteArray& payload) {
+  LoopDumpChunk c;
+  Reader r(payload);
+  if (r.u8() != 1) return c;  // not a READ response
+  c.track = r.u8();
+  c.offset = r.u32();
+  const quint16 n = r.u16();
+  if (!r.ok || r.remaining < int(n)) return c;
+  c.data = QByteArray(reinterpret_cast<const char*>(r.p), n);
+  c.valid = true;
+  return c;
 }
 
 // EVT_ENGINE payload: { u8 engine, u8 caps }.

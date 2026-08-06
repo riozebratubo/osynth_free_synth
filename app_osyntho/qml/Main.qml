@@ -265,6 +265,32 @@ ApplicationWindow {
             toast.show(t.t("Could not write the file."), 4000)
     }
 
+    // ---- Loop track export (WAV) ----
+    // Same three routes as exportJson above, and for the same reasons — the
+    // difference is only that the bytes are binary and already sitting in the
+    // SynthController, so nothing is held here between opening the picker and
+    // the answer: writeWavExportTo() asks the controller to write them.
+    function exportWav(suggestedName) {
+        if (App.isAndroid()) {
+            const path = App.exportFileLocation(suggestedName)
+            if (Synth.saveLoopExportTo(path)) App.shareFile(path)
+            else toast.show(t.t("Could not write the file."), 4000)
+        } else if (nativePickers) {
+            const path = App.saveFileDialog("wav", documentsFolder + "/" + suggestedName, "wav")
+            if (path.length > 0) writeWavExportTo(path)
+        } else {
+            wavSaveDialog.selectedFile = wavSaveDialog.currentFolder + "/" + suggestedName
+            wavSaveDialog.open()
+        }
+    }
+
+    function writeWavExportTo(path) {
+        if (Synth.saveLoopExportTo(path))
+            toast.show(t.t("Exported."), 3000)
+        else
+            toast.show(t.t("Could not write the file."), 4000)
+    }
+
     function importJson(page) {
         jsonImportTarget = page
         if (App.isAndroid()) {
@@ -301,6 +327,16 @@ ApplicationWindow {
             mainWindow.pendingExportText = ""
         }
         onRejected: mainWindow.pendingExportText = ""
+    }
+
+    FileDialog {
+        id: wavSaveDialog
+        fileMode: FileDialog.SaveFile
+        options: FileDialog.DontUseNativeDialog
+        defaultSuffix: "wav"
+        currentFolder: mainWindow.documentsFolder
+        nameFilters: [t.t("Audio (*.wav)"), t.t("All files (*)")]
+        onAccepted: writeWavExportTo(selectedFile)
     }
 
     FileDialog {
@@ -388,6 +424,12 @@ ApplicationWindow {
         target: Synth
         function onShowError(msg) { toast.show(msg, 5000, "#B00020", "white") }
         function onShowInfo(msg) { toast.show(msg, 3000, "#2E7D32", "white") }
+        // A loop track finished downloading and is decoded and waiting in the
+        // controller. Handled here rather than on the looper page because the
+        // three per-platform delivery routes all live here — and unlike the
+        // patch import, there is only one page that can ask.
+        function onLoopExportReady(suggestedName) { exportWav(suggestedName) }
+        function onLoopExportFailed(reason) { toast.show(reason, 5000, "#B00020", "white") }
     }
 
     StackView {

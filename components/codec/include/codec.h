@@ -15,29 +15,33 @@
  * On a discrete build every function here is a no-op that returns ESP_OK, so
  * the call in main.cpp needs no #if.
  *
- * Ordering (revised, S31d): codec_init() runs *before* audio_io_start().
+ * Ordering: OPEN QUESTION, currently back to the original — codec_init() runs
+ * *after* audio_io_start(), with the port and MCLK already up.
  *
- * It used to run after the port was up, on the reasoning that an
- * ES8388 wants to come out of reset into a running MCLK. That turned out to
- * be both unnecessary and actively harmful. Unnecessary because — unlike
- * codecs such as the SGTL5000 — the ES8388 needs no clock at all to use its
- * control port. Harmful because the control lines run alongside a 12.288 MHz
- * MCLK and a 3.072 MHz BCLK, and on a hand-wired rig that is enough to make
- * the bus marginal: on an M5Stack M144 the codec answered a bus scan reliably
- * with the port stopped and intermittently vanished, NACKed writes, or
- * answered at a phantom address once it was running. The same "works before
- * i2s_begin, NACKs after" report exists upstream (esp-adf #1334,
- * arduino-audio-tools #1664), unexplained in both.
+ * S31d moved it to before the port, and that move is what
+ * OSYNTH_CODEC_INIT_BEFORE_I2S below switches back on. Its reasoning was that
+ * the ES8388 needs no clock to use its control port (true, unlike an
+ * SGTL5000), while the control lines running alongside a 12.288 MHz MCLK and a
+ * 3.072 MHz BCLK make the bus marginal on hand-wired rigs: on an M5Stack M144
+ * the codec answered a bus scan reliably with the port stopped and
+ * intermittently vanished, NACKed writes, or answered at a phantom address
+ * once it was running. The same "works before i2s_begin, NACKs after" report
+ * exists upstream (esp-adf #1334, arduino-audio-tools #1664), unexplained in
+ * both. Keeping only the unmute for afterwards was tried and does not work:
+ * that single write NACKed five times in about a millisecond on the M144, and
+ * a codec that is perfectly configured and permanently muted is no better than
+ * one that never answered.
  *
- * So the whole sequence — including the unmute — now happens while the port
- * is stopped. Keeping just the unmute for afterwards was tried first and does
- * not work: that single write NACKed five times in about a millisecond on the
- * M144, and a codec that is perfectly configured and permanently muted is no
- * better than one that never answered.
- *
- * Unmuting a DAC that has no clock is safe: with no MCLK it is not converting,
- * so the outputs sit at VMID exactly as they did muted, and the first thing it
- * converts once the clocks arrive is the render chain's silence.
+ * What that reasoning did not account for is the ADC. It is about the *control*
+ * bus, and it is the output side it was verified against — the DAC genuinely
+ * does not care, since with no MCLK it is not converting and its outputs sit at
+ * VMID exactly as they did muted. The input side is a different circuit with a
+ * different question: configuring the PGA, the input mux and the ADC's own
+ * power-up while the chip has no clock leaves it to reach its operating point
+ * when the clocks arrive rather than under the register writes that set it, and
+ * a persistent line-in hiss was reported after the move. That has not been
+ * root-caused. Until it is, the safe default is the ordering that has no such
+ * report against it.
  *
  * Beyond that ordering the driver is deliberately plain — one I2C transfer per
  * register, no retries, no read-back, same as the vendor's own driver. S31d
@@ -52,12 +56,34 @@
 
 #include "synth_config.h"
 
+/* Where codec_init() sits relative to audio_io_start() (main.cpp).
+ *
+ *   0 — after the port, MCLK running. The original ordering, and the default:
+ *       no line-in noise has been reported against it.
+ *   1 — before the port, no clocks. S31d's ordering. Try this if the codec is
+ *       unreliable on the control bus — a bus scan that finds nothing, NACKed
+ *       writes, a phantom address, or a board that comes up silent — which is
+ *       the failure it was introduced to fix.
+ *
+ * Independent of codec_early_mute(), which runs first either way and is what
+ * actually removes the power-on scratch. */
+#define OSYNTH_CODEC_INIT_BEFORE_I2S 0
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /* Silences the codec's output stages, and nothing else. First call in
  * app_main() — before NVS, before any parameter is registered.
+ *
+ * Not the first mute, though: bootloader_components/osynth_codec_mute writes
+ * the same two registers from the second-stage bootloader, hundreds of
+ * milliseconds earlier on a cold boot, by bit-banging the control bus before
+ * any driver exists. This one stays because the two compose (identical values,
+ * identical order, and codec_init()'s table opens with them anyway) and
+ * because it is the one that can report a failure. What neither can reach is
+ * power-on up to the bootloader — the ROM runs first, and only hardware covers
+ * that: hold the codec in reset, or gate the amp. See PINMAP.md.
  *
  * codec_init() below cannot run that early: it applies `in.pga` and
  * `out.level` from the ParamStore and subscribes to it, so it has to follow

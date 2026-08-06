@@ -46,6 +46,12 @@ enum : uint8_t {
     CODEC_IMA_ADPCM = 1, /* stereo, one byte per frame (L high nibble) */
     CODEC_IMA_ADPCM_MONO = 2, /* S19 mono sets: two frames per byte */
 };
+/* The export API hands these codec numbers to a BLE client (loop_store.h), so
+ * they are wire values now and the two spellings must agree. */
+static_assert(CODEC_RAW == LOOP_STORE_CODEC_RAW, "codec numbering drifted");
+static_assert(CODEC_IMA_ADPCM == LOOP_STORE_CODEC_ADPCM, "codec numbering drifted");
+static_assert(CODEC_IMA_ADPCM_MONO == LOOP_STORE_CODEC_ADPCM_MONO,
+              "codec numbering drifted");
 
 struct StoreHdr {
     char magic[4];        /* "OSL1" */
@@ -97,6 +103,28 @@ bool hdr_valid(const StoreHdr& h) {
 
 uint8_t hdr_codec(const StoreHdr& h) {
     return h.version == 1 ? CODEC_RAW : h.codec;
+}
+
+/* Fills `out` from a header that hdr_valid() has already accepted. Shared by
+ * the two backends' loop_store_slot_info(). */
+void info_from_hdr(const StoreHdr& h, loop_store_info_t* out) {
+    out->loop_frames = h.loop_frames;
+    out->sample_rate = h.sample_rate;
+    out->track_bytes = h.track_bytes;
+    out->filled = h.filled;
+    out->codec = hdr_codec(h);
+}
+
+/* Bounds one export read against the track it claims to be inside. Rejecting
+ * rather than clamping is deliberate — see loop_store.h. */
+bool export_range_ok(const StoreHdr& h, int packed_idx, uint32_t offset,
+                     uint32_t len) {
+    int stored = 0;
+    for (int t = 0; t < LOOP_TRACKS; ++t) stored += (h.filled >> t) & 1;
+    if (packed_idx < 0 || packed_idx >= stored) return false;
+    /* No overflow check needed on offset + len: both are bounded by
+     * track_bytes, which hdr_valid() caps at 16 MB. */
+    return offset <= h.track_bytes && len <= h.track_bytes - offset;
 }
 
 void fill_hdr(StoreHdr& h, uint32_t loop_frames, uint8_t filled,
@@ -220,6 +248,13 @@ extern "C" bool loop_store_ready(void) { return s_flash_end != 0; }
 extern "C" const char* loop_store_backend_name(void) { return "flash"; }
 extern "C" int loop_store_slots(void) { return LOOP_STORE_SLOTS_FLASH; }
 extern "C" bool loop_store_needs_stopped(void) { return true; }
+extern "C" bool loop_store_mount(void) { return false; } /* no card here */
+extern "C" bool loop_store_ensure_dir(const char*) { return false; }
+extern "C" loop_store_card_t loop_store_poll_card(void) {
+    return LOOP_STORE_CARD_OK; /* no card to lose */
+}
+extern "C" void loop_store_card_gone(void) {}
+extern "C" uint32_t loop_store_card_serial(void) { return 0; }
 
 extern "C" esp_err_t loop_store_save(int slot, uint32_t loop_frames,
                                      uint8_t filled,
@@ -316,6 +351,41 @@ extern "C" esp_err_t loop_store_read_track(int slot, int packed_idx,
     return ESP_OK;
 }
 
+extern "C" esp_err_t loop_store_slot_info(int slot, loop_store_info_t* out) {
+    if (s_flash_end == 0) return ESP_ERR_INVALID_STATE;
+    if (slot != 0 || out == nullptr) return ESP_ERR_INVALID_ARG;
+    if (!ensure_bounce()) return ESP_ERR_NO_MEM;
+    StoreHdr h;
+    esp_err_t err = flash_read_chunked(kFlashBase, (uint8_t*)&h, kHdrSize);
+    if (err != ESP_OK) return err;
+    if (!hdr_valid(h)) return ESP_ERR_NOT_FOUND;
+    info_from_hdr(h, out);
+    return ESP_OK;
+}
+
+extern "C" esp_err_t loop_store_read_slot_bytes(int slot, int packed_idx,
+                                                uint32_t offset, uint8_t* dst,
+                                                uint32_t len) {
+    if (s_flash_end == 0) return ESP_ERR_INVALID_STATE;
+    if (slot != 0 || dst == nullptr) return ESP_ERR_INVALID_ARG;
+    if (len == 0) return ESP_OK;
+    if (!ensure_bounce()) return ESP_ERR_NO_MEM;
+    /* Re-read the header on every call. An export is a long sequence of small
+     * reads and the alternative — trusting a header cached at the start —
+     * would keep serving a slot that a save has since overwritten. 32 bytes
+     * against ~2 KB of payload, and this is not a throughput path. */
+    StoreHdr h;
+    esp_err_t err = flash_read_chunked(kFlashBase, (uint8_t*)&h, kHdrSize);
+    if (err != ESP_OK) return err;
+    if (!hdr_valid(h)) return ESP_ERR_NOT_FOUND;
+    if (!export_range_ok(h, packed_idx, offset, len)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return flash_read_chunked(
+        kFlashBase + kSector + (uint32_t)packed_idx * h.track_bytes + offset,
+        dst, len);
+}
+
 #else /* SYNTH_LOOP_STORE_SD */
 
 /* ================= SD-card backend (SDSPI + FAT, 8 slots) ============= */
@@ -326,8 +396,36 @@ extern "C" esp_err_t loop_store_read_track(int slot, int packed_idx,
 
 #include "driver/sdspi_host.h"
 #include "driver/spi_common.h"
+#include "esp_timer.h"
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
+
+/* Card bring-up diagnostics. The sdmmc/sdspi drivers name the failing
+ * command and print its R1 byte at DEBUG only — and every one of those lines
+ * is compiled out unless CONFIG_LOG_MAXIMUM_LEVEL is Debug or higher, so a
+ * failing mount shows nothing but the ESP_ERR_TIMEOUT. Set this to 1 *and*
+ * raise the maximum log verbosity in menuconfig (Component config -> Log ->
+ * Maximum log verbosity -> Debug) to get the CMD0/CMD8/CMD55 trail. Leave it
+ * at 0 once the card mounts: it is noisy on every operation. */
+#define OSYNTH_SD_VERBOSE 0
+
+/* Bring-up escape hatch: skip CMD59 (SD_CRC_ON_OFF) during card init. Some
+ * cards stop answering commands entirely once command/data CRC checking is
+ * turned on — the signature is a clean CMD0/CMD8/CMD59 trail followed by
+ * CMD55 timing out with no R1 at all. IDF exposes this as a host flag for
+ * exactly that reason; it costs the data-integrity check on transfers, so
+ * only turn it on if it is what makes the card mount. */
+#define OSYNTH_SD_SKIP_CRC 0
+
+/* Bus clock after init (init itself is always 400 kHz). 20 MHz is the IDF
+ * default and what the streamed looper's throughput budget assumes. Reads
+ * tolerate a marginal bus far better than writes do — flying leads, no
+ * pull-ups or a long ribbon show up as a card that mounts and reads happily
+ * but fails the moment something is written (EIO out of mkdir/fwrite). Drop
+ * to 10000 or 4000 if that is what the logs say; the streamed looper needs
+ * roughly 430 KB/s at eight tracks, so 10 MHz still has headroom and 4 MHz
+ * does not. */
+#define OSYNTH_SD_FREQ_KHZ 20000
 
 namespace {
 
@@ -339,6 +437,22 @@ constexpr size_t kChunk = 8192; /* staging for the legacy v1 raw->adpcm
 bool s_bus_up = false;
 sdmmc_card_t* s_card = nullptr;
 uint8_t* s_chunk = nullptr;
+
+/* Re-mount backoff. A mount attempt against an empty slot costs about a
+ * second of the calling task (the ACMD41 retry loop inside sdmmc_init), which
+ * is nothing once but everything when it repeats: the idle poll would spend a
+ * third of loop_ctl on a synth that simply has no card in it. So the poll
+ * doubles its own floor while attempts keep failing, and resets it the moment
+ * one succeeds or a card that was working goes away — the case where it is
+ * genuinely expected back. Demand paths (save, load, starting a streamed set)
+ * ignore the floor entirely: the user is waiting, and a second is worth it. */
+constexpr uint32_t kMountFloorMinMs = 2000;
+constexpr uint32_t kMountFloorMaxMs = 30000;
+uint32_t s_mount_floor_ms = kMountFloorMinMs;
+uint32_t s_mount_next_ms = 0;
+int s_mount_fails = 0; /* only the first failure of a run is worth logging */
+
+uint32_t now_ms() { return (uint32_t)(esp_timer_get_time() / 1000); }
 
 bool ensure_chunk() {
     if (s_chunk == nullptr) {
@@ -352,31 +466,103 @@ void slot_path(char* out, size_t n, int slot, bool tmp) {
     snprintf(out, n, "%s/loop%d.%s", kDir, slot, tmp ? "tmp" : "olp");
 }
 
+/* True when the errno says the card is not answering rather than that the
+ * filesystem said no. Worth separating because every operation against a card
+ * in this state costs a full sdspi timeout (~1.1 s, measured), and the paths
+ * that hit it run on loop_ctl, which does not yield: a handful of them in a
+ * row is a task watchdog reset. So the answer to a card that has stopped
+ * talking is to stop talking to it, not to investigate. */
+bool card_unresponsive(int e) {
+    return e == EIO || e == ETIMEDOUT || e == ENODEV;
+}
+
+/* mkdir, checked. See loop_store.h for why this is not a bare mkdir call. */
+bool ensure_dir(const char* path) {
+    struct stat st;
+    if (stat(path, &st) == 0) {
+        if (S_ISDIR(st.st_mode)) return true;
+        ESP_LOGE(TAG, "%s exists but is not a directory", path);
+        return false;
+    }
+    /* An unresponsive card is not a missing directory, and the distinction is
+     * the whole diagnosis: one is a card that has gone away mid-session, the
+     * other a filesystem that answered. Checked here rather than after the
+     * mkdir so a dead card costs one timeout instead of two.
+     *
+     * Reported, not acted on. Unmounting here would free the FATFS context
+     * that the streamed looper's open track handles point into, from a call
+     * that knows nothing about them; the idle poll is the one place that
+     * unmounts, and it has the caller give those handles up first. A second
+     * later at worst, and correct. */
+    if (card_unresponsive(errno)) {
+        ESP_LOGE(TAG, "%s unreadable (%s) — the card stopped answering", path,
+                 strerror(errno));
+        return false;
+    }
+    if (mkdir(path, 0775) == 0) return true;
+    if (errno == EEXIST) return true; /* lost a race with another mount user */
+    ESP_LOGE(TAG, "cannot create %s (%s)", path, strerror(errno));
+    return false;
+}
+
 bool ensure_mounted() {
     if (!s_bus_up) return false;
     if (s_card != nullptr) return true;
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
     host.slot = SPI2_HOST;
+    host.max_freq_khz = OSYNTH_SD_FREQ_KHZ;
+#if OSYNTH_SD_SKIP_CRC
+    host.flags |= SDMMC_HOST_FLAG_SPI_IGNORE_DATA_CRC;
+#endif
     sdspi_device_config_t dev = SDSPI_DEVICE_CONFIG_DEFAULT();
     dev.gpio_cs = (gpio_num_t)CONFIG_OSYNTH_SD_CS_GPIO;
     dev.host_id = SPI2_HOST;
     esp_vfs_fat_sdmmc_mount_config_t mount_cfg = {};
     mount_cfg.format_if_mount_failed = false;
-    mount_cfg.max_files = 2;
+    /* FILE slots for the whole mount, which is shared: the streamed looper
+     * holds one per playing track plus the open take (LOOP_TRACKS + 1), the
+     * slot save/load paths hold two, and the SD drum kits read through the
+     * same mount. Two was enough when the only user was save/load, and became
+     * an ENFILE the moment a streamed set played more than one track. */
+    mount_cfg.max_files = LOOP_TRACKS + 4;
     mount_cfg.allocation_unit_size = 16 * 1024;
     esp_err_t err = esp_vfs_fat_sdspi_mount(kMount, &host, &dev, &mount_cfg,
                                             &s_card);
     if (err != ESP_OK) {
         s_card = nullptr;
-        ESP_LOGW(TAG, "SD mount failed (%s) — card inserted?",
-                 esp_err_to_name(err));
+        /* Only the first failure of a run: the idle poll retries forever, and
+         * a synth with no card would otherwise print this until it is fed
+         * one. A success resets the counter, so the next real problem still
+         * announces itself. */
+        if (s_mount_fails == 0) {
+            if (err == ESP_ERR_INVALID_STATE) {
+                /* Someone else registered /sd first — the SD drum kits mount
+                 * the same card. They check for an existing mount and we do
+                 * not, so this is the losing order, and the looper's SD
+                 * backend stays dead until it is fixed rather than sharing
+                 * what is there. */
+                ESP_LOGE(TAG, "%s already mounted by another component — the "
+                              "looper's SD backend is disabled", kMount);
+            } else {
+                ESP_LOGW(TAG, "SD mount failed (%s) — card inserted?",
+                         esp_err_to_name(err));
+            }
+        }
+        ++s_mount_fails;
         return false;
     }
-    mkdir(kDir, 0775); /* EEXIST is fine */
+    s_mount_fails = 0;
     ESP_LOGI(TAG, "SD mounted: %llu MB",
              ((uint64_t)s_card->csd.capacity * s_card->csd.sector_size) >>
                  20);
-    return true;
+    /* After the mount line, so a card that reads but cannot be written says
+     * so in that order rather than looking like a mount failure. This is also
+     * the first real traffic over the freshly mounted card, so it is where a
+     * card that answered the init sequence and nothing since gets caught —
+     * ensure_dir() unmounts in that case, and a mount with no card behind it
+     * is not one we should report as good. */
+    ensure_dir(kDir);
+    return s_card != nullptr;
 }
 
 /* An I/O error usually means the card went away: unmount so the next
@@ -392,6 +578,15 @@ void drop_mount() {
 } // namespace
 
 extern "C" esp_err_t loop_store_init(void) {
+#if OSYNTH_SD_VERBOSE
+    esp_log_level_set("sdmmc_cmd", ESP_LOG_DEBUG);
+    esp_log_level_set("sdmmc_common", ESP_LOG_DEBUG);
+    esp_log_level_set("sdmmc_init", ESP_LOG_DEBUG);
+    esp_log_level_set("sdmmc_sd", ESP_LOG_DEBUG);
+    esp_log_level_set("sdspi_transaction", ESP_LOG_DEBUG);
+    esp_log_level_set("sdspi_host", ESP_LOG_DEBUG);
+    esp_log_level_set("vfs_fat_sdmmc", ESP_LOG_DEBUG);
+#endif
     spi_bus_config_t bus = {};
     bus.mosi_io_num = CONFIG_OSYNTH_SD_MOSI_GPIO;
     bus.miso_io_num = CONFIG_OSYNTH_SD_MISO_GPIO;
@@ -420,6 +615,55 @@ extern "C" bool loop_store_ready(void) { return s_bus_up; }
 extern "C" const char* loop_store_backend_name(void) { return "sd"; }
 extern "C" int loop_store_slots(void) { return LOOP_STORE_SLOTS_SD; }
 extern "C" bool loop_store_needs_stopped(void) { return false; }
+
+/* Shared with loop_stream.cpp so the card has exactly one mount. Callers are
+ * loop_ctl and, once, looper_init() before the loop_ctl task can reach any
+ * card path — a single logical thread, which is what keeps ensure_mounted()'s
+ * lazy retry free of a lock. Do not call this from loop_io. */
+extern "C" bool loop_store_mount(void) { return ensure_mounted(); }
+
+extern "C" bool loop_store_ensure_dir(const char* path) {
+    return path != nullptr && ensure_mounted() && ensure_dir(path);
+}
+
+extern "C" loop_store_card_t loop_store_poll_card(void) {
+    if (!s_bus_up) return LOOP_STORE_CARD_NONE;
+    if (s_card != nullptr) {
+        /* CMD13. No data phase, so it costs a few hundred microseconds on a
+         * card that is there and one command timeout on one that is not —
+         * unlike a read, which would also drag FATFS through a cache miss. */
+        if (sdmmc_get_status(s_card) == ESP_OK) return LOOP_STORE_CARD_OK;
+        ESP_LOGW(TAG, "card stopped answering — treating it as removed");
+        return LOOP_STORE_CARD_LOST; /* handles first, then card_gone() */
+    }
+    const uint32_t now = now_ms();
+    if ((int32_t)(now - s_mount_next_ms) < 0) return LOOP_STORE_CARD_NONE;
+    if (!ensure_mounted()) {
+        s_mount_floor_ms = s_mount_floor_ms >= kMountFloorMaxMs / 2
+                               ? kMountFloorMaxMs
+                               : s_mount_floor_ms * 2;
+        s_mount_next_ms = now + s_mount_floor_ms;
+        return LOOP_STORE_CARD_NONE;
+    }
+    s_mount_floor_ms = kMountFloorMinMs;
+    s_mount_next_ms = 0;
+    return LOOP_STORE_CARD_OK;
+}
+
+extern "C" uint32_t loop_store_card_serial(void) {
+    return s_card != nullptr ? (uint32_t)s_card->cid.serial : 0u;
+}
+
+extern "C" void loop_store_card_gone(void) {
+    if (s_card == nullptr) return;
+    drop_mount();
+    /* A card that was working is the one case where it is genuinely expected
+     * back, so start the backoff over rather than inheriting whatever the
+     * last empty-slot run had wound it up to. */
+    s_mount_floor_ms = kMountFloorMinMs;
+    s_mount_next_ms = now_ms() + kMountFloorMinMs;
+    s_mount_fails = 0;
+}
 
 extern "C" esp_err_t loop_store_save(int slot, uint32_t loop_frames,
                                      uint8_t filled,
@@ -517,6 +761,62 @@ extern "C" esp_err_t loop_store_read_track(int slot, int packed_idx,
             left -= n;
         }
     }
+    fclose(f);
+    if (!ok) {
+        drop_mount();
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+extern "C" esp_err_t loop_store_slot_info(int slot, loop_store_info_t* out) {
+    if (slot < 0 || slot >= LOOP_STORE_SLOTS_SD || out == nullptr) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!ensure_mounted()) return ESP_ERR_INVALID_STATE;
+    char path[48];
+    slot_path(path, sizeof(path), slot, false);
+    FILE* f = fopen(path, "rb");
+    if (f == nullptr) return ESP_ERR_NOT_FOUND;
+    StoreHdr h;
+    const bool ok = fread(&h, 1, kHdrSize, f) == kHdrSize;
+    fclose(f);
+    if (!ok || !hdr_valid(h)) return ESP_ERR_NOT_FOUND;
+    info_from_hdr(h, out);
+    return ESP_OK;
+}
+
+extern "C" esp_err_t loop_store_read_slot_bytes(int slot, int packed_idx,
+                                                uint32_t offset, uint8_t* dst,
+                                                uint32_t len) {
+    if (slot < 0 || slot >= LOOP_STORE_SLOTS_SD || dst == nullptr) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (len == 0) return ESP_OK;
+    if (!ensure_mounted()) return ESP_ERR_INVALID_STATE;
+    char path[48];
+    slot_path(path, sizeof(path), slot, false);
+    /* Opened and closed per call. An export runs at BLE speed — a couple of
+     * kilobytes per round trip — so the directory lookup is noise next to the
+     * link, and a handle held across the whole transfer would be one more
+     * thing the card-lost path had to know about (loop_store.h's LOST
+     * contract: every open handle is dangling, and the caller must give them
+     * up before the unmount). Nothing to give up is the simpler answer. */
+    FILE* f = fopen(path, "rb");
+    if (f == nullptr) return ESP_ERR_NOT_FOUND;
+    StoreHdr h;
+    bool ok = fread(&h, 1, kHdrSize, f) == kHdrSize;
+    if (!ok || !hdr_valid(h)) {
+        fclose(f);
+        return ok ? ESP_ERR_NOT_FOUND : ESP_FAIL;
+    }
+    if (!export_range_ok(h, packed_idx, offset, len)) {
+        fclose(f);
+        return ESP_ERR_INVALID_ARG;
+    }
+    const uint32_t pos =
+        kHdrSize + (uint32_t)packed_idx * h.track_bytes + offset;
+    ok = fseek(f, (long)pos, SEEK_SET) == 0 && fread(dst, 1, len, f) == len;
     fclose(f);
     if (!ok) {
         drop_mount();

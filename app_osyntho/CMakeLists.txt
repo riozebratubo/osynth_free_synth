@@ -189,6 +189,7 @@ qt_add_qml_module(
     QML_FILES qml/WindowStateSaver.qml
     QML_FILES qml/SpinBoxDouble.qml
     SOURCES src/ble/synthprotocol.h
+    SOURCES src/loopwav.h src/loopwav.cpp
 
     # Phase 3 — synth control UI
     QML_FILES qml/Knob.qml

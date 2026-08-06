@@ -26,6 +26,7 @@ Item {
     property int idRecTrk: -1
 
     property int idMono: -1
+    property int idStore: -1
     property int idMaxLen: -1
     property int idTracks: -1
     // Start alignment (S24): both delay the moment a take actually begins.
@@ -63,6 +64,13 @@ Item {
     // connected synth reports, so older firmware still shows stereo/8)
     property bool monoOn: true
     property bool fourTracks: true
+    // Track storage for the next set (loop.store, S31): false = psram (whole
+    // tracks in RAM, capped by maxLen), true = sd (streamed off the card, so
+    // the cap becomes the card's). Only present on firmware built with the
+    // SD store backend — the switch is hidden otherwise, like the cap
+    // toggles above. Latched by the first take, so with a loop present it
+    // names the next set.
+    property bool sdStore: false
     // Track the firmware is actually writing (loop.rectrk, S18): 0 while a
     // punch-in is armed but hasn't reached the loop start yet.
     property int recTrack: 0
@@ -83,6 +91,57 @@ Item {
     // the loop.* params — the screen then shows a hint instead of controls.
     readonly property bool available: idMode >= 0
 
+    // ---- download (S33) ----
+    // Where the download picker is pointed. Index 0 is the live set; the rest
+    // are the save slots, so the source enum and the slot number both fall out
+    // of one index. Slots are only offered on firmware that has persistence at
+    // all (canPersist), and only as many as the backend has (slotMax: flash 0,
+    // SD 7).
+    readonly property var exportSources: {
+        var l = [t.t("Live set")]
+        if (canPersist)
+            for (var i = 0; i <= slotMax; ++i) l.push(t.ts("Slot %1", String(i)))
+        return l
+    }
+    // Owned here rather than read off the ComboBox: a plain
+    // `exportSrcBox.currentIndex` binding on a root property is evaluated
+    // before that child exists, captures no dependency on it and then never
+    // updates. The picker is a SyncedComboBox for the mirror-image reason —
+    // see its own header.
+    property int exportSourceIndex: 0
+    property int exportTrackIndex: 0
+    readonly property int exportSource: exportSourceIndex > 0 ? 1 : 0  // LOOP_SRC_*
+    readonly property int exportSlot: exportSourceIndex > 0 ? exportSourceIndex - 1 : 0
+    // Which tracks the last probe found recorded there, 0-based. Read off the
+    // probe's own filled mask rather than loop.filled: they are the same thing
+    // only for the live set, and a slot's mask is not mirrored anywhere.
+    readonly property var exportTracks: {
+        var out = []
+        const info = Synth.loopExportInfo
+        if (!info.valid) return out
+        for (var i = 0; i < info.tracks; ++i)
+            if ((info.filled & (1 << i)) !== 0) out.push(i)
+        return out
+    }
+    readonly property var exportTrackLabels:
+        exportTracks.map(function(i) { return t.ts("Track %1", String(i + 1)) })
+
+    // Both lists are rebuilt whenever the synth answers, and a selection that
+    // no longer exists would otherwise index past the end — a slot that has
+    // been cleared, or a backend with fewer slots after a reconnect.
+    onExportSourcesChanged:
+        if (exportSourceIndex >= exportSources.length) exportSourceIndex = 0
+    onExportTracksChanged:
+        if (exportTrackIndex >= exportTracks.length) exportTrackIndex = 0
+
+    // Asks the synth what is recorded in the selected source. Also what tells
+    // the app the firmware has the download opcode at all — the panel stays
+    // hidden until one of these is answered.
+    function probeExport() {
+        if (available && Synth.connected)
+            Synth.probeLoopExport(exportSource, exportSlot)
+    }
+
     function rebind() {
         idTrack = Synth.paramIdForName("loop.track")
         idMode = Synth.paramIdForName("loop.mode")
@@ -96,6 +155,7 @@ Item {
         idMono = Synth.paramIdForName("loop.mono")
         idMaxLen = Synth.paramIdForName("loop.maxlen")
         idTracks = Synth.paramIdForName("loop.tracks")
+        idStore = Synth.paramIdForName("loop.store")
         idSync = Synth.paramIdForName("loop.sync")
         idCountIn = Synth.paramIdForName("loop.countin")
         idArmed = Synth.paramIdForName("loop.armed")
@@ -121,6 +181,7 @@ Item {
             loopLen = Synth.paramValue(idLen)
         if (idMono >= 0) monoOn = Synth.paramValue(idMono) > 0.5
         if (idTracks >= 0) fourTracks = Synth.paramValue(idTracks) > 0.5
+        if (idStore >= 0) sdStore = Synth.paramValue(idStore) > 0.5
         if (idMaxLen >= 0) {
             maxLen = Synth.paramValue(idMaxLen)
         } else if (idLen >= 0) {
@@ -136,6 +197,11 @@ Item {
         }
         slotMax = idSave >= 0 ? Math.round(Synth.paramMeta(idSave).max) : 0
         refreshPos()
+        // The download panel hides itself until a LOOP_DUMP request has been
+        // answered, so it needs one asked without waiting for the user to
+        // press anything. Discovery is also when slotMax settles, which is
+        // what the source picker's slot entries are built from.
+        probeExport()
     }
 
     // Authoritative re-read of the two status values that decide whether the
@@ -147,6 +213,11 @@ Item {
         if (idMode >= 0) Synth.refreshParam(idMode)
         if (idTrack >= 0) Synth.refreshParam(idTrack)
         if (idRecTrk >= 0) Synth.refreshParam(idRecTrk)
+        // The download picker is stale for exactly the same reasons the five
+        // above are, and on the same events: a take that just closed changed
+        // what there is to download. (Ignored by the controller while a
+        // transfer is running, so this cannot disturb one.)
+        probeExport()
     }
 
     function refreshPos() {
@@ -163,6 +234,10 @@ Item {
     // cap (stereo, 8 tracks) and each enabled toggle doubles it. Also
     // correct on S19 firmware, where default/max are the stereo/mono caps.
     function predictedMax(mono, four) {
+        // In SD mode the cap is the card's, so neither toggle moves it —
+        // predicting a doubling here would make the hint jump and then be
+        // corrected by the firmware's own loop.maxlen a moment later.
+        if (sdStore) return maxLen
         const m = Synth.paramMeta(idMaxLen)
         if (!m.exists || m.def <= 0) return maxLen
         return m.def * (mono ? 2 : 1) * (four ? 2 : 1)
@@ -187,6 +262,11 @@ Item {
     // stored set's format) keep moving them.
     onMonoOnChanged: monoSwitch.checked = monoOn
     onFourTracksChanged: fourSwitch.checked = fourTracks
+    // Same reason, and this one is not hypothetical: the firmware writes
+    // loop.store back to psram whenever a streamed set cannot be opened, and
+    // without this the switch a moment ago tapped to "on" stays on over a set
+    // that is recording to PSRAM.
+    onSdStoreChanged: sdSwitch.checked = sdStore
 
     Connections {
         target: Synth
@@ -228,6 +308,9 @@ Item {
             }
             else if (id === root.idMono) root.monoOn = value > 0.5
             else if (id === root.idTracks) root.fourTracks = value > 0.5
+            // The firmware writes this back when a card is missing and a
+            // streamed set falls back to psram, so the switch follows.
+            else if (id === root.idStore) root.sdStore = value > 0.5
             else if (id === root.idMaxLen) root.maxLen = value
             else if (id === root.idArmed) root.armedBeats = Math.round(value)
             else if (id === root.idSync) root.syncOn = value > 0.5
@@ -366,6 +449,18 @@ Item {
                                 monoSwitch.checked, checked)
                         }
                     }
+                    // Storage for the next set (S31). Streaming off the card
+                    // trades the PSRAM cap for the card's capacity; the
+                    // firmware re-mirrors loop.maxlen either way, so the
+                    // hint below just follows it rather than predicting.
+                    Switch {
+                        id: sdSwitch
+                        text: t.t("Record to SD")
+                        visible: root.idStore >= 0
+                        enabled: Synth.connected
+                        checked: root.sdStore
+                        onToggled: Synth.setParam(root.idStore, checked ? 1 : 0)
+                    }
                 }
                 Label {
                     width: parent.width
@@ -375,7 +470,24 @@ Item {
                     font.pointSize: UI.fontSize * 0.75
                     text: root.loopLen > 0
                         ? t.t("applies to the next loop (after clear all)")
-                        : t.ts("max loop %1 s", root.maxLen.toFixed(0))
+                        : (root.sdStore
+                           ? t.ts("streamed from the card, max loop %1 s",
+                                  root.maxLen.toFixed(0))
+                           : t.ts("max loop %1 s", root.maxLen.toFixed(0)))
+                }
+                // Slot save/load holds the whole set in RAM, so it cannot
+                // take a streamed set — the firmware refuses it and says so
+                // in its log. Saying it here too keeps the user from
+                // discovering it only after a long take.
+                Label {
+                    width: parent.width
+                    visible: root.sdStore && root.canPersist
+                    wrapMode: Text.WordWrap
+                    color: Material.foreground
+                    opacity: 0.55
+                    font.pointSize: UI.fontSize * 0.75
+                    text: t.t("slot save/load is unavailable for SD sets — "
+                              + "the tracks are /sd/osynth/liveN.olt")
                 }
             }
 
@@ -478,19 +590,22 @@ Item {
 
                     Row {
                         spacing: 8
+                        // Both stay live whatever loop.filled says. The mask is
+                        // a status mirror, and a lost notification used to
+                        // leave the only way out of a stuck-looking loop
+                        // greyed out — the one moment the user most needs it.
+                        // The firmware ignores a clear on an empty track, so
+                        // the worst an always-enabled button can do is
+                        // nothing. The track lights below still show what is
+                        // actually recorded; that is the mask's real job.
                         Button {
                             text: t.t("Clear track")
-                            // The track guard is not decoration: JS shifts by
-                            // (count & 31), so a curTrack of 0 would make
-                            // `1 << -1` the sign bit and light this button over
-                            // a track that has nothing in it.
                             enabled: Synth.connected && root.curTrack >= 1
-                                     && (root.filledMask & (1 << (root.curTrack - 1))) !== 0
                             onClicked: Synth.setParam(root.idClear, 1)
                         }
                         Button {
                             text: t.t("Clear all")
-                            enabled: Synth.connected && root.filledMask !== 0
+                            enabled: Synth.connected
                             onClicked: clearAllDialog.open()
                         }
                     }
@@ -543,6 +658,122 @@ Item {
                         opacity: 0.55
                         font.pointSize: UI.fontSize * 0.75
                         text: t.t("Flash backend needs the loop stopped; loading replaces the current set.")
+                    }
+                }
+            }
+
+            // ---- download (S33) ----
+            // Reads a recorded track back off the synth and writes it as a
+            // WAV. Two shapes: one track as recorded, or every track summed
+            // at the levels below — which is why this panel sits above them.
+            //
+            // The source picker exists because a track's audio can be in
+            // three different places and only the user knows which one they
+            // mean: the live set (in PSRAM, or streamed off the card — the app
+            // cannot tell and does not need to), or a save slot. A streamed
+            // set can never be saved to a slot at all (the firmware refuses
+            // it), so "Live set" is the only route to those takes.
+            //
+            // Hidden until an OP_LOOP_DUMP request has been answered, so older
+            // firmware shows nothing rather than a button that only fails.
+            Rectangle {
+                width: panels.contentWidth
+                implicitHeight: exportCol.implicitHeight + 16
+                radius: 8
+                visible: Synth.loopExportSupported
+                color: Material.theme === Material.Dark ? "#1AFFFFFF" : "#0D000000"
+
+                Column {
+                    id: exportCol
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: 8
+                    spacing: 6
+
+                    Label {
+                        text: t.t("Download")
+                        font.bold: true
+                        font.pointSize: UI.fontSize * 0.95
+                        color: Material.foreground
+                    }
+
+                    Flow {
+                        width: parent.width
+                        spacing: 8
+
+                        // SyncedComboBox: both models are rebuilt every time
+                        // the synth answers a probe, and a plain ComboBox
+                        // silently drops its currentIndex binding on the first
+                        // pick — so the picker would go on showing a track the
+                        // user had moved off. See SyncedComboBox.qml.
+                        SyncedComboBox {
+                            model: root.exportSources
+                            modelIndex: root.exportSourceIndex
+                            enabled: Synth.connected && !Synth.loopExportActive
+                            onActivated: {
+                                root.exportSourceIndex = currentIndex
+                                root.probeExport()
+                            }
+                        }
+                        SyncedComboBox {
+                            model: root.exportTrackLabels
+                            modelIndex: root.exportTrackIndex
+                            visible: root.exportTracks.length > 0
+                            enabled: Synth.connected && !Synth.loopExportActive
+                            onActivated: root.exportTrackIndex = currentIndex
+                        }
+                        Button {
+                            text: t.t("Track WAV")
+                            enabled: Synth.connected && !Synth.loopExportActive
+                                     && root.exportTracks.length > 0
+                            onClicked: Synth.startLoopExport(
+                                root.exportSource, root.exportSlot,
+                                root.exportTracks[root.exportTrackIndex])
+                        }
+                        Button {
+                            text: t.t("Mix WAV")
+                            enabled: Synth.connected && !Synth.loopExportActive
+                                     && root.exportTracks.length > 0
+                            onClicked: Synth.startLoopMixExport(root.exportSource,
+                                                                root.exportSlot)
+                        }
+                        Button {
+                            text: t.t("Cancel")
+                            visible: Synth.loopExportActive
+                            onClicked: Synth.cancelLoopExport()
+                        }
+                    }
+
+                    ProgressBar {
+                        width: parent.width
+                        visible: Synth.loopExportActive
+                        from: 0
+                        to: 1
+                        value: Synth.loopExportProgress
+                    }
+
+                    Label {
+                        width: parent.width
+                        wrapMode: Text.WordWrap
+                        color: Material.foreground
+                        opacity: 0.55
+                        font.pointSize: UI.fontSize * 0.75
+                        text: {
+                            if (Synth.loopExportActive)
+                                return t.ts("downloading… %1%",
+                                            String(Math.round(Synth.loopExportProgress * 100)))
+                            const info = Synth.loopExportInfo
+                            if (!info.valid || root.exportTracks.length === 0)
+                                return t.t("nothing recorded there")
+                            // Audio comes over the same BLE link as everything
+                            // else, so a long take is a long wait — say so
+                            // before the user starts one, not during.
+                            return t.ts("%1 track(s), %2 s %3 — a download runs at BLE speed, so allow a while; the mix uses the track levels below",
+                                        String(root.exportTracks.length),
+                                        info.seconds.toFixed(1),
+                                        info.mono ? t.t("mono") : t.t("stereo"))
+                        }
                     }
                 }
             }

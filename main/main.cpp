@@ -264,17 +264,22 @@ extern "C" void app_main(void) {
 
     ESP_ERROR_CHECK(usb_dev_init());
 
-    /* Before the port starts, on purpose: the codec's control bus shares the
-     * connector with MCLK and BCLK, and it is only reliably quiet while those
-     * are stopped. It also has to be after persist_init(), because it applies
-     * in.pga and out.level from the ParamStore — which is the reason the mute
-     * alone runs at the top of this function instead. Deliberately not
-     * ESP_ERROR_CHECKed — a codec that fails to answer leaves the board silent,
-     * which is worth an error in the log but not a bootloop. See codec.h for
-     * what moved and why. */
+#if !OSYNTH_CODEC_INIT_BEFORE_I2S
+    ESP_ERROR_CHECK(audio_io_start(render_chain, nullptr));
+#endif
+
+    /* Deliberately not ESP_ERROR_CHECKed — a codec that fails to answer leaves
+     * the board silent, which is worth an error in the log but not a bootloop.
+     * Whether this lands before or after the port is the open question
+     * OSYNTH_CODEC_INIT_BEFORE_I2S exists to A/B; see codec.h. Either way it
+     * has to be after persist_init(), because it applies in.pga and out.level
+     * from the ParamStore — which is why the mute alone runs at the top of
+     * this function instead. */
     (void)codec_init();
 
+#if OSYNTH_CODEC_INIT_BEFORE_I2S
     ESP_ERROR_CHECK(audio_io_start(render_chain, nullptr));
+#endif
     ESP_LOGI(TAG, "audio sink: %s | codec: %s", audio_io_sink_name(),
              codec_name());
 

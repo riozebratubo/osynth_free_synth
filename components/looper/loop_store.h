@@ -52,6 +52,61 @@ bool loop_store_ready(void);
 const char* loop_store_backend_name(void); /* "flash" | "sd" */
 int loop_store_slots(void);
 
+/* SD backend: ensures the card is mounted, doing the same lazy retry the
+ * save/load paths do, and returns whether it is. The mount has one owner —
+ * the streamed looper backend (loop_stream.cpp) shares this one rather than
+ * making its own, so a card pulled and re-inserted recovers for both at
+ * once. Always false on the flash backend. */
+bool loop_store_mount(void);
+
+/* SD backend: creates `path` if it is not already a directory and says
+ * whether it is one afterwards. Every failure is logged with its errno —
+ * this is the one place a card that mounts but cannot be used announces
+ * itself, and an unchecked mkdir turns that into a bare ENOENT from the next
+ * fopen (which is exactly how it was found). A card that has stopped
+ * answering is unmounted here rather than left to time out on every later
+ * call. The parent must exist; this does not create a chain. Always false on
+ * the flash backend. */
+bool loop_store_ensure_dir(const char* path);
+
+/* What the idle card poll found. Three states, not two: "no card" and "the
+ * card just left" call for opposite responses, and collapsing them into one
+ * boolean made a mount that was merely between retries look like a removal. */
+typedef enum {
+    LOOP_STORE_CARD_OK = 0, /* mounted and answering */
+    LOOP_STORE_CARD_LOST,   /* was mounted, has stopped answering */
+    LOOP_STORE_CARD_NONE,   /* nothing mounted; a mount is being retried */
+} loop_store_card_t;
+
+/* SD backend, loop_ctl only (the same single-caller rule as
+ * loop_store_mount). Asks after the card and lazily mounts one if none is
+ * there — which is how a re-inserted card comes back, with the attempts
+ * backed off so a synth running with no card does not spend its control task
+ * on them. The usual breakout has no card-detect pin, so presence has to be
+ * asked about: a CMD13 status read, one command with no data transfer, cheap
+ * enough for a once-a-second idle poll.
+ *
+ * LOST means every open handle on that card is now dangling, and the mount is
+ * deliberately left in place so the caller can give them up before
+ * loop_store_card_gone() drops it. NONE means exactly what it says — nothing
+ * is mounted — and in particular is *not* a removal: a caller holding
+ * something that lives on a card must not tear it down on NONE, because the
+ * card it belongs to may simply not be mounted yet. Always OK on the flash
+ * backend: there is no card to lose. */
+loop_store_card_t loop_store_poll_card(void);
+
+/* SD backend: unmounts a card the poll has reported LOST, once
+ * the caller has closed everything it had open on it. Idempotent and a no-op
+ * when nothing is mounted; the next demand re-mounts. */
+void loop_store_card_gone(void);
+
+/* SD backend: the mounted card's CID serial number, 0 when none is mounted.
+ * Identity, not a handle — it is what lets a caller tell "the card I had is
+ * back" from "some other card is now in the slot", which matters to anything
+ * still holding paths that only mean something on the first one. 0 on the
+ * flash backend. */
+uint32_t loop_store_card_serial(void);
+
 /* True when save/load must not run concurrently with audio rendering from
  * flash (the flash backend). */
 bool loop_store_needs_stopped(void);
@@ -72,6 +127,41 @@ esp_err_t loop_store_probe(int slot, uint32_t* loop_frames, uint8_t* filled,
  * straight copy; legacy v1 raw: encoded on the way in). */
 esp_err_t loop_store_read_track(int slot, int packed_idx, uint8_t* dst,
                                 uint32_t loop_frames);
+
+/* ---- reading a slot out piecemeal (S33: the app's WAV export) ----
+ *
+ * The two calls above are the *player's* view of a slot: probe tells the
+ * caller how much PSRAM to commit, read_track converts the blob into the live
+ * format and wants the whole track in one buffer. An export wants neither. It
+ * has ~230 bytes of BLE frame to fill at a time, it never allocates a track,
+ * and it is perfectly able to decode — so what it needs is the stored bytes
+ * verbatim plus the header's own codec to read them by. Hence these two
+ * rather than another mode bolted onto read_track, which would have had to
+ * carry the legacy encoder's state across calls to stay correct.
+ *
+ * Same loop_ctl-only rule as everything else here. */
+#define LOOP_STORE_CODEC_RAW 0        /* v1 blobs: raw interleaved s16 */
+#define LOOP_STORE_CODEC_ADPCM 1      /* stereo, one byte per frame */
+#define LOOP_STORE_CODEC_ADPCM_MONO 2 /* mono, two frames per byte */
+
+typedef struct {
+    uint32_t loop_frames;
+    uint32_t sample_rate;
+    uint32_t track_bytes; /* per stored track, in the stored codec */
+    uint8_t filled;       /* bitmask, track 1 = bit 0 */
+    uint8_t codec;        /* LOOP_STORE_CODEC_* */
+} loop_store_info_t;
+
+/* The slot's header, as stored. ESP_ERR_NOT_FOUND when the slot holds no
+ * valid blob — which is the ordinary answer for a slot never saved to. */
+esp_err_t loop_store_slot_info(int slot, loop_store_info_t* out);
+
+/* `len` bytes at `offset` of the packed_idx-th stored track, exactly as they
+ * sit in the blob (no codec conversion — see above). Reads past track_bytes
+ * are rejected rather than clamped: the caller has the header and a short
+ * answer here would be indistinguishable from a torn file. */
+esp_err_t loop_store_read_slot_bytes(int slot, int packed_idx, uint32_t offset,
+                                     uint8_t* dst, uint32_t len);
 
 #ifdef __cplusplus
 }

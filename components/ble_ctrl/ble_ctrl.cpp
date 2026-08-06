@@ -38,6 +38,7 @@ static const char* TAG = "ble_ctrl";
 #include <atomic>
 #include <cstring>
 
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -62,6 +63,7 @@ static const char* TAG = "ble_ctrl";
 #include "graph_model.h"
 #include "graph_render.h" /* live_cost() for the app's budget meter */
 #endif
+#include "looper.h"
 #include "midi.h"
 #include "presets.h"
 #include "seq_model.h"
@@ -135,6 +137,15 @@ enum : uint8_t {
     OP_GRAPH_KIND = 0x3A,
     OP_GRAPH_NODES = 0x3B,
     OP_GRAPH_EDIT = 0x3C,
+    /* Reading a recorded loop track back out (S33), so the app can write it
+     * to a WAV. Audio, not control data — but it goes here rather than over
+     * the reserved BULK characteristic because there is nothing about it that
+     * BULK would do better: it is a windowed request/response like every
+     * other read on this link, and putting it on the one transport the app
+     * already has flow control, retries and a sequence number for was worth
+     * more than a second channel. The window is what keeps it honest — the
+     * synth only ever sends what was just asked for. */
+    OP_LOOP_DUMP = 0x3D,
     OP_PING = 0x7F,
     EVT_PARAMS = 0xC0,
     EVT_ENGINE = 0xC1,
@@ -199,6 +210,10 @@ uint8_t s_tx[kMaxFrame]; /* ble_cmd task only */
 inline uint16_t rd16(const uint8_t* p) {
     return (uint16_t)(p[0] | ((uint16_t)p[1] << 8));
 }
+inline uint32_t rd32(const uint8_t* p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
+}
 inline float rdf32(const uint8_t* p) {
     float v;
     memcpy(&v, p, 4);
@@ -207,6 +222,12 @@ inline float rdf32(const uint8_t* p) {
 inline void wr16(uint8_t* p, uint16_t v) {
     p[0] = (uint8_t)v;
     p[1] = (uint8_t)(v >> 8);
+}
+inline void wr32(uint8_t* p, uint32_t v) {
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
 }
 inline void wrf32(uint8_t* p, float v) { memcpy(p, &v, 4); }
 
@@ -229,6 +250,29 @@ bool send_frame(const uint8_t* frame, size_t len) {
 void send_status(uint8_t op, uint8_t seq, uint8_t status) {
     const uint8_t f[5] = {(uint8_t)(op | 0x80), seq, 1, 0, status};
     send_frame(f, sizeof(f));
+}
+
+/* send_frame() with back-pressure, for the loop dump alone.
+ *
+ * Every other multi-frame response here is a handful of frames of metadata,
+ * and a dropped one is the app's to notice and re-request. A track download is
+ * thousands of frames of audio in a row, which is the first thing on this link
+ * able to outrun the host's mbuf pool — and at that rate "the app re-requests"
+ * stops being a rare correction and becomes the throughput. So this waits for
+ * a buffer instead of failing, which is exactly the pacing the dump wants: it
+ * runs on the ble_cmd task, and the only thing it delays is the rest of the
+ * download. Bails at once (rather than after the full wait) if the link is
+ * gone, since nothing is coming back then. */
+bool send_frame_paced(const uint8_t* frame, size_t len) {
+    for (int i = 0; i < 100; ++i) { /* ~500 ms */
+        if (s_conn.load(std::memory_order_relaxed) == BLE_HS_CONN_HANDLE_NONE ||
+            !s_evt_sub.load(std::memory_order_relaxed)) {
+            return false;
+        }
+        if (send_frame(frame, len)) return true;
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    return false;
 }
 
 /* Payload bytes (after the status byte) that fit one frame at the live
@@ -907,6 +951,139 @@ void handle_kit_info(uint8_t seq, const uint8_t* p, uint16_t plen) {
     s_chunker.finish();
 }
 
+/* ---- loop track download (S33) ----------------------------------------
+ *
+ * Two sub-ops behind one opcode, the direction-byte convention the sequencer
+ * block already uses:
+ *
+ *   0 INFO [u8 source][u8 slot]
+ *       -> [u8 0][u8 source][u8 slot][u8 filled][u8 codec][u8 tracks]
+ *          [u8 rsvd][u32 loop_frames][u32 sample_rate][u32 track_bytes]
+ *     `filled` 0 means "nothing to download there", which is an answer and
+ *     not an error — an unused slot and an empty live set both give it.
+ *
+ *   1 READ [u8 source][u8 slot][u8 track][u32 offset][u16 len]
+ *       -> one or more frames, ST_MORE on all but the last:
+ *          [u8 1][u8 track][u32 offset][u16 n][n bytes]
+ *     Each frame carries its own offset, so the app can spot a gap and ask
+ *     again from exactly there; a final frame with n == 0 is the end of the
+ *     track. The bytes are the stored codec, undecoded (looper.h).
+ *
+ * Windowed rather than a "start streaming" command on purpose. The synth
+ * sends only what the last request asked for, so the app's buffer, the
+ * host's mbuf pool and a cancel all have the same natural bound — one
+ * window — and there is no transfer state on this side to get out of step
+ * with the app's. */
+constexpr uint32_t kDumpWindow = 2048;
+uint8_t* s_dump = nullptr; /* ble_cmd task only; kept once allocated */
+
+bool ensure_dump_buf() {
+    if (s_dump == nullptr) {
+        /* Internal RAM: it is small, it is touched on every frame of a long
+         * transfer, and a build with no PSRAM has no looper to dump anyway —
+         * so it is never allocated there. */
+        s_dump = (uint8_t*)heap_caps_malloc(kDumpWindow,
+                                            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+    return s_dump != nullptr;
+}
+
+uint8_t dump_status(esp_err_t err) {
+    switch (err) {
+        case ESP_OK: return ST_OK;
+        case ESP_ERR_NOT_SUPPORTED: return ST_UNSUPPORTED;
+        case ESP_ERR_INVALID_ARG: return ST_BAD_ARG;
+        case ESP_ERR_NOT_FOUND: return ST_BAD_ARG; /* no such track/slot */
+        /* "Not now": a take is open, or the flash backend wants the transport
+         * stopped. Both clear on their own, which is what BUSY means here. */
+        case ESP_ERR_INVALID_STATE: return ST_BUSY;
+        default: return ST_MALFORMED;
+    }
+}
+
+void handle_loop_dump(uint8_t seq, const uint8_t* p, uint16_t plen) {
+    if (plen < 1) {
+        send_status(OP_LOOP_DUMP, seq, ST_MALFORMED);
+        return;
+    }
+    if (p[0] == 0) { /* INFO */
+        if (plen < 3) {
+            send_status(OP_LOOP_DUMP, seq, ST_MALFORMED);
+            return;
+        }
+        looper_export_info_t info;
+        const esp_err_t err = looper_export_info(p[1], p[2], &info);
+        if (err != ESP_OK) {
+            send_status(OP_LOOP_DUMP, seq, dump_status(err));
+            return;
+        }
+        size_t n = 5;
+        s_tx[n++] = 0; /* sub */
+        s_tx[n++] = p[1];
+        s_tx[n++] = p[2];
+        s_tx[n++] = info.filled;
+        s_tx[n++] = info.codec;
+        s_tx[n++] = LOOP_TRACKS;
+        s_tx[n++] = 0; /* rsvd */
+        wr32(s_tx + n, info.loop_frames);
+        n += 4;
+        wr32(s_tx + n, info.sample_rate);
+        n += 4;
+        wr32(s_tx + n, info.track_bytes);
+        n += 4;
+        s_tx[0] = OP_LOOP_DUMP | 0x80;
+        s_tx[1] = seq;
+        wr16(s_tx + 2, (uint16_t)(n - 4));
+        s_tx[4] = ST_OK;
+        send_frame(s_tx, n);
+        return;
+    }
+    if (p[0] != 1) {
+        send_status(OP_LOOP_DUMP, seq, ST_MALFORMED);
+        return;
+    }
+    if (plen < 10) { /* sub, source, slot, track, u32 offset, u16 len */
+        send_status(OP_LOOP_DUMP, seq, ST_MALFORMED);
+        return;
+    }
+    if (!ensure_dump_buf()) {
+        send_status(OP_LOOP_DUMP, seq, ST_BUSY);
+        return;
+    }
+    const uint8_t track = p[3];
+    const uint32_t offset = rd32(p + 4);
+    uint32_t want = rd16(p + 8);
+    if (want > kDumpWindow) want = kDumpWindow;
+    uint32_t got = 0;
+    const esp_err_t err = looper_export_read(p[1], p[2], track, offset, s_dump,
+                                             want, &got);
+    if (err != ESP_OK) {
+        send_status(OP_LOOP_DUMP, seq, dump_status(err));
+        return;
+    }
+    const size_t avail = avail_payload();
+    if (avail <= 8) { /* an MTU this small cannot carry a data frame at all */
+        send_status(OP_LOOP_DUMP, seq, ST_UNSUPPORTED);
+        return;
+    }
+    const uint32_t cap = (uint32_t)(avail - 8);
+    uint32_t sent = 0;
+    do { /* do-while: got == 0 still emits the end-of-track frame */
+        const uint32_t n = (got - sent) < cap ? (got - sent) : cap;
+        s_tx[0] = OP_LOOP_DUMP | 0x80;
+        s_tx[1] = seq;
+        wr16(s_tx + 2, (uint16_t)(1 + 8 + n));
+        s_tx[4] = (sent + n) < got ? (uint8_t)(ST_OK | ST_MORE) : (uint8_t)ST_OK;
+        s_tx[5] = 1; /* sub */
+        s_tx[6] = track;
+        wr32(s_tx + 7, offset + sent);
+        wr16(s_tx + 11, (uint16_t)n);
+        memcpy(s_tx + 13, s_dump + sent, n);
+        if (!send_frame_paced(s_tx, 13 + n)) return; /* link gone */
+        sent += n;
+    } while (sent < got);
+}
+
 /* ---- modular patch graph (S28) ---------------------------------------- */
 
 #if SYNTH_ENABLE_MODULAR
@@ -1182,6 +1359,12 @@ void handle_frame(const uint8_t* d, size_t n) {
             break;
         case OP_KIT_INFO:
             handle_kit_info(seq, p, plen);
+            break;
+        case OP_LOOP_DUMP:
+            /* Answers UNSUPPORTED by itself on a build with no looper (the
+             * no-PSRAM stubs in looper.cpp), which is what tells the app to
+             * leave the download controls off the page. */
+            handle_loop_dump(seq, p, plen);
             break;
 #if SYNTH_ENABLE_MODULAR
         case OP_GRAPH_INFO:

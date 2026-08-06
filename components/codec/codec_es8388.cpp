@@ -320,8 +320,11 @@ const char* s_name = "es8388?";
  * read. A driver that reports "this write failed" is more useful than one that
  * hides a bad bus behind machinery, because the bus is the thing to fix.
  *
- * The one ordering that did matter is kept: codec_init() runs before the port
- * starts, where the bus is reliable. See codec.h. */
+ * Whether codec_init() runs before or after the port starts is now a switch,
+ * OSYNTH_CODEC_INIT_BEFORE_I2S, and defaults to after — the bus is less
+ * reliable there on some rigs, but running the whole sequence with no clock
+ * was followed by a line-in noise report that has not been root-caused. See
+ * codec.h. Nothing below depends on which it is. */
 constexpr int kTimeoutMs = 100;
 
 esp_err_t write_reg(uint8_t reg, uint8_t val) {
@@ -698,19 +701,19 @@ esp_err_t codec_init(void) {
                       "reach the chip");
     }
 
-    /* Unmute here, on the stopped-port bus, and not after audio_io_start().
-     * Leaving it for afterwards was the first thing tried and it does not
-     * work: on a jumper-wired M144 the single unmute write NACKs five times in
+    /* Last write of the sequence, and it has to be part of it rather than
+     * something the caller does later: splitting it out was tried and does not
+     * work. On a jumper-wired M144 the single unmute write NACKs five times in
      * about a millisecond once the clocks are running, and a codec that is
      * perfectly configured and permanently muted is no better than one that
      * never answered.
      *
-     * Unmuting a DAC that has no clock yet is safe rather than merely
-     * tolerable. With no MCLK it is not converting, so its outputs are sitting
-     * at VMID exactly as they were while muted; when audio_io_start() brings
-     * the clocks up a moment later the first thing it converts is the render
-     * chain's silence, because no note can have been played yet. There is no
-     * step for the output caps to pass on. */
+     * Safe on either side of audio_io_start() (OSYNTH_CODEC_INIT_BEFORE_I2S).
+     * Before it there is no MCLK, so the DAC is not converting and its outputs
+     * sit at VMID exactly as they did muted; the first thing it converts when
+     * the clocks arrive is the render chain's silence, because no note can have
+     * been played yet. After it the chain is already producing that same
+     * silence. Either way there is no step for the output caps to pass on. */
     err = write_reg(REG_DACCONTROL3, 0x00);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "unmute failed: %s — configured but silent",

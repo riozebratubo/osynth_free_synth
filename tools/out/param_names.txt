@@ -188,6 +188,7 @@ loop.mono
 loop.pos
 loop.rectrk
 loop.save
+loop.store
 loop.sync
 loop.track
 loop.tracks
