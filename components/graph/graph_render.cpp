@@ -325,7 +325,15 @@ uint16_t live_cost() { return s_live_cost.load(std::memory_order_relaxed); }
  * audibly. Shared with the kind-change path in render_block() (S33) so the
  * two can never drift apart. */
 void slot_reset(VoiceState& v, int slot) {
-    memset(&v.n[slot], 0, sizeof(v.n[slot]));
+    /* Zeroed through void*, which is what silences -Wclass-memaccess: the dsp
+     * types all carry default member initialisers, so NodeState is not
+     * trivially constructible. GCC's suggested "use assignment instead" would
+     * be a bug — `NodeState{}` aggregate-initialises the *first* member only,
+     * leaving the rest of the widest member's bytes unspecified, and a slot
+     * that changes kind would inherit them. Whole-object zero is the contract
+     * every VoiceState is built on (idle_voice() above, and the calloc'd pool
+     * in synth_voice.cpp). */
+    memset(static_cast<void*>(&v.n[slot]), 0, sizeof(v.n[slot]));
     v.n[slot].noise.s = 0x9E3779B9u ^ (uint32_t)(slot * 2654435761u) ^
                         (uint32_t)(uintptr_t)&v;
     if (v.n[slot].noise.s == 0) v.n[slot].noise.s = 0x9E3779B9u;

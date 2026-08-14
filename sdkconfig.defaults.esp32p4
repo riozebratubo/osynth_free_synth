@@ -3,19 +3,56 @@
 # 32 MB PSRAM), C6 co-processor wired to the P4 over SDIO.
 #
 # What is different about this target, in one paragraph: the P4 is the fastest
-# chip osynth runs on (400 MHz dual RISC-V *with* an FPU, against the S3's
+# chip osynth runs on (360-400 MHz dual RISC-V *with* an FPU, against the S3's
 # 240 MHz Xtensa) and it has USB-OTG and a full-duplex I2S port, so audio and
 # USB are strictly better than the S3. What it does not have is a radio. BLE
 # therefore runs the NimBLE *host* here and its controller on the C6, with
 # ESP-Hosted carrying HCI over the SDIO link — see the BLE block below.
+#
+# THE PIN CHOICES BELOW ASSUME A MODULE-ON-CARRIER BOARD, not a full devkit.
+# On the board this was set up for, the header exposes only GPIO1-5, 20, 32,
+# 33, 45, 46, 47 plus a pair of pads labelled ES_I2C_SDA / ES_I2C_SCL (the
+# on-board codec's control bus), and the micro-SD socket is already wired on
+# the board rather than brought out. Everything else — USB 24/25, console
+# 37/38, the SDIO link to the C6 on 14-19 + 54, the SD socket — is spoken for
+# in copper. That leaves eleven pins for the whole analogue front end, which
+# is why the I2S block sits at 32/33/45-47 here and not at the 16-20 the S3
+# uses or the 22-28 an earlier revision of this file picked for a devkit.
+# On a board with a wider header, any free pins work: all five are routed
+# through the GPIO matrix.
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_OSYNTH_FLASH_16MB=y
 
-# Max CPU clock (IDF defaults to 360 MHz here): the render budget wants it —
-# see the note in sdkconfig.defaults. The P4's choice members are 40/360/400,
-# so this is *not* the CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240 the other two
-# targets set.
-CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_400=y
+# Chip revision, and the CPU clock that follows from it. **These are one
+# setting, not two.**
+#
+# ESP32P4_SELECTS_REV_LESS_V3 says the image targets P4 revisions 0.x/1.x,
+# which is what a devkit of this class carries (v1.3 on the board this was
+# brought up on). IDF 6.0 defaults it off with REV_MIN v3.1, and a v3.1 image
+# is refused at boot by a v1.x chip — so it is pinned here rather than left to
+# whatever the toolchain's default happens to be that release.
+#
+# The revision then decides which CPU frequencies exist at all, because the
+# CPLL is capped at 360 MHz below rev 3.0 and runs at 400 MHz at and above it.
+# The two sets do not overlap: rev <3 offers 90/180/360, rev >=3 offers
+# 100/200/400 (XTAL divisors either way). Kconfig does not enforce the pairing
+# in the direction that bites — ESP_DEFAULT_CPU_FREQ_MHZ_400 carries no
+# `depends on`, so asking for 400 MHz alongside REV_LESS_V3 configures and
+# builds cleanly, then dies before app_main in a boot loop with
+#
+#     assert failed: esp_clk_init clk.c:104 (res)
+#
+# which is rtc_clk_cpu_freq_mhz_to_config() refusing a frequency the silicon
+# cannot synthesise. That is exactly what CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_400
+# did on this board. 360 MHz is the top of what rev <3 offers, and still well
+# clear of the render-budget floor described in sdkconfig.defaults.
+#
+# **On a rev 3.x board both lines change together**: drop REV_LESS_V3 (and let
+# REV_MIN default to v3.1) and take MHZ_400. Leaving 360 behind there asserts
+# in exactly the same place, for the mirror-image reason.
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+CONFIG_ESP32P4_REV_MIN_100=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_360=y
 
 # PSRAM. The symbols differ from the S3's: the P4 has one line mode (HEX,
 # 16-line) rather than OCT/QUAD, and its speed choice tops out at 250 MHz with
@@ -95,6 +132,32 @@ CONFIG_ESP_HOSTED_P4_DEV_BOARD_FUNC_BOARD=y
 CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE=y
 CONFIG_ESP_HOSTED_NIMBLE_HCI_VHCI=y
 
+# Transport buffers out of internal RAM and into PSRAM. Not a tuning knob —
+# without it this target does not boot.
+#
+# ESP-Hosted takes every transport mempool from internal DMA-capable RAM, 64-byte
+# aligned: one pool per registered channel (SDIO_TX_Q_SIZE 20 + 5 padding blocks
+# x 1600 B ~= 40 KB each, transport_drv.c) plus the SDIO driver's own
+# 31 x 1536 B ~= 47 KB (sdio_drv.c). Against the ~408 KB of internal RAM this
+# build has at heap_init, the pools run the region dry during startup — before
+# app_main, so before osynth has allocated anything at all — and the last one
+# out asserts:
+#
+#     E (1612) HS_MP: mempool create failed: no mem
+#     assert failed: sdio_mempool_create sdio_drv.c:258 (buf_mp_g)
+#
+# a boot loop with no osynth code involved. MEMPOOL_PREFER_SPIRAM makes those
+# allocations try DMA-capable PSRAM first and fall back to internal on failure,
+# which the P4 supports: SOC_SDMMC_PSRAM_DMA_CAPABLE is 1, so the SDMMC
+# peripheral can DMA straight to and from PSRAM.
+#
+# Keep it on here even if the pools are made to fit: internal RAM is the budget
+# osynth actually competes for — render_init() takes the audio buffer pool from
+# MALLOC_CAP_INTERNAL (graph_render.cpp) and runs *after* all of this. The cost
+# is transport latency on a link carrying BLE HCI, which is control traffic, not
+# audio.
+CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y
+
 # Transport pins are deliberately NOT set here. ESP-Hosted brings its own
 # CONFIG_ESP_HOSTED_SDIO_* defaults, which match Espressif's P4+C6 reference
 # wiring; a third-party board may route the SDIO link differently. If the
@@ -121,20 +184,39 @@ CONFIG_ESP_HOSTED_NIMBLE_HCI_VHCI=y
 # ES8388 — and the same trade: the discrete DAC sounds better, the codec is
 # one chip for both directions.
 #
-# NOTE ON THE ON-BOARD 3.5 mm JACK: it is almost certainly NOT an ES8388.
-# P4 devkits in this class carry an **ES8311**, a different (mono, 1-in/1-out)
-# codec with a different register map, which osynth does not support yet —
-# components/codec/ implements ES8388 only. Until it does, the jack is not
-# usable and this target should drive an external PCM5102A on the I2S pins
-# below. Identify what is actually fitted before assuming: at 100 kHz an
-# ES8311 answers at I2C 0x18, an ES8388 at 0x10/0x11, an ES7210 mic array at
-# 0x40/0x41. private_docs/HARDWARE.md has the procedure.
+# The pin budget does not decide it. Both cost the same five GPIOs, because
+# the PCM1808 shares BCLK and WS with the PCM5102A, and the codec's two extra
+# wires come off the board's ES_I2C pads rather than the header. What decides
+# it is that those pads are there at all: a control bus with pull-ups already
+# fitted is exactly what the ES8388 needs and what the discrete pair has no
+# use for. Two boards and two power rails against one, for a converter a step
+# behind — take the discrete front end here only if the line output is what
+# the instrument is judged on.
+#
+# NOTE ON THE ON-BOARD 3.5 mm JACK: it is NOT the codec being configured here,
+# and enabling ES8388 does not make it work. Boards in this class carry an
+# **ES8311** — a different (mono, 1-in/1-out) codec with a different register
+# map, which osynth does not support: components/codec/ implements ES8388
+# only. The ES8388 below is an external module wired to the header.
+#
+# The two coexist, which is the point of the arrangement: they share the
+# control bus (ES_I2C, below) but not the I2S port, and the ES8311 is never
+# written, so it stays in its power-up state — unconfigured and silent. It
+# does answer the address probe, so expect it in the boot-time bus scan
+# (log_bus_scan, codec_es8388.cpp): 0x18 is the board's own ES8311, 0x10 or
+# 0x11 the external ES8388, 0x33 the M5 module's STM32, 0x40/0x41 an ES7210
+# mic array if the board has one. Only the 0x10/0x11 answer is the one the
+# codec driver needs; the rest are the board identifying itself.
 # CONFIG_OSYNTH_FRONTEND_DISCRETE=y
-# CONFIG_OSYNTH_FRONTEND_ES8388=y
+CONFIG_OSYNTH_FRONTEND_ES8388=y
 
 # Stereo line input on the DAC's own port. Available here — the P4's I2S is
 # full duplex and its MCLK routes through the GPIO matrix, which is the pair
-# of properties the classic ESP32 lacks. Default n on a discrete front end.
+# of properties the classic ESP32 lacks. Defaults to y with the ES8388 front
+# end (Kconfig.projbuild), which is what is wanted: the ADC half is the reason
+# to pick the codec, and it costs one pin (DIN) the header can spare. Set it
+# to n to run the codec output-only — the port then drops to four pins, still
+# with MCLK, which the ES8388 needs to play at all.
 # CONFIG_OSYNTH_ENABLE_I2S_LINE_IN=n
 
 # Stream to USB *and* the I2S DAC at once. Default y, as on the S3.
@@ -142,33 +224,130 @@ CONFIG_ESP_HOSTED_NIMBLE_HCI_VHCI=y
 
 # --- I2S pins ---------------------------------------------------------------
 
-# Defaults sit in one block at 16-20. **These are chosen to be safe, not to
-# match your board** — no P4 devkit pinout is assumed here, so check them
-# against the schematic before wiring anything.
+# All five pins, on the header described at the top of this file. **Check them
+# against your own schematic before wiring** — a different carrier exposes a
+# different set, and nothing here is forced by the silicon.
 #
-# Pins to stay away from on this chip: **GPIO24/25 are the USB-OTG full-speed
-# PHY** (D-/D+ — the port the synth enumerates on), GPIO37/38 are console
-# UART0, GPIO10-13 are the UART1 IOMUX pins and GPIO14/15 the LP-UART. On a
-# P4+C6 board the SDIO link to the co-processor also claims a block of pins —
-# that block is board-specific and is the one most likely to collide.
-# CONFIG_OSYNTH_I2S_MCLK_GPIO=16
-# CONFIG_OSYNTH_I2S_BCLK_GPIO=17
-# CONFIG_OSYNTH_I2S_WS_GPIO=18
+# Why 32/33/45-47 out of the eleven available:
+#
+#   45, 46, 47  are SD1_CDATA4-6 in the IO MUX, i.e. the 8-bit-mode data lines
+#               of SDMMC slot 1. A micro-SD socket only has four, so a board
+#               that wires its slot to that IOMUX (39-42 + CLK 43 + CMD 44)
+#               has these three left over — which is exactly why a board with
+#               an on-board reader can still bring them out. Free, adjacent,
+#               and the natural home for the three clock-rate signals.
+#   32, 33      plain digital (their alternate functions are EMAC RMII and
+#               SPI2 HOLD/WP, neither in use), so they take the two data lines.
+#
+# What is deliberately left alone: GPIO2-5 are the JTAG pads MTCK/MTDI/MTMS/
+# MTDO, and GPIO1/20 are the only other spare pins on the header — those six
+# are worth more as serial MIDI in, encoders and buttons than as a home for a
+# 12.288 MHz clock. None of the eleven is a strapping pin (on the P4 those are
+# 34-38, all of them off-header here).
+#
+# An earlier revision of this file put the block at 22-28, which is right for a
+# devkit with a wide header and wrong here — none of those pins are brought
+# out on this board. The reasoning for moving off the *Kconfig* defaults still
+# stands and still applies to any P4 board:
+#
+# The Kconfig block at 16-20 lands on top of the SDIO link to the C6. ESP_HOSTED_P4_DEV_BOARD_FUNC_BOARD puts that link on
+# CLK[18] CMD[19] D0[14] D1[15] D2[16] D3[17] (+ slave reset 54), so WS took
+# SDIO CLK, DOUT took SDIO CMD and BCLK took D3 — and the two lines CMD52 needs
+# were the two that collided. main.cpp brings I2S up before ble_ctrl_init(), so
+# by the time ESP-Hosted reached the bus the I2S peripheral was already driving
+# it, and card init failed fifteen times over:
+#
+#     E sdmmc_io: sdmmc_io_reset: unexpected return: 0x108
+#     E H_SDIO_DRV: card init failed
+#
+# 0x108 is ESP_ERR_INVALID_RESPONSE, and the distinction matters when reading
+# this log: a co-processor that is merely absent or unflashed answers nothing
+# and times out with 0x107, which sdmmc_io_reset() explicitly tolerates
+# (sdmmc_io.c:70). INVALID_RESPONSE means something was driving those lines.
+#
+# The SDIO side cannot move — the C6 is soldered down and that wiring is fixed
+# in copper. The I2S side goes to a converter you wire by hand, so it is the
+# side that gives way. Pins to stay away from on this chip: **GPIO24/25 are the
+# USB-OTG full-speed PHY** (D-/D+ — the port the synth enumerates on, and see
+# usb_dev.c on why it is that port and not the high-speed one), GPIO37/38 are
+# console UART0, GPIO10-13 are the UART1 IOMUX pins, GPIO14/15 the LP-UART, and
+# 14-19 + 54 are the SDIO block above. If you change the ESP-Hosted board choice
+# to match a different schematic, re-check these against the new SDIO block.
+#
+# **MCLK and DIN are set explicitly, and must stay that way on this target.**
+# They used to sit commented out at their Kconfig defaults, which is harmless
+# only while the front end is discrete and the line input off — both pins are
+# then unused. Turning the ES8388 on brings them live at 16 (SDIO D2) and 20,
+# and 16 is inside the C6's SDIO block. That collision is the one described
+# above: audio comes up first, ESP-Hosted then fails card init with
+# `sdmmc_io_reset: unexpected return: 0x108` and BLE never appears, with
+# nothing in the log naming a pin.
+#
+# MCLK: ES8388 MCLK, 12.288 MHz at 48 kHz. Mandatory even in slave mode.
+CONFIG_OSYNTH_I2S_MCLK_GPIO=45
+# BCLK: ES8388 SCLK (the codec calls it SCLK, not BCLK).
+CONFIG_OSYNTH_I2S_BCLK_GPIO=46
+CONFIG_OSYNTH_I2S_WS_GPIO=47
 # DOUT: PCM5102A DIN, or ES8388 DSDIN.
-# CONFIG_OSYNTH_I2S_DOUT_GPIO=19
+CONFIG_OSYNTH_I2S_DOUT_GPIO=32
 # DIN: PCM1808 DOUT, or ES8388 ASDOUT. Only with line input on.
-# CONFIG_OSYNTH_I2S_DIN_GPIO=20
+CONFIG_OSYNTH_I2S_DIN_GPIO=33
 
 # --- ES8388 codec (only with OSYNTH_FRONTEND_ES8388) ------------------------
 
-# CONFIG_OSYNTH_ES8388_I2C_SDA_GPIO=7
-# CONFIG_OSYNTH_ES8388_I2C_SCL_GPIO=8
+# Control bus — the codec's CDATA/CCLK, wired to the board's ES_I2C pads.
+#
+# **Confirm these two numbers against the schematic.** 7/8 is the Kconfig
+# default for this target and where boards in this class usually route the
+# on-board codec's bus, but the silkscreen says ES_I2C rather than a GPIO
+# number, and that pair is the one thing here that cannot be moved to suit:
+# it is fixed in copper on the board's side.
+#
+# Sharing it with the on-board ES8311 is fine and is the intended arrangement:
+# osynth is the only master, and the addresses do not collide (0x18 against
+# 0x10/0x11). The pads carry the board's own pull-ups, so do not add the 1k
+# pair the ES8388 datasheet asks for on a bare chip — osynth's internal
+# pull-ups (~45k) are already in parallel with them and a ready-made codec
+# module brings its own as well (2.2k on the M5Stack M144).
+CONFIG_OSYNTH_ES8388_I2C_SDA_GPIO=7
+CONFIG_OSYNTH_ES8388_I2C_SCL_GPIO=8
+
+# Analogue input pair and the M5 module's own switches. Set for the same
+# M5Stack Module Audio (M144) the S3 target drives — this is the board that
+# module gets moved to, not a second one, so the settings move with it. The
+# long-form reasoning for each is in sdkconfig.defaults.esp32s3; the short
+# version is that the M144's jack is wired differentially, and a single-ended
+# selection there reads exactly half the amplitude on one channel rather than
+# failing outright.
+#
+# On any other ES8388 board (ESP32-A1S, LyraT, "audio kit") drop these three
+# and take LINE2 instead, which is the line/aux jack on all of them.
 # CONFIG_OSYNTH_ES8388_IN_LINE2=y
 # CONFIG_OSYNTH_ES8388_IN_LINE1=y
-# CONFIG_OSYNTH_ES8388_IN_DIFF=y
+CONFIG_OSYNTH_ES8388_IN_DIFF=y
+CONFIG_OSYNTH_ES8388_M5_HP_OMTP=y
+# CONFIG_OSYNTH_ES8388_M5_LINE_MIC=n
+
+# Output pairs. OUT1 for the M144, whose LOUT2/ROUT2 go nowhere — halves the
+# volume-register writes per out.level. BOTH is the answer on an unknown
+# board; OUT2 is the speaker-amp input on most audio kits.
 # CONFIG_OSYNTH_ES8388_OUT_BOTH=y
-# CONFIG_OSYNTH_ES8388_OUT1=y
+CONFIG_OSYNTH_ES8388_OUT1=y
 # CONFIG_OSYNTH_ES8388_OUT2=y
+
+# Input channel balance, both in the 0.5 dB ADC digital volume and in the 3 dB
+# analogue PGA. 0/0 rather than the S3's values: the imbalance they correct is
+# a property of the module's analogue wiring and should carry over unchanged,
+# but it was measured on the S3 and nothing has measured it here yet. Read
+# `in pk L/R` from the heartbeat with a mono source before setting either —
+# see sdkconfig.defaults.esp32s3 for the procedure.
+#
+# Commented out, not set to 0: both symbols `depends on
+# OSYNTH_ENABLE_I2S_LINE_IN`, which is off above, so Kconfig does not emit
+# them and a value here is an unapplied setting rather than a choice. The
+# Kconfig default is 0 anyway — uncomment along with the line input.
+# CONFIG_OSYNTH_ES8388_ADC_BALANCE=0
+# CONFIG_OSYNTH_ES8388_PGA_BALANCE=0
 
 # --- Looper persistence -----------------------------------------------------
 
@@ -183,12 +362,37 @@ CONFIG_ESP_HOSTED_NIMBLE_HCI_VHCI=y
 # CONFIG_OSYNTH_DRUM_SD_KITS=n
 # Shared by the SD looper backend and SD drum kits; also board-specific, and
 # a P4 devkit usually has its own SD slot already wired somewhere else.
-# CONFIG_OSYNTH_SD_CS_GPIO=39
-# CONFIG_OSYNTH_SD_SCK_GPIO=40
-# CONFIG_OSYNTH_SD_MOSI_GPIO=41
-# CONFIG_OSYNTH_SD_MISO_GPIO=42
+#
+# ON A BOARD WITH THE SOCKET ALREADY FITTED, these four defaults are wrong and
+# the card will not mount. osynth's backend is SDSPI (loop_store.cpp), while an
+# on-board micro-SD socket on this chip is almost always wired to the SDMMC
+# slot-1 IOMUX: D0-D3 on 39-42, CLK 43, CMD 44. The defaults below land three
+# of four pins on that block but in the wrong roles, which is worse than not
+# wiring it at all.
+#
+# It does not need header pins to fix. SPI2 routes through the GPIO matrix, so
+# the firmware can reach pins the header never brings out, and every SD card
+# supports SPI mode — the socket just has to be driven with the SD-to-SPI role
+# mapping instead of the SDMMC one:
+#
+#   CS   <- DAT3 (42)      SCK  <- CLK (43)
+#   MOSI <- CMD  (44)      MISO <- DAT0 (39)
+#
+# **Unverified on this board** — that is why it is commented out and the
+# storage backend is left on flash. Two things to check on the schematic
+# before trying it: that the socket really is on the slot-1 IOMUX, and that
+# DAT1/DAT2 are pulled up rather than left floating (SPI mode leaves them
+# unused, and a floating DAT1 is the card's interrupt line). If a buffer or
+# level shifter sits between the P4 and the socket, check it is bidirectional
+# on the data lines before driving them as SPI.
+# CONFIG_OSYNTH_SD_CS_GPIO=42
+# CONFIG_OSYNTH_SD_SCK_GPIO=43
+# CONFIG_OSYNTH_SD_MOSI_GPIO=44
+# CONFIG_OSYNTH_SD_MISO_GPIO=39
 
 # --- Serial MIDI ------------------------------------------------------------
 
-# Rarely wanted here — USB-MIDI comes free with the USB-OTG peripheral.
-# CONFIG_OSYNTH_SERIAL_MIDI_RX_GPIO=21
+# Rarely wanted here — USB-MIDI comes free with the USB-OTG peripheral. The
+# Kconfig default (21) is not on this board's header; 20 is, and is one of the
+# six pins the I2S block deliberately left free.
+# CONFIG_OSYNTH_SERIAL_MIDI_RX_GPIO=20

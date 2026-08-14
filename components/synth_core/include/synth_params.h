@@ -96,8 +96,9 @@ public:
      * widest fixed engine registers 30. With the drum bus (71), the
      * sequencer, the FX bus, the matrix and the looper all resident, a full
      * graph lands near 270 — 323 since S34, which added 53 to the FX bus
-     * (six units, note-division sync and two LFOs). Raised from 384 to 448 in
-     * the same session to keep the margin that number was chosen for, because
+     * (six units, note-division sync and two LFOs), and 326 since S35 added
+     * the three FX level-compensation switches. Raised from 384 to 448 in
+     * S34 to keep the margin that number was chosen for, because
      * overflow is per-parameter and partial — a patch would come up with some
      * of a node's controls missing rather than failing outright, which is a
      * far more confusing thing to debug than a refusal. */

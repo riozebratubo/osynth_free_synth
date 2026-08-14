@@ -68,8 +68,36 @@ static const uint8_t s_config_desc[] = {
 
     /* Interface number, string index, EP Out & EP In address, EP size */
     TUD_MIDI_DESCRIPTOR(ITF_NUM_MIDI, STRID_MIDI, EPNUM_MIDI_OUT,
-                        EPNUM_MIDI_IN, 64),
+                        EPNUM_MIDI_IN, OSYNTH_USB_MIDI_EP_SIZE),
 };
+
+#if OSYNTH_USB_HS
+/* A high-speed device is asked for this before the host will ask for the Other
+ * Speed Configuration. TinyUSB's default is a weak stub returning NULL, which
+ * STALLs — tolerated by hosts in practice, but a device that advertises
+ * bcdUSB 2.00 and runs at high speed ought to answer. It describes what this
+ * device would be at the *other* speed, so bNumConfigurations matches and the
+ * class triple is the same; only the speed-dependent EP0 size is restated.
+ *
+ * osynth never runs full speed on the P4 (the full-speed controller's pins go
+ * nowhere on this board), so this exists to satisfy enumeration rather than to
+ * describe a configuration the device will ever adopt. */
+static const tusb_desc_device_qualifier_t s_device_qualifier = {
+    .bLength            = sizeof(tusb_desc_device_qualifier_t),
+    .bDescriptorType    = TUSB_DESC_DEVICE_QUALIFIER,
+    .bcdUSB             = 0x0200,
+    .bDeviceClass       = TUSB_CLASS_MISC,
+    .bDeviceSubClass    = MISC_SUBCLASS_COMMON,
+    .bDeviceProtocol    = MISC_PROTOCOL_IAD,
+    .bMaxPacketSize0    = CFG_TUD_ENDPOINT0_SIZE,
+    .bNumConfigurations = 0x01,
+    .bReserved          = 0x00,
+};
+
+const uint8_t* tud_descriptor_device_qualifier_cb(void) {
+    return (const uint8_t*)&s_device_qualifier;
+}
+#endif
 
 /* STRID_SERIAL is filled from the eFuse MAC on first request. */
 static const char* s_strings[] = {

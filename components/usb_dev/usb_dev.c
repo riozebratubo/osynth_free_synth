@@ -75,10 +75,45 @@ static void usb_task(void* arg) {
 esp_err_t usb_dev_init(void) {
     if (s_task != NULL) return ESP_ERR_INVALID_STATE;
 
+    /* The PHY target and the root-hub port in tusb_config.h are one decision,
+     * not two, and getting them out of step fails in two different ways — both
+     * of which this target has actually done.
+     *
+     * Name a target the port does not match and nothing works at all: with the
+     * PHY on the UTMI (high-speed) controller and TinyUSB on port 0
+     * (full-speed), tusb_init() returned false and app_main aborted on the
+     * ESP_ERROR_CHECK around this function. That is the state a zeroed
+     * otg_speed produces by itself, because usb_new_phy() carries a
+     * backward-compatibility rule for the P4 (usb_phy.c): in DEVICE mode with
+     * the speed UNDEFINED or HIGH it discards the requested target and takes
+     * UTMI, announcing it only as
+     *
+     *     W usb_phy: Using UTMI PHY instead of requested internal PHY
+     *
+     * Match them to the wrong controller and it fails silently instead, which
+     * is worse: the internal FSLS PHY on GPIO24/25 paired with port 0 brings
+     * the stack up perfectly, logs "UAC2+MIDI composite up", and enumerates
+     * nowhere, because on this board those pins reach no USB socket. Only the
+     * high-speed controller is wired to one.
+     *
+     * So both fields are set explicitly on both branches. otg_speed is read
+     * nowhere else in usb_phy.c — its only job is to stop that override firing
+     * behind your back — and the S3 branch keeps the full-speed PHY it has
+     * always used, since the override is inside #if CONFIG_IDF_TARGET_ESP32P4. */
     const usb_phy_config_t phy_conf = {
         .controller = USB_PHY_CTRL_OTG,
         .otg_mode = USB_OTG_MODE_DEVICE,
+#if OSYNTH_USB_HS
+        /* UTMI is the high-speed controller's PHY, which the DWC2 port table
+         * puts on root-hub port 1 — the port tusb_config.h selects here. The
+         * two must name the same controller: a PHY on one and TinyUSB on the
+         * other enumerates nothing while still reporting success. */
+        .otg_speed = USB_PHY_SPEED_HIGH,
+        .target = USB_PHY_TARGET_UTMI,
+#else
+        .otg_speed = USB_PHY_SPEED_FULL,
         .target = USB_PHY_TARGET_INT,
+#endif
     };
     esp_err_t err = usb_new_phy(&phy_conf, &s_phy);
     if (err != ESP_OK) {

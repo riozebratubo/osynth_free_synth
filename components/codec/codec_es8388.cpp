@@ -150,8 +150,20 @@ constexpr size_t kOutVolCount = sizeof(kOutVolRegs) / sizeof(kOutVolRegs[0]);
  * converter with far more range than a line input uses. The PGA alternative
  * raises the quiet channel instead and costs nothing in theory, but its step
  * is 3 dB and over-correcting clips it analogue-side, which sounds metallic
- * and cannot be undone. See OSYNTH_ES8388_ADC_BALANCE. */
+ * and cannot be undone. See OSYNTH_ES8388_ADC_BALANCE.
+ *
+ * The Kconfig symbol `depends on OSYNTH_ENABLE_I2S_LINE_IN`, so on a
+ * playback-only ES8388 build it does not exist at all and naming it is a
+ * compile error — set_pga() below sits inside the same guard for the same
+ * reason, and this one was simply missed until an ES8388 target was first
+ * built with the line input off. Zero is the right value there rather than a
+ * fallback worth arguing about: kAdcPower powers the ADC down entirely, so
+ * kInit is writing 0 dB into a pair of registers nothing is reading. */
+#if SYNTH_ENABLE_LINE_IN
 constexpr int kAdcBalance = CONFIG_OSYNTH_ES8388_ADC_BALANCE;
+#else
+constexpr int kAdcBalance = 0;
+#endif
 constexpr uint8_t kAdcVolL =
     (kAdcBalance < 0) ? (uint8_t)((-kAdcBalance > 192) ? 192 : -kAdcBalance) : 0;
 constexpr uint8_t kAdcVolR =

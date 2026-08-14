@@ -39,15 +39,23 @@ extern "C" {
  * parameter instead of a switch plus a division — and keeps fx.dly.time
  * meaningful (and modulatable) exactly when it is in charge. */
 #define FX_PID_DLY_DIV   0x0315
+/* Level compensation (S35) — see the block comment above fx.cpp's mix_gains().
+ * Three units only, because they are the three whose wet path is *not* a
+ * level-preserving copy of the dry one. Off by default everywhere: it changes
+ * the sound of every patch that uses the unit, and a preset saved before S35
+ * has to load and sound exactly as it did. */
+#define FX_PID_DLY_COMP  0x0316
 #define FX_PID_REV_MIX   0x0320
 #define FX_PID_REV_SIZE  0x0321
 #define FX_PID_REV_DAMP  0x0322
+#define FX_PID_REV_COMP  0x0323
 #define FX_PID_GRN_MIX   0x0330
 #define FX_PID_GRN_SIZE  0x0331
 #define FX_PID_GRN_DENS  0x0332
 #define FX_PID_GRN_PITCH 0x0333
 #define FX_PID_GRN_FB    0x0334
 #define FX_PID_GRN_SPRAY 0x0335
+#define FX_PID_GRN_COMP  0x0336
 #define FX_PID_CRUSH_MIX  0x0340
 #define FX_PID_CRUSH_BITS 0x0341
 #define FX_PID_CRUSH_DOWN 0x0342

@@ -46,38 +46,80 @@ device; the "UART"/"COM" port is for `idf.py flash monitor`.
 
 ## ESP32-P4 (+ ESP32-C6 for BLE)
 
-**These defaults are chosen to be safe, not to match any particular devkit.**
-No P4 board pinout is assumed — check every row against your schematic before
-wiring. Ships with the **discrete** front end (PCM5102A); the on-board 3.5 mm
-jack is most likely an ES8311, which osynth does not drive.
+**These defaults target a module-on-carrier board, not a wide-header devkit.**
+The header on that board exposes only **GPIO1–5, 20, 32, 33, 45, 46, 47** plus a
+pair of pads labelled **ES_I2C_SDA / ES_I2C_SCL**, and its micro-SD socket is
+already wired. On a devkit with more pins out, any free pins work — all five
+I2S signals route through the GPIO matrix. Check every row against your
+schematic before wiring either way.
+
+Ships with the **ES8388 codec** front end and line input **on**, driving an
+external codec module. The on-board 3.5 mm jack is an **ES8311** and is *not*
+what this configures — see "the two codecs" below.
 
 | Pin | Function | Goes to | menuconfig symbol |
 | --- | --- | --- | --- |
-| GPIO7  | Codec I2C SDA | ES8388 CDATA | `OSYNTH_ES8388_I2C_SDA_GPIO` |
-| GPIO8  | Codec I2C SCL | ES8388 CCLK | `OSYNTH_ES8388_I2C_SCL_GPIO` |
-| GPIO16 | I2S MCLK | PCM1808 SCKI / ES8388 MCLK | `OSYNTH_I2S_MCLK_GPIO` |
-| GPIO17 | I2S BCLK | PCM5102A BCK | `OSYNTH_I2S_BCLK_GPIO` |
-| GPIO18 | I2S LRCK/WS | PCM5102A LCK | `OSYNTH_I2S_WS_GPIO` |
-| GPIO19 | I2S DOUT (playback) | PCM5102A DIN | `OSYNTH_I2S_DOUT_GPIO` |
-| GPIO20 | I2S DIN (capture) | PCM1808 DOUT | `OSYNTH_I2S_DIN_GPIO` |
-| GPIO21 | Serial MIDI RX | 6N138 optocoupler output | `OSYNTH_SERIAL_MIDI_RX_GPIO` |
+| GPIO14–19 | SDIO → C6 | on-board ESP32-C6 | ESP-Hosted — **claimed, see below** |
+| GPIO20 | Serial MIDI RX | 6N138 optocoupler output | `OSYNTH_SERIAL_MIDI_RX_GPIO` |
 | GPIO24 | USB D− | host / computer | **fixed** — USB-OTG FS PHY (port 0) |
 | GPIO25 | USB D+ | host / computer | **fixed** — USB-OTG FS PHY (port 0) |
-| GPIO39 | SD card CS | micro-SD | `OSYNTH_SD_CS_GPIO` |
-| GPIO40 | SD card SCK | micro-SD | `OSYNTH_SD_SCK_GPIO` |
-| GPIO41 | SD card MOSI | micro-SD | `OSYNTH_SD_MOSI_GPIO` |
-| GPIO42 | SD card MISO | micro-SD | `OSYNTH_SD_MISO_GPIO` |
-| board-specific | SDIO → C6 | ESP-Hosted (BLE + Wi-Fi link) | ESP-Hosted component |
+| GPIO32 | I2S DOUT (playback) | ES8388 DSDIN | `OSYNTH_I2S_DOUT_GPIO` |
+| GPIO33 | I2S DIN (capture) | ES8388 ASDOUT | `OSYNTH_I2S_DIN_GPIO` |
+| GPIO39–44 | micro-SD | on-board socket | SDMMC slot-1 IOMUX — **see below** |
+| GPIO45 | I2S MCLK | ES8388 MCLK | `OSYNTH_I2S_MCLK_GPIO` |
+| GPIO46 | I2S BCLK | ES8388 **SCLK** | `OSYNTH_I2S_BCLK_GPIO` |
+| GPIO47 | I2S LRCK/WS | ES8388 LRCK | `OSYNTH_I2S_WS_GPIO` |
+| GPIO54 | C6 reset | on-board ESP32-C6 | ESP-Hosted — **claimed** |
+| ES_I2C_SDA | Codec I2C SDA | ES8388 CDATA | `OSYNTH_ES8388_I2C_SDA_GPIO` (7) |
+| ES_I2C_SCL | Codec I2C SCL | ES8388 CCLK | `OSYNTH_ES8388_I2C_SCL_GPIO` (8) |
+
+That leaves **GPIO1–5 free** for local UI. GPIO2–5 are the JTAG pads
+(MTCK/MTDI/MTMS/MTDO) — fine as GPIOs, but they cost external JTAG.
+
+**Why 45/46/47 are free on a board that has an SD socket:** they are
+SD1_CDATA4–6 in the IO MUX, the 8-bit-mode data lines of SDMMC slot 1. A
+micro-SD card only has four, so a socket wired to that IOMUX takes 39–42 +
+CLK 43 + CMD 44 and leaves these three over. Three adjacent spare pins is why
+the clock-rate signals live there and the two data lines went to 32/33.
+
+**The two codecs.** The external ES8388 and the board's on-board ES8311 share
+the ES_I2C bus but not the I2S port. osynth drives only the ES8388
+(`components/codec/` implements no other), so the ES8311 stays in its
+power-up state: unconfigured and silent, jack dead. Nothing collides — one
+master, and the addresses differ. The boot-time bus scan is the way to read
+it: **0x18** the on-board ES8311, **0x10/0x11** the ES8388, **0x33** the M5
+module's STM32, **0x40/0x41** an ES7210 mic array. Only 0x10/0x11 matters to
+the driver; the rest is the board identifying itself.
+
+**The on-board SD socket needs its pins remapped.** osynth's storage backend is
+SDSPI, and an on-board socket is wired for SDMMC. It costs no header pins to
+fix — SPI2 goes through the GPIO matrix, so the firmware reaches pins the
+header never brings out, and every SD card speaks SPI. Drive the same socket
+with the SPI role mapping: **CS←DAT3 (42), SCK←CLK (43), MOSI←CMD (44),
+MISO←DAT0 (39)**. Left commented out in `sdkconfig.defaults.esp32p4` because it
+is unverified on this board; confirm the socket really is on slot 1 and that
+DAT1/DAT2 are pulled up before enabling it.
 
 **Do not use:**
 
 - **GPIO24/25** — USB-OTG full-speed PHY.
-- **GPIO37/38** — console UART0.
+- **GPIO34–38** — strapping pins (37/38 are also console UART0).
 - **GPIO10–13** — UART1 IOMUX pins.
 - **GPIO14/15** — LP-UART.
-- **The SDIO block to the C6** — differs per board and is the most likely
-  collision. Resolve it from the schematic first; nothing else can be chosen
-  around it blind.
+- **GPIO14–19 and GPIO54** — the SDIO block to the C6, with
+  `ESP_HOSTED_P4_DEV_BOARD_FUNC_BOARD`: CLK[18] CMD[19] D0[14] D1[15] D2[16]
+  D3[17], slave reset [54]. This block differs per board and is the most likely
+  collision — the I2S defaults used to land right on it. Resolve it from the
+  schematic first; nothing else can be chosen around it blind, and if you change
+  the ESP-Hosted board choice, every row above needs re-checking against the new
+  block.
+
+The collision that block causes does not announce itself as a pin conflict:
+audio comes up first and the C6 link then fails its card init with
+`sdmmc_io_reset: unexpected return: 0x108`, with nothing in the log naming a
+pin. The Kconfig defaults for MCLK (16) and DIN (20) land inside it, which is
+why `sdkconfig.defaults.esp32p4` sets **all five** I2S pins explicitly rather
+than leaving the two that are only live on a codec front end to their defaults.
 
 ---
 
@@ -154,37 +196,41 @@ two pins with both sides pushing.
 
 ### ES8388 codec (ESP32-A1S, LyraT, "audio kit" boards)
 
-| ES8388 | ESP32-S3 default |
-| --- | --- |
-| MCLK | GPIO14 |
-| SCLK | GPIO16 |
-| LRCK | GPIO17 |
-| DSDIN | GPIO18 |
-| ASDOUT | GPIO15 |
-| CDATA | GPIO8 — **1k pull-up to 3V3** |
-| CCLK | GPIO9 — **1k pull-up to 3V3** |
-| CE | GND (addr 0x10) **or** 3V3 (0x11) — **never to a GPIO** |
+| ES8388 | ESP32-S3 default | ESP32-P4 default |
+| --- | --- | --- |
+| MCLK | GPIO14 | GPIO45 |
+| SCLK | GPIO16 | GPIO46 |
+| LRCK | GPIO17 | GPIO47 |
+| DSDIN | GPIO18 | GPIO32 |
+| ASDOUT | GPIO15 | GPIO33 |
+| CDATA | GPIO8 — **1k pull-up to 3V3** | ES_I2C_SDA — pads already pulled up |
+| CCLK | GPIO9 — **1k pull-up to 3V3** | ES_I2C_SCL — pads already pulled up |
+| CE | GND (addr 0x10) **or** 3V3 (0x11) — **never to a GPIO** | same |
+
+On the P4 the control bus is the board's own, shared with an on-board ES8311 —
+do **not** add the 1k pair there, the board fits its own and the codec module
+brings more in parallel.
 
 The firmware probes both addresses, so CE either way is fine. Control pins are
 named CCLK/CDATA, not SCL/SDA. Some boards gate their speaker amp with a
 PA-enable GPIO this firmware does not drive — if headphones work and speakers
 stay silent, that pin is why.
 
-### M5Stack Module Audio (M144) → ESP32-S3 devkit
+### M5Stack Module Audio (M144) → ESP32-S3 devkit / ESP32-P4 module
 
 Jumper wires into the 30-pin header. Odd pins in one row, even in the other.
 
-| M-Bus pin | Signal | ESP32-S3 |
-| --- | --- | --- |
-| 12 | SYS_3.3V | 3V3 |
-| 1, 3, 5 | GND | GND — **solder all three, short and direct** |
-| 17 | BUS_SDA (CDATA) | GPIO8 |
-| 18 | BUS_SCL (CCLK) | GPIO9 |
-| 21 | I2S_LRCK | GPIO17 |
-| 22 | I2S_MCLK | GPIO14 |
-| 23 | I2S_MAIN_DOUT | GPIO18 |
-| 24 | I2S_SCLK | GPIO16 |
-| 26 | I2S_MAIN_DIN | GPIO15 |
+| M-Bus pin | Signal | ESP32-S3 | ESP32-P4 |
+| --- | --- | --- | --- |
+| 12 | SYS_3.3V | 3V3 | 3V3 |
+| 1, 3, 5 | GND | GND — **solder all three, short and direct** | same |
+| 17 | BUS_SDA (CDATA) | GPIO8 | ES_I2C_SDA |
+| 18 | BUS_SCL (CCLK) | GPIO9 | ES_I2C_SCL |
+| 21 | I2S_LRCK | GPIO17 | GPIO47 |
+| 22 | I2S_MCLK | GPIO14 | GPIO45 |
+| 23 | I2S_MAIN_DOUT | GPIO18 | GPIO32 |
+| 24 | I2S_SCLK | GPIO16 | GPIO46 |
+| 26 | I2S_MAIN_DIN | GPIO15 | GPIO33 |
 
 Everything else unconnected: pin 6 (RST), pin 28 (5V), pins 25/27/29 (HPWR).
 
@@ -193,7 +239,8 @@ Everything else unconnected: pin 6 (RST), pin 28 (5V), pins 25/27/29 (HPWR).
 - **Three grounds, not one.** One thin ground jumper for three clocks up to
   12.288 MHz makes the codec NACK I2C the moment the I2S port is enabled.
 - Set `OSYNTH_ES8388_INPUT` to **DIFF** and `OSYNTH_ES8388_OUTPUT` to **OUT1**
-  (already in `sdkconfig.defaults.esp32s3`). The input jack is differential;
+  (already in `sdkconfig.defaults.esp32s3` and `.esp32p4`). The input jack is
+  differential;
   single-ended reads exactly half the amplitude on one channel.
 - J1 (TRS, "LINE/MIC") is the **input**; J2 (TRRS) is the **output**.
 

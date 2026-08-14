@@ -1,5 +1,8 @@
 /*
- * osynth — USB composite descriptor layout (ESP32-S3, full speed).
+ * osynth — USB composite descriptor layout.
+ *
+ * Full speed on the ESP32-S3, high speed on the ESP32-P4 — see OSYNTH_USB_HS
+ * below for why the P4 is not simply the same full-speed device.
  *
  * Interfaces:
  *   0  UAC2 audio control      \  IAD (audio function)
@@ -24,6 +27,42 @@
 
 #ifdef __cplusplus
 extern "C" {
+#endif
+
+/* ---- Which controller, and therefore which speed ----
+ *
+ * The P4 has two OTG controllers on different pins, and a board only brings
+ * one of them out to a connector. On the Guition ESP32-P4-M3-DEV that is the
+ * high-speed one: USB1 is the CH340 UART bridge, USB2 the P4's USB-Serial/JTAG,
+ * and USB3 the OTG socket. The full-speed controller's pins (GPIO24/25) reach
+ * no connector on that board, so a full-speed device there enumerates nowhere —
+ * the stack comes up clean, logs "UAC2+MIDI composite up", and the host never
+ * sees a thing. That is the symptom this switch exists to avoid; if a future P4
+ * board wires the full-speed pins instead, flip this to 0 and both the PHY
+ * target in usb_dev.c and the descriptors below follow.
+ *
+ * The S3 has only the full-speed controller, so it is unaffected either way. */
+#if defined(CONFIG_IDF_TARGET_ESP32P4)
+#define OSYNTH_USB_HS 1
+#else
+#define OSYNTH_USB_HS 0
+#endif
+
+/* Iso IN service interval. Both values mean one packet per millisecond: full
+ * speed counts 1 ms frames, high speed counts 125 us microframes and encodes
+ * the interval as 2^(n-1), so 4 gives 8 microframes = 1 ms. Holding the
+ * interval at 1 ms is what lets the packet size, the FIFO depth and the audio
+ * task's pacing stay exactly as they were at full speed — only the encoding of
+ * the number changes.
+ *
+ * The MIDI endpoints are bulk, where the speeds do differ in substance: 64
+ * bytes is the full-speed maximum, 512 the high-speed one. */
+#if OSYNTH_USB_HS
+#define OSYNTH_USB_ISO_INTERVAL 0x04
+#define OSYNTH_USB_MIDI_EP_SIZE 512
+#else
+#define OSYNTH_USB_ISO_INTERVAL 0x01
+#define OSYNTH_USB_MIDI_EP_SIZE 64
 #endif
 
 /* ---- Stream format (matches the audio engine, see synth_config.h) ---- */
@@ -130,7 +169,8 @@ enum {
     /* Standard AS Isochronous Audio Data Endpoint Descriptor (4.10.1.1) */\
     TUD_AUDIO_DESC_STD_AS_ISO_EP(/*_ep*/ _epin, \
         /*_attr*/ (uint8_t)(TUSB_XFER_ISOCHRONOUS | TUSB_ISO_EP_ATT_ASYNCHRONOUS | TUSB_ISO_EP_ATT_DATA), \
-        /*_maxEPsize*/ CFG_TUD_AUDIO_FUNC_1_FORMAT_1_EP_SZ_IN, /*_interval*/ 0x01),\
+        /*_maxEPsize*/ CFG_TUD_AUDIO_FUNC_1_FORMAT_1_EP_SZ_IN, \
+        /*_interval*/ OSYNTH_USB_ISO_INTERVAL),\
     /* Class-Specific AS Isochronous Audio Data Endpoint Descriptor (4.10.1.2) */\
     TUD_AUDIO_DESC_CS_AS_ISO_EP(/*_attr*/ AUDIO_CS_AS_ISO_DATA_EP_ATT_NON_MAX_PACKETS_OK, \
         /*_ctrl*/ AUDIO_CTRL_NONE, \

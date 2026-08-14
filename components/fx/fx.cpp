@@ -40,6 +40,12 @@
  * block) so stale audio can never replay on re-enable — that skip is what
  * keeps the always-on bus nearly free when unused.
  *
+ * S35 adds `comp` to the delay, the granular delay and the reverb: the three
+ * units whose wet path is decorrelated from the dry one, and so the three the
+ * equal-gain crossfade above quietly costs 3 dB in the middle of the knob.
+ * Two of them lose level at the far end as well. Off by default, opt-in per
+ * unit; the whole argument is above mix_gains().
+ *
  * Reverb is a Freeverb (Schroeder/Moorer): 8 parallel lowpass-feedback
  * combs + 4 series allpasses per channel, 44.1 kHz tunings scaled to the
  * build's sample rate, right channel offset for width.
@@ -135,9 +141,9 @@ constexpr int kPhsStagesMax = 12; /* allpass sections per channel */
  * zero-filled and would register phantom parameters at id 0. */
 enum PIdx {
     CHO_MIX, CHO_RATE, CHO_DEPTH,
-    DLY_MIX, DLY_TIME, DLY_FB, DLY_TONE, DLY_PP, DLY_DIV,
-    GRN_MIX, GRN_SIZE, GRN_DENS, GRN_PITCH, GRN_FB, GRN_SPRAY,
-    REV_MIX, REV_SIZE, REV_DAMP,
+    DLY_MIX, DLY_TIME, DLY_FB, DLY_TONE, DLY_PP, DLY_DIV, DLY_COMP,
+    GRN_MIX, GRN_SIZE, GRN_DENS, GRN_PITCH, GRN_FB, GRN_SPRAY, GRN_COMP,
+    REV_MIX, REV_SIZE, REV_DAMP, REV_COMP,
     CRUSH_MIX, CRUSH_BITS, CRUSH_DOWN,
     FLT_ON, FLT_TYPE, FLT_MODE, FLT_CUTOFF, FLT_RESO, FLT_DRIVE, FLT_SPREAD,
     FLT_VOWEL,
@@ -325,6 +331,10 @@ const ParamDesc kParams[P_COUNT] = {
     {FX_PID_DLY_DIV, "fx.dly.div", ParamType::Enum, ParamCurve::Linear,
      0.0f, (float)(kDlyDivCount - 1), 0.0f /* free */, kDlyDivNames,
      kDlyDivCount},
+    /* Crossfade law only — the delay's wet path is already unity (see
+     * delay_process). Off by default like the other two. */
+    {FX_PID_DLY_COMP, "fx.dly.comp", ParamType::Bool, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0},
     {FX_PID_GRN_MIX, "fx.grn.mix", ParamType::Float, ParamCurve::Linear,
      0.0f, 1.0f, 0.0f, nullptr, 0},
     {FX_PID_GRN_SIZE, "fx.grn.size", ParamType::Float, ParamCurve::Exp,
@@ -337,12 +347,18 @@ const ParamDesc kParams[P_COUNT] = {
      0.0f, 0.9f, 0.25f, nullptr, 0}, /* wet mono back into the capture line */
     {FX_PID_GRN_SPRAY, "fx.grn.spray", ParamType::Float, ParamCurve::Linear,
      0.0f, kGrnSprayMaxS, 0.03f, nullptr, 0}, /* s of random extra delay */
+    /* Window + pan make-up, and the sparse-setting duty. */
+    {FX_PID_GRN_COMP, "fx.grn.comp", ParamType::Bool, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0},
     {FX_PID_REV_MIX, "fx.rev.mix", ParamType::Float, ParamCurve::Linear,
      0.0f, 1.0f, 0.15f, nullptr, 0}, /* subtle room out of the box */
     {FX_PID_REV_SIZE, "fx.rev.size", ParamType::Float, ParamCurve::Linear,
      0.0f, 1.0f, 0.55f, nullptr, 0},
     {FX_PID_REV_DAMP, "fx.rev.damp", ParamType::Float, ParamCurve::Linear,
      0.0f, 1.0f, 0.3f, nullptr, 0},
+    /* Undoes the Freeverb staging's ~6 dB and takes `size` out of the level. */
+    {FX_PID_REV_COMP, "fx.rev.comp", ParamType::Bool, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0},
     {FX_PID_CRUSH_MIX, "fx.crush.mix", ParamType::Float, ParamCurve::Linear,
      0.0f, 1.0f, 0.0f, nullptr, 0}, /* 1 = fully crushed */
     {FX_PID_CRUSH_BITS, "fx.crush.bits", ParamType::Float, ParamCurve::Linear,
@@ -649,6 +665,62 @@ float SYNTH_RENDER_IRAM unit_gate(UnitState& u, float target,
     }
     if (u.scrubbing && scrub_step(u, lines, n)) u.scrubbing = false;
     return -1.0f;
+}
+
+/* ---- optional level compensation: fx.dly.comp / fx.grn.comp / fx.rev.comp
+ *      (S35) ----
+ *
+ * Every unit on this bus crossfades with `dry + m*(wet - dry)`, i.e. gains
+ * (1-m) and m. That is equal-*gain*, and it is the right law when the wet path
+ * is a phase-coherent relative of the dry one — the chorus, the flanger and
+ * the phaser all sum against the dry signal on purpose, and their notches are
+ * the effect. It is the wrong law for a wet path that is decorrelated from the
+ * dry: those sum in power, so the output runs at sqrt((1-m)^2 + m^2), which is
+ * 3 dB down at m = 0.5 and only recovers at the ends of the knob. The delay,
+ * the granular delay and the reverb are the three decorrelated units here,
+ * which is why these three and no others get the switch.
+ *
+ * Two of them lose level at the *far* end too, for reasons that have nothing
+ * to do with the crossfade — the Freeverb gain staging and the granular
+ * window/pan arithmetic — so `comp` also applies a per-unit wet make-up. Those
+ * are derived where they are used; only the crossfade law lives here.
+ *
+ * What compensation deliberately does NOT do:
+ *  - chase the level with an RMS servo. It would pump against the master
+ *    filter, fight the compressor two stages downstream, and undo the
+ *    granular's density normalization, which is doing this job properly.
+ *  - restore what a 100 % wet mix genuinely removes. With no dry left there
+ *    is no transient to make up; boosting the tail is not the same signal.
+ *  - touch ping-pong's routing. Its left line is fed only by feedback, so at
+ *    100 % wet the left channel really is `fb` down — and that asymmetry is
+ *    the effect, not a gain error.
+ *
+ * Cost when off: identical arithmetic, two multiplies and an add instead of a
+ * subtract, a multiply and an add. (The endpoints stay exact: m = 0 gives
+ * 1*dry + 0*wet, m = 1 gives 0*dry + 1*wet.) Cost when on: two sqrtf per unit
+ * per block, outside the sample loop.
+ *
+ * Headroom: the make-up is real gain arriving at the output stage's
+ * soft_clip(). In float it costs nothing — a scalar multiply adds rounding
+ * noise around -144 dB — but a patch already near full scale will engage the
+ * clipper sooner with it on. audio_io_get_stats() reports out_peak and
+ * soft_clips; that is the pair to watch. Note also that the wet lines store
+ * int16, so make-up applied here lifts a line's quantization floor along with
+ * its signal — which is why the reverb's constants (kRevInGain and friends)
+ * are the place to buy headroom back, not this. */
+/* `makeup` is the unit's fixed wet staging *times* whatever compensation it
+ * asked for — the reverb's kRevWet rides in here either way — so a caller with
+ * no staging of its own passes 1.0 and a caller with compensation off passes
+ * exactly what it passed before the switch existed. */
+struct MixGains {
+    float dry, wet;
+};
+
+inline MixGains mix_gains(float m, bool comp, float makeup) {
+    if (!comp) return {1.0f - m, m * makeup};
+    /* fmaxf guards sqrtf against a negative from float error at the top of
+     * the mix smoother's travel; pvm() already clamps `m` to 0..1. */
+    return {sqrtf(fmaxf(0.0f, 1.0f - m)), sqrtf(m) * makeup};
 }
 
 /* ---- drive: waveshaper on the finished mix (S34) ----
@@ -1044,6 +1116,18 @@ void SYNTH_RENDER_IRAM delay_process(float* __restrict__ bl,
                     kSr);
     const bool pp = pv(DLY_PP) >= 0.5f;
 
+    /* Crossfade law only, make-up 1.0: the tap is a full-level copy of what
+     * was pushed in — the tone lowpass sits in the feedback path, not on the
+     * output — so at 100 % wet this unit is already at unity and there is
+     * nothing to make up. What `comp` fixes is the 3 dB scoop in the middle of
+     * the mix knob, where an echo decorrelated from the dry signal partially
+     * cancels the dry gain rather than adding to it.
+     *
+     * Feedback is not compensated either. A sustained source through a 0.95
+     * tail runs 1/(1-fb^2) — 10 dB up — and pulling that back down would be
+     * removing the effect, not a gain error in it. */
+    const MixGains mg = mix_gains(m, pv(DLY_COMP) >= 0.5f, 1.0f);
+
     float t = d.t;
     for (size_t i = 0; i < frames; ++i) {
         t += tstep;
@@ -1059,8 +1143,8 @@ void SYNTH_RENDER_IRAM delay_process(float* __restrict__ bl,
             line_push(d.l, bl[i] + fb * d.lpl);
             line_push(d.r, br[i] + fb * d.lpr);
         }
-        bl[i] += m * (wl - bl[i]);
-        br[i] += m * (wr - br[i]);
+        bl[i] = mg.dry * bl[i] + mg.wet * wl;
+        br[i] = mg.dry * br[i] + mg.wet * wr;
     }
     d.t = t1;
 }
@@ -1082,6 +1166,28 @@ struct Grain {
     float gm = 0.0f;            /* mono gain for the feedback path */
     uint32_t e = 0, nt = 0;     /* elapsed / total samples; e >= nt = free */
 };
+
+/* Make-up for fx.grn.comp. Two fixed losses, both structural, neither of them
+ * something the spawn-time `norm` addresses:
+ *
+ *  - the parabolic window 4p(1-p) has RMS sqrt(8/15), i.e. -2.7 dB. `norm`
+ *    tracks the expected *overlap*, not the shape of what is overlapping.
+ *  - grains land at a random equal-power pan, so with theta uniform on
+ *    [0, pi/2] each output channel carries E[cos^2 theta] = 0.5 of a grain's
+ *    power: another 3 dB under a dry signal that is full level in both.
+ *
+ * Together that is 1/(0.730*0.707) = +5.7 dB, and it is the bulk of what the
+ * unit loses at 100 % wet.
+ *
+ * The third term is the sparse case. `norm` divides by sqrt(max(1, dens*size))
+ * — the max() means it never compensates *upward*, so below one grain of
+ * expected overlap the unit is simply silent part of the time and gets no
+ * help at all. sqrt(duty) is that correction. It is capped, because a 5 %-duty
+ * setting is a sparse effect on purpose and does not want its grains 13 dB
+ * hotter to average out; past the cap the level is allowed to fall away. */
+constexpr float kGrnWinRms = 0.73030f;   /* sqrt(8/15), RMS of 4p(1-p) */
+constexpr float kGrnPanRms = 0.70711f;   /* sqrt(E[cos^2]) over [0, pi/2] */
+constexpr float kGrnCompMax = 4.0f;      /* +12 dB; duty ~0.23 and denser */
 
 struct GranularFx {
     Line line; /* mono capture: dry input sum + fb * wet */
@@ -1168,6 +1274,18 @@ void SYNTH_RENDER_IRAM granular_process(float* __restrict__ bl,
      * per sample into the capture line, so it is smoothed (S21). */
     const float fb = osynth::dsp::smooth_lin(g.s_fb, pvm(GRN_FB));
 
+    /* Read from the same per-block size/dens the spawns below use, so the
+     * make-up and the grains it is scaling always agree about the duty. */
+    float makeup = 1.0f;
+    const bool comp = pv(GRN_COMP) >= 0.5f;
+    if (comp) {
+        const float duty = fminf(1.0f, dens * size);
+        makeup = fminf(kGrnCompMax,
+                       1.0f / (kGrnWinRms * kGrnPanRms *
+                               sqrtf(fmaxf(duty, 1e-3f))));
+    }
+    const MixGains mg = mix_gains(m, comp, makeup);
+
     /* Spawns land on block boundaries (1.33 ms grid — spray jitters the
      * audible onsets anyway). */
     g.acc += dens * (float)frames / kSr;
@@ -1190,9 +1308,12 @@ void SYNTH_RENDER_IRAM granular_process(float* __restrict__ bl,
             wm += s * gn.gm;
             gn.e++;
         }
+        /* The capture line takes the *uncompensated* wet through `wm`: the
+         * feedback loop's gain is fx.grn.fb and nothing else, or toggling the
+         * switch would move the loop toward runaway as a side effect. */
         line_push(g.line, 0.5f * (bl[i] + br[i]) + fb * wm);
-        bl[i] += m * (wl - bl[i]);
-        br[i] += m * (wr - br[i]);
+        bl[i] = mg.dry * bl[i] + mg.wet * wl;
+        br[i] = mg.dry * br[i] + mg.wet * wr;
     }
 }
 
@@ -1216,6 +1337,37 @@ constexpr uint32_t rv(uint32_t n44) {
 constexpr float kRevInGain = 0.06f;
 constexpr float kRevPreAp = 0.25f;
 constexpr float kRevWet = 3.0f;
+
+/* Make-up for fx.rev.comp.
+ *
+ * The classic staging above is also the reason a 100 % wet Freeverb has always
+ * been much quieter than its input. Against broadband material each comb has
+ * power gain 1/(1 - fb^2), and the eight of them are tuned to mutually prime
+ * lengths so their outputs sum in power rather than amplitude. The wet path
+ * therefore runs at
+ *
+ *     kRevRefGain * sqrt(8) / sqrt(1 - fb^2)
+ *
+ * against a mono-correlated input — about 0.49, or -6.2 dB, at the default
+ * size, and it moves with `size` because fb does. Inverting it does two
+ * things: it puts the wet back at dry level, and it makes `size` a room
+ * control instead of a loudness control (a bigger room currently arrives
+ * louder as well as longer, which is most of why the size knob is hard to
+ * audition).
+ *
+ * Damping is deliberately left out. It removes real energy from the tail,
+ * and compensating a control whose entire job is to darken the reverb would
+ * turn it into a tone control; bright material stays a little under unity at
+ * high damp, which is the honest answer.
+ *
+ * The clamp bounds what is otherwise an unbounded 1/sqrt as fb approaches 1.
+ * At the registered size range fb runs 0.70..0.98 and the make-up runs
+ * 2.80..0.78, so the clamp is slack — it exists for the modulated case, where
+ * an LFO on fx.rev.size drives fb, and for the arithmetic, not for the knob. */
+constexpr float kRevRefGain = kRevInGain * kRevPreAp * kRevWet * 2.0f;
+constexpr float kRevCombSum = 2.8284271f; /* sqrt(8) */
+constexpr float kRevCompMin = 0.25f;
+constexpr float kRevCompMax = 4.0f;
 
 struct Comb {
     Line line;
@@ -1263,6 +1415,17 @@ void SYNTH_RENDER_IRAM reverb_process(float* __restrict__ bl,
     const float damp =
         0.95f * osynth::dsp::smooth_lin(v.s_damp, pvm(REV_DAMP));
 
+    /* kRevWet is folded into the wet gain here rather than multiplied per
+     * sample below, which is where the make-up joins it. */
+    float makeup = kRevWet;
+    const bool comp = pv(REV_COMP) >= 0.5f;
+    if (comp) {
+        const float g = sqrtf(fmaxf(1.0f - fb * fb, 1e-4f)) /
+                        (kRevRefGain * kRevCombSum);
+        makeup = kRevWet * fminf(fmaxf(g, kRevCompMin), kRevCompMax);
+    }
+    const MixGains mg = mix_gains(m, comp, makeup);
+
     for (size_t i = 0; i < frames; ++i) {
         const float in = (bl[i] + br[i]) * kRevInGain;
         float sl = 0.0f, sr = 0.0f;
@@ -1276,8 +1439,8 @@ void SYNTH_RENDER_IRAM reverb_process(float* __restrict__ bl,
             sl = allpass_next(v.al[a], sl);
             sr = allpass_next(v.ar[a], sr);
         }
-        bl[i] += m * (kRevWet * sl - bl[i]);
-        br[i] += m * (kRevWet * sr - br[i]);
+        bl[i] = mg.dry * bl[i] + mg.wet * sl;
+        br[i] = mg.dry * br[i] + mg.wet * sr;
     }
 }
 

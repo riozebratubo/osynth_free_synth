@@ -1,0 +1,72 @@
+# Default configuration for Host Slave OTA Simple Example
+#
+# Adapted for the osynth P4 board. This project is only ever built for
+# esp32p4, so everything lives in this one file rather than a
+# sdkconfig.defaults.esp32p4 — no choice-override ordering to reason about.
+
+# Flash size configuration — 16 MB on this board, not the example's 8 MB.
+# The partition table below still fits inside 8 MB; this just matches the
+# chip so the image header is honest.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# Force enable ESP-Hosted component
+CONFIG_ESP_WIFI_REMOTE_ENABLED=y
+CONFIG_ESP_HOSTED_ENABLED=y
+
+# FreeRTOS configuration
+CONFIG_FREERTOS_HZ=1000
+
+# Partition table
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# ===========================================================================
+# OTA method: read the co-processor image from a flash partition on the host.
+#
+# The other two members of the choice do not fit here. HTTPS needs Wi-Fi, and
+# Wi-Fi on this board runs over the very ESP-Hosted link we are trying to
+# update. LittleFS needs the image pushed into a filesystem first. PARTITION
+# lets `idf.py flash` write components/ota_partition/slave_fw_bin/*.bin
+# straight into the slave_fw partition (partitions.csv, 0x5F0000, 2 MB) and the
+# app streams it across the SDIO link at boot.
+# ===========================================================================
+CONFIG_OTA_METHOD_PARTITION=y
+CONFIG_OTA_PARTITION_LABEL="slave_fw"
+
+# ===========================================================================
+# ESP32-P4 board settings.
+#
+# **These four blocks are the ones osynth had to discover the hard way.** This
+# is the same silicon, the same PSRAM and the same SDIO link, so leaving any of
+# them out reproduces the same boot failure here — see the long notes in
+# sdkconfig.defaults.esp32p4 in the repo root for the full account of each.
+# ===========================================================================
+
+# 1. Chip revision and the CPU clock that follows from it. The CPLL is capped
+#    at 360 MHz below rev 3.0, and asking for 400 MHz configures cleanly then
+#    dies before app_main with "assert failed: esp_clk_init clk.c:104 (res)".
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+CONFIG_ESP32P4_REV_MIN_100=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_360=y
+
+# 2. PSRAM. Needed in its own right, and a precondition for block 3 below —
+#    ESP_HOSTED_MEMPOOL_PREFER_SPIRAM `depends on SPIRAM`.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_HEX=y
+CONFIG_SPIRAM_SPEED_200M=y
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+
+# 3. ESP-Hosted transport buffers out of internal RAM. Without this the SDIO
+#    driver's mempool cannot be allocated and the boot ends at
+#    "assert failed: sdio_mempool_create sdio_drv.c:258 (buf_mp_g)".
+CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y
+
+# 4. The SDIO link to the C6 — same board wiring osynth uses:
+#    CLK[18] CMD[19] D0[14] D1[15] D2[16] D3[17], slave reset [54].
+#    This project drives no I2S, so unlike osynth there is nothing to collide
+#    with those pins here.
+CONFIG_ESP_HOSTED_P4_DEV_BOARD_FUNC_BOARD=y
+CONFIG_SLAVE_IDF_TARGET_ESP32C6=y
+CONFIG_ESP_HOSTED_CP_TARGET_ESP32C6=y

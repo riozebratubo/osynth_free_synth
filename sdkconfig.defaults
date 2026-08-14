@@ -10,8 +10,10 @@ CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
 # Max CPU clock lives in the per-target files: the choice members are named
 # after the frequency and the targets do not share one (240 MHz on the Xtensa
-# chips, 400 MHz on the P4), so a line here would be an unknown symbol on
-# whichever target it did not fit. The reason is the same everywhere — ~27%
+# chips; on the P4 it depends on the chip revision — 360 MHz below rev 3.0,
+# 400 MHz at and above it, see sdkconfig.defaults.esp32p4), so a line here
+# would be an unknown symbol on whichever target it did not fit. The reason
+# for wanting the top of the range is the same everywhere — ~27%
 # idle FX load + ~12% per subtractive voice at 160 MHz meant full polyphony
 # overran the 1.33 ms block deadline, audible as noise bursts.
 

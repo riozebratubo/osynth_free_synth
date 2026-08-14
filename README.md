@@ -158,7 +158,7 @@ check — `underruns` should stay at 0.
 | Looper | ✅ 8 tracks | ✅ 8 tracks | — *(needs PSRAM)* |
 | Sequencer | 8 trk × 8 patterns | 8 trk × 8 patterns | 4 trk × 2 patterns |
 | Drum kit | ✅ + SD kits | ✅ + SD kits | ✅ ROM kit |
-| Clock | 240 MHz Xtensa | 400 MHz RISC-V | 240 MHz Xtensa |
+| Clock | 240 MHz Xtensa | 360 MHz RISC-V *(400 on rev ≥3.0)* | 240 MHz Xtensa |
 | Everything else | ✅ | ✅ | ✅ |
 
 The P4 has no radio of its own: BLE runs the NimBLE host on the P4 and its
