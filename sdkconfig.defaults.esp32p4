@@ -207,17 +207,31 @@ CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y
 # 0x11 the external ES8388, 0x33 the M5 module's STM32, 0x40/0x41 an ES7210
 # mic array if the board has one. Only the 0x10/0x11 answer is the one the
 # codec driver needs; the rest are the board identifying itself.
+# DISCRETE on this target, against the S3's ES8388, and not on merit: the
+# ES8388 front end is unusable here. An M5Stack M144 that plays cleanly from the
+# S3 is grossly distorted on the P4, identically across two modules, and the
+# investigation in private_docs/P4_AUDIO_DISTORTION.md eliminated the entire
+# digital domain — render chain verified at the USB tap, the chip's own emission
+# verified at the pad by the loopback self-test, codec registers verified by
+# dump, and every timing/framing/drive property of the link swept without
+# effect. Unresolved, and parked pending measurement rather than closed.
+#
+# A PCM5102A sidesteps all of it: no I2C, no MCLK, and BCLK at half the rate.
+# Switch back by swapping these two lines once the ES8388 fault is understood.
 # CONFIG_OSYNTH_FRONTEND_DISCRETE=y
 CONFIG_OSYNTH_FRONTEND_ES8388=y
 
-# Stereo line input on the DAC's own port. Available here — the P4's I2S is
-# full duplex and its MCLK routes through the GPIO matrix, which is the pair
-# of properties the classic ESP32 lacks. Defaults to y with the ES8388 front
-# end (Kconfig.projbuild), which is what is wanted: the ADC half is the reason
-# to pick the codec, and it costs one pin (DIN) the header can spare. Set it
-# to n to run the codec output-only — the port then drops to four pins, still
-# with MCLK, which the ES8388 needs to play at all.
-# CONFIG_OSYNTH_ENABLE_I2S_LINE_IN=n
+# Stereo line input on the DAC's own port. The capability is here — the P4's
+# I2S is full duplex and its MCLK routes through the GPIO matrix, which is the
+# pair of properties the classic ESP32 lacks — but the front end above decides
+# whether it costs anything. **Currently off**, because Kconfig defaults it to n
+# on a discrete front end: capture there needs a second chip (a PCM1808) and two
+# more pins, where on the ES8388 the ADC is already in the package.
+#
+# So there is nothing to set here today. If the ES8388 is ever restored above,
+# this goes back to defaulting y and DIN/MCLK below come live with it — which is
+# exactly the transition the pin note further down is about.
+# CONFIG_OSYNTH_ENABLE_I2S_LINE_IN=y
 
 # Stream to USB *and* the I2S DAC at once. Default y, as on the S3.
 # CONFIG_OSYNTH_USB_AUDIO_TAP=y
@@ -274,26 +288,124 @@ CONFIG_OSYNTH_FRONTEND_ES8388=y
 # 14-19 + 54 are the SDIO block above. If you change the ESP-Hosted board choice
 # to match a different schematic, re-check these against the new SDIO block.
 #
-# **MCLK and DIN are set explicitly, and must stay that way on this target.**
-# They used to sit commented out at their Kconfig defaults, which is harmless
-# only while the front end is discrete and the line input off — both pins are
-# then unused. Turning the ES8388 on brings them live at 16 (SDIO D2) and 20,
-# and 16 is inside the C6's SDIO block. That collision is the one described
-# above: audio comes up first, ESP-Hosted then fails card init with
-# `sdmmc_io_reset: unexpected return: 0x108` and BLE never appears, with
-# nothing in the log naming a pin.
+# **MCLK and DIN are set explicitly, and must stay that way on this target** —
+# even though, with the discrete front end selected above and the line input
+# off, Kconfig does not currently emit either symbol and both lines are inert.
+# Leaving a value on an unused pin is free; discovering the collision below the
+# hard way a second time is not.
 #
-# MCLK: ES8388 MCLK, 12.288 MHz at 48 kHz. Mandatory even in slave mode.
-CONFIG_OSYNTH_I2S_MCLK_GPIO=45
-# BCLK: ES8388 SCLK (the codec calls it SCLK, not BCLK).
-CONFIG_OSYNTH_I2S_BCLK_GPIO=46
-CONFIG_OSYNTH_I2S_WS_GPIO=47
+# The collision: turning the ES8388 back on brings both pins live at their
+# Kconfig defaults of 16 (SDIO D2) and 20, and 16 is inside the C6's SDIO block.
+# Audio comes up first, ESP-Hosted then fails card init with
+# `sdmmc_io_reset: unexpected return: 0x108`, BLE never appears, and nothing in
+# the log names a pin. Only 46/47/32 are actually driven today.
+#
+# DO NOT MOVE THIS BLOCK TO GPIO1-5. It was tried, on the reasoning that those
+# are the board's other free header pins, and it does not merely fail to help —
+# it takes the codec off the bus. The ES8388 answered its probe, logged "muted
+# at 0x10 ahead of init", and then NACKed step 2 of the init table, with a bus
+# scan finding 0x18 (the carrier's own ES8311) and 0x33 (the M144's STM32) but
+# no 0x10 at all. audio_io_start() runs between those two points, so starting
+# the port on 1-5 is what removed it: the module still had power, the bus was
+# healthy, and specifically the codec was gone.
+#
+# Whether that is a wiring slip or a carrier that uses GPIO1-5 for something is
+# unresolved. Note the trap either way: M-Bus 1/3/5 are grounds and P4 GPIO
+# 1/3/5 would be MCLK/LRCK/ASDOUT, so a crossed wire drives an output straight
+# into ground.
+#
+# The open problem this was an attempt at: the same M144 plays cleanly on the
+# ESP32-S3 target and is grossly distorted here, with everything else
+# eliminated by direct evidence — registers dumped and verified, samples
+# bit-perfect at the USB tap, distortion invariant across the whole out.level
+# range, invariant into 32R and high-Z loads, invariant at 48 kHz and 24 kHz
+# (which rules out marginal timing and ringing, but NOT a hard electrical fault
+# on one pin), AUDIO_VDD steady at 2.80 V, all three grounds connected, both
+# positions of the module's S1 strap, and BLE off so the C6's SDIO link is not
+# running. Same firmware, same module: the pin numbers are what is left.
+#
+# 45/46/47 are the suspects. They are SD1_CDATA4-6, the 8-bit-mode data lines
+# of the SDMMC slot this board's SD socket sits on, and "a 4-bit socket leaves
+# them spare" is an assumption about the carrier rather than something read off
+# its schematic.
+#
+# Next experiment, when there is appetite for it: move MCLK *alone* to GPIO20,
+# one wire and one line. 20 is the only spare pin here with any evidence behind
+# it — it is the serial-MIDI RX default, so the project already treats it as an
+# ordinary GPIO — and MCLK is both the fastest signal and the one whose
+# corruption best fits the symptom. One signal at a time from now on.
+#
+# MCLK: ES8388 MCLK, 12.288 MHz at 48 kHz. Mandatory even in slave mode, and
+# unused entirely by a PCM5102A — inert while the front end is discrete, so
+# GPIO45 is free for a UI encoder or serial MIDI as long as it stays that way.
+CONFIG_OSYNTH_I2S_MCLK_GPIO=2
+# ===== GPIO46/47 ARE NOT USABLE AS OUTPUTS ON THIS CARRIER =================
+#
+# Measured, not inferred. With the converter disconnected and the synth playing,
+# a DC meter on the P4's own header reads:
+#
+#   GPIO32 (DOUT)  0 V on silence, 1.62 V while notes play   <- correct
+#   GPIO46 (BCLK)  0.6 V, static, notes or no notes          <- not driving
+#   GPIO47 (WS)    0.6 V, static, notes or no notes          <- not driving
+#
+# GPIO32 is the control: the loopback self-test proved it emits at the pad, and
+# it measures correctly on the same meter in the same session. So the method is
+# sound and 46/47 really are held. 0.6 V is not a dead output — 0 V or 3.3 V
+# would be — it is a line clamped by something on the board, which the "free
+# header pins" listing at the top of this file never accounted for.
+#
+# This is the root cause of both converter failures on this target, and the one
+# fault that explains both symptoms: a PCM5102A must recover its whole clock
+# from BCK through an internal PLL, so degraded clocks give it *silence*; an
+# ES8388 has its own MCLK and converts regardless, so it made sound but sampled
+# data against the same bad clock — which is the distortion that
+# private_docs/P4_AUDIO_DISTORTION.md spent a week eliminating everything else
+# for.
+#
+# GPIO45 is held too, and it was briefly BCLK here on the reasoning that it must
+# drive because it had carried 12.288 MHz MCLK to the ES8388. That inference was
+# wrong: the pins are *loaded*, not dead, so a codec with its own clock
+# reference sort-of works on them while a PLL will not lock — which is exactly
+# the pair of symptoms this board produced.
+#
+# OSYNTH_GPIO_OUTPUT_SCAN (sink_i2s.cpp) then measured every candidate by
+# driving it high with nothing connected:
+#
+#   3.3 V, usable:  1, 2, 3, 4, 5, 20, 32, 33
+#   held, unusable: 45, 46, 47
+#
+# So the shortage was imaginary — eight pins work, and the three the file
+# originally picked are the only three that do not. GPIO2-5 are the JTAG pads
+# (fine as GPIO, costs external JTAG) and 20 is the serial-MIDI default, which
+# is why BCLK takes GPIO1: it is the one free pin with no other claim on it.
+#
+# **This very likely also explains the ES8388 distortion**, which was never
+# root-caused: that front end had MCLK on 45, BCLK on 46 and WS on 47 — all
+# three held — with only DOUT and DIN on good pins. Retrying it with all five
+# signals on measured pins (MCLK 2, BCLK 1, WS 33, DOUT 32, DIN 3) is the
+# obvious next experiment once the discrete DAC is confirmed working.
+CONFIG_OSYNTH_I2S_BCLK_GPIO=1
+CONFIG_OSYNTH_I2S_WS_GPIO=33
+# CONFIG_OSYNTH_I2S_BCLK_GPIO=45   <- held at 0.6 V, does not drive
+# CONFIG_OSYNTH_I2S_BCLK_GPIO=46   <- held at 0.6 V, does not drive
+# CONFIG_OSYNTH_I2S_WS_GPIO=47     <- held at 0.6 V, does not drive
 # DOUT: PCM5102A DIN, or ES8388 DSDIN.
 CONFIG_OSYNTH_I2S_DOUT_GPIO=32
-# DIN: PCM1808 DOUT, or ES8388 ASDOUT. Only with line input on.
-CONFIG_OSYNTH_I2S_DIN_GPIO=33
+# DIN: PCM1808 DOUT, or ES8388 ASDOUT. Only with line input on — so inert
+# today, and GPIO33 is free alongside GPIO45 while the front end is discrete.
+CONFIG_OSYNTH_I2S_DIN_GPIO=3
 
 # --- ES8388 codec (only with OSYNTH_FRONTEND_ES8388) ------------------------
+#
+# LIVE again. This is the settled configuration for the M5Stack M144 —
+# differential input, OUT1, CTIA — and every value in it was established the
+# hard way; see private_docs/P4_AUDIO_DISTORTION.md.
+#
+# The codec came back once the I2S block moved off GPIO45/46/47 (which do not
+# drive on this carrier) and onto measured pins, and once
+# OSYNTH_CODEC_INIT_BEFORE_I2S was set for this target — with the port running,
+# this board's control bus answers the address probe and then NACKs the first
+# register write. Both were needed; neither alone is enough.
 
 # Control bus — the codec's CDATA/CCLK, wired to the board's ES_I2C pads.
 #
@@ -325,8 +437,28 @@ CONFIG_OSYNTH_ES8388_I2C_SCL_GPIO=8
 # CONFIG_OSYNTH_ES8388_IN_LINE2=y
 # CONFIG_OSYNTH_ES8388_IN_LINE1=y
 CONFIG_OSYNTH_ES8388_IN_DIFF=y
-CONFIG_OSYNTH_ES8388_M5_HP_OMTP=y
 # CONFIG_OSYNTH_ES8388_M5_LINE_MIC=n
+
+# HP_OMTP is deliberately left at its Kconfig default of n (CTIA) here, and
+# that is a *departure* from sdkconfig.defaults.esp32s3, which sets it y.
+#
+# It is not an input-only setting, which is how it got carried over. The mux it
+# drives swaps which of the headset jack's two rear contacts (HP_P1/HP_P2 in
+# M144_sch_moduleaudio_v10.pdf) reaches MIC_MONO_IN and which becomes ground —
+# so it decides the *return path* of anything plugged into that jack, not just
+# where a headset microphone lands.
+#
+# Ordinary 3-pole stereo headphones are tip=L, ring=R, sleeve=GND. Under OMTP
+# the sleeve is muxed to MIC_MONO_IN, which reaches AGND only through R8/R9
+# (22k each), so both channels return through 22k and through each other. The
+# result is not silence — it is quiet, distorted, note-correlated noise, which
+# is exactly how this presented on the P4 bring-up and is easy to read as a
+# clocking or format fault. The `M5 module 0x33 after:` line in the boot log is
+# what names it: hp-mode 0x01 is OMTP, 0x00 is CTIA.
+#
+# Set it y only for an actual OMTP-wired 4-pole headset (M5's own examples do,
+# because they are demonstrating the headset microphone).
+# CONFIG_OSYNTH_ES8388_M5_HP_OMTP=y
 
 # Output pairs. OUT1 for the M144, whose LOUT2/ROUT2 go nowhere — halves the
 # volume-register writes per out.level. BOTH is the answer on an unknown

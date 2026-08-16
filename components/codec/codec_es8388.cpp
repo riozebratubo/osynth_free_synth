@@ -25,10 +25,18 @@
 
 #include "driver/i2c_master.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h" /* esp_rom_delay_us(), for write_reg_persist() */
 
 #include "synth_params.h"
 
 static const char* TAG = "es8388";
+
+/* A/B switch for the ESP32-P4 distortion — see
+ * private_docs/P4_AUDIO_DISTORTION.md. 1 clocks the DAC from its own LRCK
+ * instead of chaining it to the ADC's (DACCONTROL21 bit 7, SLRCK). Worth a run
+ * on a build that can actually make sound; the one previous attempt was on a
+ * build silenced by the kAdcPower bug, so it told us nothing. */
+#define OSYNTH_ES8388_SEPARATE_LRCK 0
 
 #define OSYNTH_ES8388_SDA ((gpio_num_t)CONFIG_OSYNTH_ES8388_I2C_SDA_GPIO)
 #define OSYNTH_ES8388_SCL ((gpio_num_t)CONFIG_OSYNTH_ES8388_I2C_SCL_GPIO)
@@ -169,13 +177,29 @@ constexpr uint8_t kAdcVolL =
 constexpr uint8_t kAdcVolR =
     (kAdcBalance > 0) ? (uint8_t)((kAdcBalance > 192) ? 192 : kAdcBalance) : 0;
 
-/* The ADC is powered down entirely on a playback-only build: it is in the
- * chip either way, and leaving its analogue front end biased for a signal
- * nothing reads is current spent on nothing. 0xff is everything down; 0x09
- * is everything up *except* the microphone bias, which a line input has no
- * use for — see the departure note in kInit. */
-#if SYNTH_ENABLE_LINE_IN
+/* 0x09 is everything up *except* the microphone bias, which a line input has
+ * no use for — see the departure note in kInit.
+ *
+ * A playback-only build used to write 0xff here (everything down), on the
+ * reasoning that the ADC is in the chip either way and biasing an analogue
+ * front end nothing reads is current spent on nothing. That is wrong, and it
+ * is why OSYNTH_ENABLE_I2S_LINE_IN=n produced a completely silent ES8388 on
+ * the P4 bring-up: 0xff takes the DAC's analogue output down with it.
+ *
+ * The bit is believed to be ADCPOWER[2], the ADC bias generator, which despite
+ * the name is not the ADC's alone — but that is inference from the symptom and
+ * from register layouts published in other drivers, NOT from the datasheet,
+ * which is not in private_docs/datasheets (only the M144 schematic is). Until
+ * it is, the safe value is the one known to work rather than a bitmask picked
+ * from a half-remembered map, so both paths write 0x09 and a playback-only
+ * build spends a few mA on an ADC it does not read.
+ *
+ * Ruled out as causes of that silence, both confirmed by register dump on the
+ * failing build: DACCONTROL21/SLRCK (0x00 there changed nothing) and the input
+ * mux, which falls back to LIN2/RIN2 because OSYNTH_ES8388_IN_* depends on the
+ * line input and so is not emitted at all. */
 constexpr uint8_t kAdcPower = 0x09;
+#if SYNTH_ENABLE_LINE_IN
 #if defined(CONFIG_OSYNTH_ES8388_IN_LINE1)
 constexpr const char* kInputName = "LIN1/RIN1";
 #elif defined(CONFIG_OSYNTH_ES8388_IN_DIFF)
@@ -184,8 +208,7 @@ constexpr const char* kInputName = "differential";
 constexpr const char* kInputName = "LIN2/RIN2";
 #endif
 #else
-constexpr uint8_t kAdcPower = 0xff;
-constexpr const char* kInputName = "off (ADC powered down)";
+constexpr const char* kInputName = "off (ADC powered, unread — see kAdcPower)";
 #endif
 
 struct RegWrite {
@@ -247,13 +270,20 @@ const RegWrite kInit[] = {
     {REG_DACCONTROL17, 0x90},
     {REG_DACCONTROL20, 0x90},
 
-    /* One LRCK for both converters, taken from the ADC side. They already
-     * share a WS line on the wire — this makes the chip's internals agree.
+    /* One LRCK for both converters, taken from the ADC side — or two, under
+     * OSYNTH_ES8388_SEPARATE_LRCK. They already share a WS line on the wire;
+     * 0x80 makes the chip's internals agree with that.
+     *
+     * The A/B is worth running properly. 0x00 was tried once during the P4
+     * investigation and the build stayed silent — but that build had the
+     * kAdcPower 0xff bug above, which silences the DAC on its own, so the
+     * experiment proved nothing about the LRCK and has never actually been
+     * heard. With kAdcPower fixed it is a real test.
      *
      * DEPARTURE 2: Espressif writes 0xc0 here in its line mode, which also
      * arms the analogue bypass of departure 1. 0x80 is the shared-LRCK half
      * on its own. */
-    {REG_DACCONTROL21, 0x80},
+    {REG_DACCONTROL21, OSYNTH_ES8388_SEPARATE_LRCK ? 0x00 : 0x80},
     {REG_DACCONTROL23, 0x00}, /* VROI: the lower output reference resistance */
 
     /* Digital volumes at 0 dB in both directions (the register counts down
@@ -342,6 +372,52 @@ constexpr int kTimeoutMs = 100;
 esp_err_t write_reg(uint8_t reg, uint8_t val) {
     const uint8_t buf[2] = {reg, val};
     return i2c_master_transmit(s_dev, buf, sizeof(buf), kTimeoutMs);
+}
+
+/* The one exception to "one transfer, one chance" above, and it is narrow on
+ * purpose: only the runtime parameter path uses it, never the init table.
+ *
+ * The reasoning against retries holds wherever the bus can be fixed. On the
+ * ESP32-P4 carrier it cannot — the control bus refuses writes while the I2S
+ * port runs, at 400 kHz and at 100 kHz alike, and codec_init() only escapes it
+ * by running before the clocks start (OSYNTH_CODEC_INIT_BEFORE_I2S). The
+ * parameter listener has no such escape: the port is running by definition
+ * whenever a knob moves.
+ *
+ * What makes that worth machinery here, when it was not worth it before, is the
+ * *shape* of the failure rather than its rate. out.level is a stereo pair
+ * written as two transactions. A dropped write does not mean "the level did not
+ * change" — it means one channel changed and the other did not, which is heard
+ * as the image slamming hard left or right as the slider moves. A level that
+ * fails to move is invisible; a pan that jumps is not.
+ *
+ * Bounded and reported, not a reconciler: the NACKs are intermittent, so a
+ * handful of attempts a few hundred microseconds apart lands them. If they all
+ * fail, the caller still gets the error and still logs it, so a genuinely dead
+ * bus looks the same as it always did.
+ *
+ * Per target, and only the P4 takes it. That is the board with the measured
+ * fault; the S3 has never reported a NACK from this path, so it keeps one
+ * transfer and one chance until there is evidence it needs otherwise. At
+ * kParamWriteTries == 1 this is exactly write_reg() with no added delay, so
+ * nothing about the S3's behaviour changes. */
+#ifdef CONFIG_IDF_TARGET_ESP32P4
+constexpr int kParamWriteTries = 8;
+#else
+constexpr int kParamWriteTries = 1;
+#endif
+constexpr uint32_t kParamRetryUs = 200;
+
+esp_err_t write_reg_persist(uint8_t reg, uint8_t val) {
+    esp_err_t err = ESP_ERR_INVALID_STATE;
+    for (int attempt = 0; attempt < kParamWriteTries; ++attempt) {
+        /* Between attempts only — never after the last one, so a single-try
+         * build spends no time here at all. */
+        if (attempt != 0) esp_rom_delay_us(kParamRetryUs);
+        err = write_reg(reg, val);
+        if (err == ESP_OK) return ESP_OK;
+    }
+    return err;
 }
 
 esp_err_t read_reg(uint8_t reg, uint8_t* val) {
@@ -530,12 +606,16 @@ esp_err_t set_out_level(float db) {
     /* Only the pair that is actually driving something, so a stereo level is
      * two writes and not four. Both are attempted even if the first fails, and
      * the first error is the one returned: stopping early is what would leave
-     * the left channel at the new level and the right at the old, which is
-     * heard as the image jumping to one side rather than as a level that did
-     * not change. */
+     * the left channel at the new level and the right at the old.
+     *
+     * write_reg_persist() rather than write_reg() because that mismatch is the
+     * whole problem on a bus that NACKs under a running port. Observed on the
+     * P4 as the stereo image jumping hard to one side while dragging the
+     * slider, with `param 0x000b -> codec failed` in the log for the write that
+     * did not land — the pair is what has to survive, not any single write. */
     esp_err_t err = ESP_OK;
     for (size_t i = 0; i < kOutVolCount; ++i) {
-        const esp_err_t e = write_reg(kOutVolRegs[i], v);
+        const esp_err_t e = write_reg_persist(kOutVolRegs[i], v);
         if (err == ESP_OK) err = e;
     }
     return err;
@@ -628,14 +708,26 @@ esp_err_t ensure_bus(void) {
     i2c_device_config_t dev_cfg = {};
     dev_cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
     dev_cfg.device_address = addr;
-    /* 400 kHz, matching M5's own driver, which passes 400000 as its default
-     * I2C speed and successfully writes volume registers with the I2S port
-     * already running. Espressif's driver uses 100 kHz, which is what this was
-     * until S31d — and it is the last configuration difference left between
-     * this build and a setup known to work on the same module. Revert to
-     * 100000 if the bus gets worse rather than better; longer wires and weak
-     * pull-ups are less forgiving of the faster edges this needs. */
+    /* 400 kHz matches M5's own driver, which passes 400000 as its default I2C
+     * speed and successfully writes volume registers with the I2S port already
+     * running. Espressif's driver uses 100 kHz. The S3 rig has run at 400 kHz
+     * throughout with no complaint, so it keeps it.
+     *
+     * The P4 carrier does not tolerate it. That board's control bus is marginal
+     * with the clocks running — it is why OSYNTH_CODEC_INIT_BEFORE_I2S is set
+     * for this target (codec.h) — and the one write path that cannot dodge the
+     * running port is the parameter listener. out.level is two transactions,
+     * LOUT1VOL then ROUT1VOL, so a NACK on either leaves the pair at different
+     * levels: heard as the stereo image jumping hard to one side as the slider
+     * moves, which is exactly what set_out_level() below warns about.
+     *
+     * 100 kHz is the documented fallback for precisely this — longer wires and
+     * weak pull-ups are less forgiving of the faster edges 400 kHz needs. */
+#ifdef CONFIG_IDF_TARGET_ESP32P4
+    dev_cfg.scl_speed_hz = 100000;
+#else
     dev_cfg.scl_speed_hz = 400000;
+#endif
     err = i2c_master_bus_add_device(s_bus, &dev_cfg, &s_dev);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "I2C device 0x%02x failed: %s", (unsigned)addr,

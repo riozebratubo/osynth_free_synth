@@ -67,7 +67,24 @@
  *
  * Independent of codec_early_mute(), which runs first either way and is what
  * actually removes the power-on scratch. */
+/* Per target, because the two boards genuinely differ rather than because one
+ * ordering is better. The S3 rig has run at 0 throughout with no bus complaint
+ * and no line-in hiss, so it keeps the ordering it was verified on. The P4
+ * carrier does not tolerate it: with the port running, the codec answers its
+ * address probe and then NACKs the *first* register write —
+ *
+ *   register 0x19 = 0x04 failed at step 1/32 on the device that answered at
+ *   0x10 (ESP_ERR_INVALID_RESPONSE)
+ *
+ * with a bus scan immediately afterwards finding all three devices (0x10, 0x18,
+ * 0x33). Answering but refusing to be written is the exact failure this switch
+ * was introduced for, and codec_early_mute() landing its two writes every time —
+ * it runs before the port — is the other half of the proof. */
+#ifdef CONFIG_IDF_TARGET_ESP32P4
+#define OSYNTH_CODEC_INIT_BEFORE_I2S 1
+#else
 #define OSYNTH_CODEC_INIT_BEFORE_I2S 0
+#endif
 
 #ifdef __cplusplus
 extern "C" {

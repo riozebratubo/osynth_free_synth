@@ -63,20 +63,45 @@ what this configures — see "the two codecs" below.
 | GPIO20 | Serial MIDI RX | 6N138 optocoupler output | `OSYNTH_SERIAL_MIDI_RX_GPIO` |
 | GPIO24 | USB D− | host / computer | **fixed** — USB-OTG FS PHY (port 0) |
 | GPIO25 | USB D+ | host / computer | **fixed** — USB-OTG FS PHY (port 0) |
-| GPIO32 | I2S DOUT (playback) | ES8388 DSDIN | `OSYNTH_I2S_DOUT_GPIO` |
-| GPIO33 | I2S DIN (capture) | ES8388 ASDOUT | `OSYNTH_I2S_DIN_GPIO` |
+| GPIO1 | I2S BCLK | PCM5102A BCK | `OSYNTH_I2S_BCLK_GPIO` |
+| GPIO32 | I2S DOUT (playback) | PCM5102A **DIN** | `OSYNTH_I2S_DOUT_GPIO` |
+| GPIO33 | I2S LRCK/WS | PCM5102A LCK | `OSYNTH_I2S_WS_GPIO` |
 | GPIO39–44 | micro-SD | on-board socket | SDMMC slot-1 IOMUX — **see below** |
-| GPIO45 | I2S MCLK | ES8388 MCLK | `OSYNTH_I2S_MCLK_GPIO` |
-| GPIO46 | I2S BCLK | ES8388 **SCLK** | `OSYNTH_I2S_BCLK_GPIO` |
-| GPIO47 | I2S LRCK/WS | ES8388 LRCK | `OSYNTH_I2S_WS_GPIO` |
+| GPIO45–47 | — | **nothing — see the warning below** | |
 | GPIO54 | C6 reset | on-board ESP32-C6 | ESP-Hosted — **claimed** |
 | ES_I2C_SDA | Codec I2C SDA | ES8388 CDATA | `OSYNTH_ES8388_I2C_SDA_GPIO` (7) |
 | ES_I2C_SCL | Codec I2C SCL | ES8388 CCLK | `OSYNTH_ES8388_I2C_SCL_GPIO` (8) |
 
-That leaves **GPIO1–5 free** for local UI. GPIO2–5 are the JTAG pads
-(MTCK/MTDI/MTMS/MTDO) — fine as GPIOs, but they cost external JTAG.
+Ships with a **PCM5102A** (`OSYNTH_FRONTEND_DISCRETE`), three signal wires and
+no MCLK. Tie the module's **SCK to GND** — that is how its internal PLL engages,
+and floating gives silence. Note the naming trap: the module's pin marked `DIN`
+takes the P4's *DOUT*.
 
-**Why 45/46/47 are free on a board that has an SD socket:** they are
+That leaves **GPIO2–5 and 20** free for local UI and serial MIDI. GPIO2–5 are
+the JTAG pads (MTCK/MTDI/MTMS/MTDO) — fine as GPIOs, but they cost external
+JTAG.
+
+> ### ⚠️ GPIO45, 46 and 47 do not drive on this carrier
+>
+> They read a static **0.6 V** when configured as outputs and nothing connected,
+> against 3.3 V on every other candidate. Held by something on the board — the
+> "free header pins" list this target was originally configured from was never
+> checked against a schematic.
+>
+> This cost a week. With MCLK/BCLK/WS on those three pins, an ES8388 produced
+> grossly distorted audio (it has its own clock reference, so it converts
+> anyway) and a PCM5102A produced silence (it must PLL-lock to BCK, and could
+> not). Two converters, two symptoms, one cause — and everything upstream was
+> verified correct while the fault sat in the pads.
+>
+> **Before trusting any pin on an unfamiliar board, measure it.** Set
+> `OSYNTH_GPIO_OUTPUT_SCAN` in `components/audio_io/sink_i2s.cpp`: it drives a
+> list of candidates high with nothing connected, so a multimeter tells you in
+> two minutes what days of listening cannot. Include pins you already trust as
+> controls. Measured result here — usable: **1, 2, 3, 4, 5, 20, 32, 33**;
+> unusable: **45, 46, 47**.
+
+**Why 45/46/47 looked free on a board that has an SD socket:** they are
 SD1_CDATA4–6 in the IO MUX, the 8-bit-mode data lines of SDMMC slot 1. A
 micro-SD card only has four, so a socket wired to that IOMUX takes 39–42 +
 CLK 43 + CMD 44 and leaves these three over. Three adjacent spare pins is why
@@ -223,7 +248,7 @@ Jumper wires into the 30-pin header. Odd pins in one row, even in the other.
 | M-Bus pin | Signal | ESP32-S3 | ESP32-P4 |
 | --- | --- | --- | --- |
 | 12 | SYS_3.3V | 3V3 | 3V3 |
-| 1, 3, 5 | GND | GND — **solder all three, short and direct** | same |
+| 1, 3, 5 | GND | a pin marked **GND** — see below | same |
 | 17 | BUS_SDA (CDATA) | GPIO8 | ES_I2C_SDA |
 | 18 | BUS_SCL (CCLK) | GPIO9 | ES_I2C_SCL |
 | 21 | I2S_LRCK | GPIO17 | GPIO47 |
@@ -236,8 +261,33 @@ Everything else unconnected: pin 6 (RST), pin 28 (5V), pins 25/27/29 (HPWR).
 
 - **Slide switch S1 must be in position "B"** — it swaps which of pins 22/24
   carries MCLK. Wrong position gives no sound.
-- **Three grounds, not one.** One thin ground jumper for three clocks up to
-  12.288 MHz makes the codec NACK I2C the moment the I2S port is enabled.
+- **Ground is one node, not three pins.** M-Bus 1/3/5 are three tie points to
+  the *same* net, and the host end wants a pin actually marked GND. If the
+  header has only one GND left, put all three wires on it — sharing a ground
+  pin is normal and correct. Two or three separate GND pins are better only
+  because they lower the resistance of the return, which is worth having with
+  three clocks up to 12.288 MHz on flying leads.
+- **Never substitute a GPIO for GND.** This is not a pedantic point and it does
+  not fail loudly. An unconfigured GPIO is a high-impedance input, so the
+  module's only return to the host is through the pad's ESD protection diodes —
+  a threshold device, and nonlinear. The result is audio that plays but is
+  grossly distorted at *every* level, into *every* load, at *any* sample rate,
+  with a comb-filtered "phaser" character as the two channels return through
+  each other; intermittent I2C NACKs; and an AUDIO_VDD that measures perfectly
+  healthy, because a meter referenced to the module's own local ground reads a
+  sensible number while the module floats relative to the host. Every one of
+  those was observed on the P4 bring-up before the ground was found.
+- **On the P4 module-on-carrier, header pin numbers and GPIO numbers are
+  different things, and both appear as bare integers.** Header position 16 on
+  the board this was brought up on is a GND pad; GPIO16 is SDIO D2 to the C6.
+  A schematic row reading `163 -> GND` is a connector position, not a GPIO.
+  Read every row of the table above as a *GPIO* number and find it on the
+  silkscreen rather than counting header positions. The boot log prints the one
+  block where this is dangerous, so check it against your wiring:
+  `sdio_wrapper: GPIOs: CLK[18] CMD[19] D0[14] D1[15] D2[16] D3[17]
+  Slave_Reset[54]` — grounding any of those shorts a line both chips drive, and
+  it surfaces as an ESP-Hosted boot loop (`sdmmc_io_rw_extended ... 0x109`, then
+  `0x107`, then `Restarting host`) with nothing audio-related in the log.
 - Set `OSYNTH_ES8388_INPUT` to **DIFF** and `OSYNTH_ES8388_OUTPUT` to **OUT1**
   (already in `sdkconfig.defaults.esp32s3` and `.esp32p4`). The input jack is
   differential;
