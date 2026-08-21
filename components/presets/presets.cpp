@@ -366,6 +366,19 @@ bool skip_id(uint16_t id) {
         case osynth::PID_LINE_IN_SOURCE:
         case osynth::PID_LINE_IN_MICGAIN:
         case osynth::PID_OUT_LEVEL:
+        /* The vocoder's freeze (S38): a performance control, not a patch
+         * value. The Hold-to-sample button leaves it *on* — holding a
+         * captured vowel is what it is for — so any save made after using it
+         * once would store "starts frozen", and a frozen vocoder whose
+         * followers were reset on load has nothing to say until someone
+         * presses the button again. Same class as SEQ_PID_FILL below.
+         *
+         * The granular engine's buf.freeze is the same kind of control and
+         * cannot be listed here: 0x02xx means whatever the bound engine says,
+         * and that id is `env1.decay` on the subtractive one. It is handled
+         * inside the engine instead, by refusing to honour a freeze until the
+         * ring has actually been filled. */
+        case FX_PID_VOC_FREEZE:
         case PRESET_PID_LOAD:
         case PRESET_PID_SAVE:
         case PRESET_PID_SEQ_LOAD:

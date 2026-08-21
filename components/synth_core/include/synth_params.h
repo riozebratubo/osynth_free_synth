@@ -122,7 +122,8 @@ public:
      * (six units, note-division sync and two LFOs), 326 since S35 added
      * the three FX level-compensation switches, and 340 since S36 added the
      * eight per-effect enable switches plus the reverb's algorithm selector
-     * and its five shared stages. Raised from 384 to 448 in
+     * and its five shared stages, and 354 since S38 added the vocoder's
+     * fourteen. Raised from 384 to 448 in
      * S34 to keep the margin that number was chosen for, because
      * overflow is per-parameter and partial — a patch would come up with some
      * of a node's controls missing rather than failing outright, which is a

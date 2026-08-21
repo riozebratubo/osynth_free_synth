@@ -217,6 +217,27 @@ extern "C" {
  * destinations are per-voice parameters; nothing in the instrument could
  * reach the master bus. A tempo-locked filter wobble over a whole track, or
  * tremolo, or auto-pan, were not expressible anywhere. */
+/* Vocoder (S38): the audio input's spectral envelope imposed on the synth
+ * bus. First in the chain — it decides what the sound is, so everything after
+ * it colours the spoken result. The modulator is whichever device `in.source`
+ * names, independent of `in.route`. fx.voc.freeze holds the band envelopes,
+ * which is what the app's Hold-to-sample button drives (inverted: recording
+ * while held, frozen on release). */
+#define FX_PID_VOC_ON      0x03D0
+#define FX_PID_VOC_MIX     0x03D1
+#define FX_PID_VOC_BANDS   0x03D2
+#define FX_PID_VOC_LOW     0x03D3
+#define FX_PID_VOC_HIGH    0x03D4
+#define FX_PID_VOC_Q       0x03D5
+#define FX_PID_VOC_ATTACK  0x03D6
+#define FX_PID_VOC_RELEASE 0x03D7
+#define FX_PID_VOC_SHIFT   0x03D8
+#define FX_PID_VOC_SIB     0x03D9
+#define FX_PID_VOC_GATE    0x03DA
+#define FX_PID_VOC_LEVEL   0x03DB
+#define FX_PID_VOC_CARRIER 0x03DC
+#define FX_PID_VOC_FREEZE  0x03DD
+
 #define FX_PID_LFO1_DEST  0x03C0
 #define FX_PID_LFO1_WAVE  0x03C1
 #define FX_PID_LFO1_RATE  0x03C2

@@ -316,6 +316,19 @@ bool s_warned_no_in = false;
  * live between the audio_io_in_mono() call and the loop that drains it. */
 float s_inbuf[SYNTH_BLOCK_SIZE];
 #endif
+/* Ring samples written since the engine bound, saturating at kRingLen.
+ *
+ * buf.freeze is only honoured once this reaches the top, and that is not a
+ * refinement — it closes a trap. The ring is calloc'd at bind and freed at
+ * unbind, so a patch that arrives with freeze already on would be holding a
+ * buffer of zeros: silent, permanently, until someone thought to unfreeze it.
+ * Presets store the switch (it cannot be excluded by id — 0x02xx means
+ * whatever the bound engine says, and this one is `env1.decay` on the
+ * subtractive engine), and the app's Hold-to-sample button deliberately
+ * *leaves* it on, so a saved patch landing that way is the norm rather than
+ * the exception. Freezing nothing is meaningless; recording until there is
+ * something to freeze is what the player wanted either way. */
+uint32_t s_ring_filled = 0;
 
 /* Capture telemetry. "No sound from grn.src = in" has several causes that
  * look identical from the outside — `in.source` naming a device with nothing
@@ -567,6 +580,7 @@ esp_err_t gran_init(void) {
     s_in_peak = 0.0f;
     s_in_blocks = 0;
     s_in_was_quiet = false;
+    s_ring_filled = 0;
     /* Registered only where there are two devices to choose between, so a
      * null here is a single-input build and the report just says "line". */
     s_in_source = ps.valuePtr(osynth::PID_LINE_IN_SOURCE);
@@ -670,7 +684,7 @@ void SYNTH_RENDER_IRAM gran_begin_block(size_t frames) {
 #if SYNTH_ENABLE_AUDIO_IN
     if (s_ring.buf != nullptr) {
         b.ring_ok = true;
-        if (pv(BUF_FREEZE) < 0.5f) {
+        if (pv(BUF_FREEZE) < 0.5f || s_ring_filled < kRingLen) {
             /* audio_io_in_mono() and not audio_io_line_in_block(): the latter
              * is always the *line* device on a build that has one, so on a
              * board with both a jack and a microphone the mic could never
@@ -689,6 +703,10 @@ void SYNTH_RENDER_IRAM gran_begin_block(size_t frames) {
                 for (size_t i = 0; i < frames; ++i) dsp::line_push(s_ring, 0.0f);
             }
             s_adv = (uint32_t)frames;
+            if (s_ring_filled < kRingLen) {
+                const uint32_t room = kRingLen - s_ring_filled;
+                s_ring_filled += (frames < room) ? (uint32_t)frames : room;
+            }
             if (pk > s_in_peak) s_in_peak = pk;
             ++s_in_blocks;
         }

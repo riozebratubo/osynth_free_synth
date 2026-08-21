@@ -19,5 +19,8 @@ idf_component_register(
     # If it ever does not, the cheap way out is a pair of function pointers
     # handed to fx by main.cpp instead of a direct dependency; the bus only
     # wants two scalars (seqarp_bpm, seqarp_beat_in_bar) out of seqarp.
-    PRIV_REQUIRES drums seqarp
+    # audio_io: the vocoder's modulator is the selected audio input (S38),
+    #      read through audio_io_in_mono(). Private like the other two —
+    #      nothing in fx.h exposes it.
+    PRIV_REQUIRES drums seqarp audio_io
 )

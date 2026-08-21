@@ -190,6 +190,15 @@ Translator::Translator() {
   // ── Synth screens: discovery overlay (Tone/Filter/Mod/Fx/ArpSeq) ───────
   pt["Discovering parameters…"] = "Descobrindo parâmetros…";
 
+  // ── Hold-to-sample button (HoldSampleCard.qml) ─────────────────────────
+  pt["Hold to sample"] = "Segure para gravar";
+  pt["Recording…"] = "Gravando…";
+  pt["Live"] = "Ao vivo";
+  pt["Hold and speak; the vowel is held on release."] =
+      "Segure e fale; a vogal fica retida ao soltar.";
+  pt["Hold to record into the ring; frozen on release."] =
+      "Segure para gravar no buffer; congela ao soltar.";
+
   // ── Param group titles (ParamGroup.qml, translated centrally) ──────────
   pt["Oscillator 1"] = "Oscilador 1";
   pt["Oscillator 2"] = "Oscilador 2";
@@ -200,6 +209,9 @@ Translator::Translator() {
   pt["FM velocity"] = "Velocidade FM";
   pt["Table motion"] = "Movimento da tabela";
   pt["Brightness env"] = "Env. de brilho";
+  pt["Vocoder"] = "Vocoder";  // listed only because the panel title is looked up
+  pt["Vocoder capture"] = "Captura do vocoder";
+  pt["Buffer capture"] = "Captura do buffer";
   pt["Grain cloud"] = "Nuvem de grãos";
   pt["Capture buffer"] = "Buffer de captura";
   pt["Formant env"] = "Env. de formante";

@@ -29,6 +29,13 @@ Item {
             // Everything from here down self-hides on firmware that does not
             // register the prefix, same as Line in above — so one app build
             // still drives a pre-S33 or pre-S34 synth.
+            // First in the firmware's chain, so first on the page.
+            ParamGroup { title: "Vocoder"; prefix: "fx.voc" }
+            HoldSampleCard {
+                title: "Vocoder capture"
+                paramName: "fx.voc.freeze"
+                hint: "Hold and speak; the vowel is held on release."
+            }
             ParamGroup { title: "Drive"; prefix: "fx.drv" }
             ParamGroup { title: "Chorus"; prefix: "fx.cho" }
             ParamGroup { title: "Flanger"; prefix: "fx.flg" }

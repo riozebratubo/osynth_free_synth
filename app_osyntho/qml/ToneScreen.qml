@@ -38,6 +38,13 @@ Item {
             // current source ignores.
             ParamGroup { title: "Grain cloud"; prefix: "grn." }
             ParamGroup { title: "Capture buffer"; prefix: "buf" }
+            // Alongside the buf.freeze switch that group already draws, not
+            // instead of it: same parameter, one gesture instead of three.
+            HoldSampleCard {
+                title: "Buffer capture"
+                paramName: "buf.freeze"
+                hint: "Hold to record into the ring; frozen on release."
+            }
             ParamGroup { title: "Formant env"; prefix: "env.form" }
         }
     }

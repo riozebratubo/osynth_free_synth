@@ -1,0 +1,233 @@
+/* ---- vocoder (S38): the input's spectrum imposed on the synth bus ----
+ *
+ * A classic analysis/synthesis vocoder, and the first unit on this bus whose
+ * *modulator* is not the bus. Two matched constant-Q bandpass banks: one
+ * analyses the audio input (`audio_io_in_mono()`, so whichever device
+ * `in.source` names), one splits the carrier; each analysis band drives an
+ * envelope follower that multiplies its carrier partner, and the products are
+ * summed. Say a vowel and the synth says it.
+ *
+ * First in the chain, deliberately. The vocoder decides what the sound *is*,
+ * so everything after it — drive, chorus, delay, reverb — colours the spoken
+ * result rather than the raw carrier, which is what a reverb on a vocoder is
+ * supposed to do. `fx.voc.mix` therefore crossfades against the untouched
+ * synth, which is also the clearest thing for it to mean.
+ *
+ * The carrier is the bus summed to mono, and the wet goes out to both
+ * channels. That halves the filter count against a stereo carrier bank and
+ * costs nothing that matters: a vocoder's output is a single voice, and every
+ * hardware one worth copying is mono. The dry half of the crossfade keeps its
+ * stereo, so a partly-wet setting still has the synth's image in it.
+ *
+ * Independent of `in.route` and `in.gain`, exactly like the granular engine's
+ * capture ring: those name the *monitor* path, and a modulator is a control
+ * signal, not something to hear. Speaking into a vocoder while monitoring your
+ * own voice dry would be the wrong default and is one route setting away.
+ *
+ * `fx.voc.freeze` holds the band envelopes where they are. The input stops
+ * being read (so it costs *less* while frozen), the carrier keeps flowing, and
+ * the synth sustains whatever vowel was last said — the app's Hold-to-sample
+ * button is this parameter inverted: recording while pressed, frozen on
+ * release. Sibilance is live HF by definition and does not survive a freeze.
+ *
+ * Silence in, silence out, and that is correct rather than a failure: a
+ * vocoder with nothing said into it has nothing to say. A build with no audio
+ * input at all warns once and behaves the same way.
+ */
+
+/* Band count is a CPU budget, not a memory one — 3 SVFs and a follower per
+ * band per sample. Gated on PSRAM as the rest of this file gates its ceilings,
+ * as a proxy for "the bigger chip", since the classic ESP32 is the part with
+ * no headroom left after the voices. */
+#if CONFIG_SPIRAM
+constexpr int kVocBandsMax = 16;
+#else
+constexpr int kVocBandsMax = 10;
+#endif
+constexpr int kVocBandsMin = 4;
+
+struct VocBand {
+    osynth::dsp::Svf mod; /* analysis bandpass, on the modulator */
+    osynth::dsp::Svf car; /* synthesis bandpass, on the carrier */
+    float env = 0.0f;     /* follower output, held while frozen */
+};
+
+struct VocoderFx {
+    VocBand b[kVocBandsMax];
+    osynth::dsp::SvfCoef mc[kVocBandsMax];
+    osynth::dsp::SvfCoef cc[kVocBandsMax];
+    osynth::dsp::Svf sib_hp; /* sibilance: the modulator above the top band */
+    osynth::dsp::SvfCoef sib_c;
+    osynth::dsp::Noise rng;
+    float env_bb = 0.0f; /* broadband follower, gates the sibilance path */
+    int n = 0;           /* bands actually built */
+    /* Coefficient cache. Rebuilding is 2N tanf, which is affordable per block
+     * but pointless: these five change when a knob moves and not otherwise. */
+    int c_bands = -1;
+    float c_low = 0.0f, c_high = 0.0f, c_q = -1.0f, c_shift = 1e9f;
+    osynth::dsp::Smooth s_level, s_sib, s_gate;
+    UnitState u;
+    bool warned = false;
+};
+
+VocoderFx s_voc;
+
+/* One block of modulator, mono. Audio task only, live only inside
+ * vocoder_process(). */
+float s_voc_mod[SYNTH_BLOCK_SIZE];
+
+void voc_rebuild(VocoderFx& v, int bands, float low, float high, float q01,
+                 float shift_st) {
+    if (bands < kVocBandsMin) bands = kVocBandsMin;
+    if (bands > kVocBandsMax) bands = kVocBandsMax;
+    /* A span narrower than an octave would put every band on top of its
+     * neighbour and the ratio maths below into a divide by ~0. */
+    if (high < low * 2.0f) high = low * 2.0f;
+
+    const float ratio = powf(high / low, 1.0f / (float)(bands - 1));
+    /* Constant-Q, sized so adjacent skirts meet: at Q = sqrt(r)/(r-1) a band's
+     * -3 dB edges land on its neighbours' centres. That is the setting where
+     * the bank sums back to something flat, so it is what `fx.voc.q` = 0.5
+     * means; below it the bands overlap into a smear, above it they separate
+     * into the hollow, ringing, unmistakably-a-vocoder end. */
+    const float q_nat = sqrtf(ratio) / (ratio - 1.0f);
+    const float k = 1.0f / fmaxf(q_nat * (0.4f + 1.6f * q01), 0.05f);
+
+    /* Formant shift: the carrier is split at moved centres while the
+     * modulator is analysed where the voice actually is, so the spectral
+     * envelope is transposed without touching the pitch. Up is chipmunk, down
+     * is the classic robot-giant. svf_coef_k() clamps to [20, 0.45*sr], so a
+     * shifted top band cannot run past Nyquist. */
+    const float cmul = exp2f(shift_st * (1.0f / 12.0f));
+
+    float f = low;
+    for (int i = 0; i < bands; ++i) {
+        v.mc[i] = osynth::dsp::svf_coef_k(f, k, kSr);
+        v.cc[i] = osynth::dsp::svf_coef_k(f * cmul, k, kSr);
+        f *= ratio;
+    }
+    /* Sibilance tap: everything above the top band's centre. Consonants live
+     * up there and carry most of the intelligibility, and no band bank can
+     * reproduce them — they are noise, not a resonance. */
+    v.sib_c = osynth::dsp::svf_coef_k(high, 0.9f, kSr);
+    v.n = bands;
+}
+
+void SYNTH_RENDER_IRAM vocoder_process(float* __restrict__ bl,
+                                       float* __restrict__ br, size_t frames) {
+    VocoderFx& v = s_voc;
+    const float m =
+        unit_gate(v.u, gated(pv(VOC_ON), pvm(VOC_MIX)), nullptr, 0);
+    if (m < 0.0f) {
+        /* Fully bypassed: drop the followers so re-enabling starts from
+         * silence rather than from a vowel someone said a minute ago. */
+        for (int i = 0; i < kVocBandsMax; ++i) v.b[i].env = 0.0f;
+        v.env_bb = 0.0f;
+        return;
+    }
+
+    const int bands = (int)pv(VOC_BANDS);
+    const float low = pvm(VOC_LOW);
+    const float high = pvm(VOC_HIGH);
+    const float q01 = pvm(VOC_Q);
+    const float shift = pvm(VOC_SHIFT);
+    if (bands != v.c_bands || low != v.c_low || high != v.c_high ||
+        q01 != v.c_q || shift != v.c_shift) {
+        voc_rebuild(v, bands, low, high, q01, shift);
+        v.c_bands = bands;
+        v.c_low = low;
+        v.c_high = high;
+        v.c_q = q01;
+        v.c_shift = shift;
+    }
+    const int n = v.n;
+
+    /* Frozen: the envelopes hold, so there is nothing to analyse and the
+     * modulator is not even read. */
+    const bool frozen = pv(VOC_FREEZE) >= 0.5f;
+    const bool live = !frozen && audio_io_in_mono(s_voc_mod, frames);
+    if (!live && !frozen && !v.warned) {
+        v.warned = true;
+        ESP_LOGW(TAG,
+                 "vocoder: no audio input on this build — it has nothing to "
+                 "analyse and will stay silent");
+    }
+
+    /* One-pole follower coefficients. Attack and release are separate because
+     * a vocoder lives on that asymmetry: fast enough to catch a consonant,
+     * slow enough that a vowel does not chatter between syllables. */
+    const float ka =
+        1.0f - expf(-1.0f / fmaxf(pvm(VOC_ATTACK) * 0.001f * kSr, 1.0f));
+    const float kr =
+        1.0f - expf(-1.0f / fmaxf(pvm(VOC_RELEASE) * 0.001f * kSr, 1.0f));
+
+    const float level = osynth::dsp::smooth_lin(v.s_level, pvm(VOC_LEVEL));
+    const float sib = osynth::dsp::smooth_lin(v.s_sib, pvm(VOC_SIB));
+    /* Downward expansion rather than a hard threshold: subtracting the floor
+     * is smooth, cannot chatter on a band hovering at it, and takes the DC
+     * pedestal of room noise out of the envelope along with the noise. */
+    const float gate = osynth::dsp::smooth_lin(v.s_gate, pvm(VOC_GATE)) * 0.2f;
+
+    const int carrier = (int)pv(VOC_CARRIER);
+    const bool use_bus = (carrier != 1);   /* bus, or bus+noise */
+    const bool use_noise = (carrier != 0); /* noise, or bus+noise */
+
+    for (size_t i = 0; i < frames; ++i) {
+        /* Analysis. Skipped entirely while frozen — the held envelopes are
+         * the whole point, and not reading the input is what makes a freeze
+         * cheaper than a live block rather than the same price. */
+        if (live) {
+            const float x = s_voc_mod[i];
+            const float a = fabsf(x);
+            v.env_bb += (a > v.env_bb ? ka : kr) * (a - v.env_bb);
+            for (int k = 0; k < n; ++k) {
+                VocBand& b = v.b[k];
+                const float y = fabsf(
+                    osynth::dsp::svf_next(b.mod, v.mc[k], osynth::dsp::SvfMode::Bp, x));
+                b.env += (y > b.env ? ka : kr) * (y - b.env);
+            }
+        }
+
+        /* Synthesis. The carrier is the bus in mono, optionally with noise —
+         * a band bank can only shape what it is given, so a thin or silent
+         * synth has nothing for the vowels to land on, and the noise source
+         * is what makes whispers and unpitched consonants work. */
+        float c = use_bus ? 0.5f * (bl[i] + br[i]) : 0.0f;
+        if (use_noise) c += 0.5f * osynth::dsp::noise_next(v.rng);
+
+        float wet = 0.0f;
+        for (int k = 0; k < n; ++k) {
+            VocBand& b = v.b[k];
+            const float e = b.env - gate;
+            if (e <= 0.0f) {
+                /* Still run the filter: its state has to stay current or the
+                 * band rings when the gate reopens. */
+                (void)osynth::dsp::svf_next(b.car, v.cc[k],
+                                            osynth::dsp::SvfMode::Bp, c);
+                continue;
+            }
+            wet += osynth::dsp::svf_next(b.car, v.cc[k],
+                                         osynth::dsp::SvfMode::Bp, c) * e;
+        }
+
+        /* Sibilance rides over the bank, gated by the broadband envelope so
+         * room hiss does not sit on top of the patch between phrases. Dead
+         * while frozen: it is live high-frequency content by definition and
+         * there is nothing to hold. */
+        if (live && sib > 0.0f) {
+            const float bb = v.env_bb - gate;
+            if (bb > 0.0f) {
+                const float open = fminf(bb * 8.0f, 1.0f);
+                wet += osynth::dsp::svf_next(v.sib_hp, v.sib_c,
+                                             osynth::dsp::SvfMode::Hp,
+                                             s_voc_mod[i]) *
+                       sib * open;
+            }
+        }
+
+        wet *= level;
+        bl[i] += m * (wet - bl[i]);
+        br[i] += m * (wet - br[i]);
+    }
+}
+
