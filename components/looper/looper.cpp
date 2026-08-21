@@ -852,6 +852,29 @@ void ctl_arm_cancel() {
     const bool was_firing = s_arm_fire.exchange(false, std::memory_order_acq_rel);
     if (!was_armed && !was_firing) return;
     ParamStore::instance().set(LOOP_PID_ARMED, 0.0f, ParamOrigin::Internal);
+    /* Put the transport shadow back where the arm found it.
+     *
+     * Arming moves s_ctl_mode to rec (ctl_handle_mode) before any take exists,
+     * so a cancel that leaves it there strands the looper claiming to record
+     * with nothing open — and ctl_handle_mode's `want == s_ctl_mode` early-out
+     * then makes every later rec press a silent no-op, *above* the point where
+     * loop.countin and loop.sync are even read, so turning those off does not
+     * help. Only a stop or play clears it. This is the same wedge the armed-take
+     * failure path already repairs for itself; it arrives here through
+     * ctl_handle_clear(), where clearing a track while a count-in was pending
+     * killed recording for the rest of the session.
+     *
+     * s_arm_prev_mode is the transport the arm interrupted, captured for exactly
+     * this. Guarding on rec is what keeps it safe on every path: an arm can only
+     * be created from a non-rec shadow (ctl_handle_mode returns early otherwise),
+     * so a rec shadow while an arm is pending was always set by the arm and never
+     * by a live take. Callers that go on to command a mode of their own simply
+     * overwrite this. */
+    if (s_ctl_mode == MODE_REC) {
+        s_ctl_mode = s_arm_prev_mode;
+        ParamStore::instance().set(LOOP_PID_MODE, (float)s_ctl_mode,
+                                   ParamOrigin::Internal);
+    }
 }
 
 /* Clock task. Short by construction: click, decrement, and hand the start

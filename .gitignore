@@ -10,3 +10,7 @@ __pycache__/
 # author's private stuff
 /20*.txt
 /private*
+/opensource
+/schematics
+/.cache
+/app_osyntho/20*.txt

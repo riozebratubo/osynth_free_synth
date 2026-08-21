@@ -185,6 +185,291 @@ menu "osynth Synthesizer"
             silence while the starve counter climbs, and an ES8388 does not
             play at all.
 
+    # ---- Second input: an external digital MEMS microphone (S37) ----------
+    #
+    # A separate I2S controller, not a second DIN on the DAC's port: one port
+    # has one RX channel and one DIN pin, and the line input already holds it.
+    # The S3 has two controllers and the P4 three, so the second one is free on
+    # both targets.
+    config OSYNTH_ENABLE_MIC_IN
+        bool "Microphone input (I2S MEMS mic on a second port)"
+        depends on OSYNTH_ENABLE_I2S_DAC && (IDF_TARGET_ESP32S3 || IDF_TARGET_ESP32P4)
+        default y if IDF_TARGET_ESP32P4
+        default n
+        help
+            A second audio input, for a digital MEMS microphone of the
+            INMP441 / ICS-43434 / SPH0645 class.
+
+            On by default on the P4, off on the S3. The P4 has three I2S
+            controllers against the S3's two, its carrier still has GPIO4 and
+            GPIO5 free after the I2S block took everything else, and the port
+            costs one pin at SHARE_CLOCKS.
+
+            The P4 also needed a fight over the clock source that the S3 did
+            not — one of the candidates aborts mid-init rather than returning
+            an error, so the list of what may even be *asked for* there is
+            narrower than the list of what exists. That is settled and
+            automatic now; the boot log names the source that took. The full
+            account is in kClockAttempts (source_mic.cpp) and in
+            sdkconfig.defaults.esp32p4, and it is worth reading before
+            changing anything about this port's clocking.
+
+            Nothing is heard either way until `in.source` is moved to `mic`,
+            which defaults to `line`. A build with this off is byte-for-byte
+            the input path that shipped before it existed, and a build with it
+            on but nothing wired reads a dead port that costs the output
+            nothing.
+
+            It shares the downstream chain with the line input — one
+            `in.route`, one placement in the render chain. `in.source` picks
+            which device feeds it: `line`, `mic`, or **`both`**, which mixes
+            the two. Alongside it sits `in.micgain`, the microphone's own
+            level trim, because a line source and a MEMS mic do not arrive
+            anywhere near each other in level and one shared `in.gain` across
+            the pair would be wrong for one of them whichever way it is set.
+            Both parameters are registered only on a build that has both
+            devices; with one input compiled in there is nothing to choose and
+            `in.gain` already is the trim.
+
+            Each device has its own smoothed gain, so changing source is never
+            a hard cut: `line` to `mic` is a genuine crossfade, and `line` to
+            `both` ramps the microphone in over a line input that never stops.
+
+            **What `both` costs.** Each device is captured every block whether
+            or not it is selected — about 0.7% of the block budget and 256
+            bytes each. That is deliberate: a device that has just been
+            selected then hands over *current* audio instead of whatever its
+            DMA ring accumulated while nobody was reading it, and its meters
+            stay live so a microphone can be seen working before anything is
+            switched to it. Mixing costs one extra SIMD pass over the block
+            while two devices are audible, and nothing while one is. The two
+            are summed in float, never as int16, so nothing clips at the
+            capture that the float bus and the master soft clipper do not
+            already handle.
+
+            **Why a second controller.** The line input is the RX half of the
+            DAC's own port, which is what makes it sample-locked to playback
+            by construction. That port has exactly one DIN pin and the line
+            input has it, so a microphone on other copper needs its own
+            controller. See OSYNTH_MIC_SHARE_CLOCKS for how the second one is
+            kept in step with the first.
+
+            **A MEMS mic is mono.** It drives one slot of the frame — which
+            one is strapped by its L/R pin — and leaves the other alone.
+            OSYNTH_MIC_SLOT says which to read; the sample is duplicated to
+            both channels on the way in, so everything downstream still sees
+            the stereo block it expects. `in pk` then reads the same figure
+            on both channels and `fold` matches them, which is what a mono
+            source correctly looks like on those meters.
+
+    config OSYNTH_MIC_SHARE_CLOCKS
+        bool "Mic shares the DAC's BCLK and WS"
+        depends on OSYNTH_ENABLE_MIC_IN
+        default y
+        help
+            Run the mic's controller as an I2S **slave** off the same two
+            clock pins the output port already drives, instead of having it
+            master a second pair of its own.
+
+            Do this if you can. It costs one pin instead of three, and it
+            makes the capture sample-locked to playback exactly the way the
+            line input is: one BCLK, one WS, one frame boundary, so there is
+            nothing to resample and nothing to drift. Two masters at the same
+            nominal rate do not drift either — both dividers hang off the same
+            PLL — but they sit at an arbitrary phase offset from each other,
+            and that offset is a thing that can be got wrong.
+
+            The GPIO matrix allows one output driver and any number of input
+            taps on a pad, and the I2S driver only enables the input on a pin
+            it takes as an input (i2s_gpio_check_and_set, esp_driver_i2s), so
+            the slave reading those pins does not disturb the master driving
+            them.
+
+            **The slot width is then not yours to choose.** A slave has to
+            decode the frame the master is emitting, so the mic runs whatever
+            the output port runs: 32-bit slots on a build with MCLK (an
+            ES8388 or a PCM1808 is present), 16-bit on a bare PCM5102A. Both
+            work with a 24-bit MEMS mic, which is MSB-first — 32-bit slots
+            take its top 16 bits with 8 bits of slot to spare, and 16-bit
+            slots take the same top 16 while the mic talks on into a frame
+            that has already moved on. Turn this off and the width becomes
+            OSYNTH_MIC_SLOT_BITS below.
+
+    config OSYNTH_MIC_DIN_GPIO
+        int "Mic data GPIO (mic SD/DOUT -> ESP32)"
+        depends on OSYNTH_ENABLE_MIC_IN
+        default 4
+        help
+            The microphone's data output. With OSYNTH_MIC_SHARE_CLOCKS on,
+            this is the only pin the feature needs.
+
+            Free on the S3 defaults: 1, 2, 4, 6, 7, 21, 38-44, 47, 48.
+            GPIO33-37 are the octal PSRAM the looper's buffers live in,
+            GPIO0/3/45/46 are strapping pins, GPIO19/20 are the USB PHY, and
+            8-18 are the codec bus, the SD card and the I2S port.
+
+            On the P4 carrier the header is only GPIO1-5, 20, 32, 33, 45-47,
+            and 45/46/47 do not drive — see PINMAP.md.
+
+    config OSYNTH_MIC_BCLK_GPIO
+        int "Mic BCLK GPIO (mic SCK)"
+        depends on OSYNTH_ENABLE_MIC_IN && !OSYNTH_MIC_SHARE_CLOCKS
+        default 6
+        help
+            Only when the mic masters its own clocks. With
+            OSYNTH_MIC_SHARE_CLOCKS on, the mic reads the output port's BCLK
+            pin and this is ignored.
+
+    config OSYNTH_MIC_WS_GPIO
+        int "Mic LRCK/WS GPIO"
+        depends on OSYNTH_ENABLE_MIC_IN && !OSYNTH_MIC_SHARE_CLOCKS
+        default 7
+        help
+            Only when the mic masters its own clocks — see
+            OSYNTH_MIC_BCLK_GPIO.
+
+    config OSYNTH_MIC_MCLK_GPIO
+        int "Mic MCLK GPIO (-1 for none)"
+        depends on OSYNTH_ENABLE_MIC_IN && !OSYNTH_MIC_SHARE_CLOCKS
+        default -1
+        help
+            System clock for the microphone's port, at 256x the sample rate
+            (12.288 MHz at 48 kHz). -1 leaves the pin unused, which is right
+            for every bare MEMS mic: an INMP441 and its relatives derive
+            everything from BCLK and have no such pin.
+
+            Set it only when what is on the other end is a **codec** rather
+            than a microphone — an ES8311 or ES7210 on a board's on-board mic,
+            say. Those cannot convert without a system clock, and the symptom
+            of leaving it out is the one this whole feature keeps producing:
+            full blocks, no starves, every sample zero.
+
+            A codec needs more than this pin, though. It comes up unconfigured
+            and silent and stays that way until its registers are written over
+            I2C, and components/codec/ implements the ES8388 and nothing else.
+            The boot-time I2C scan is how you find out which problem you have:
+            0x18 answering means an ES8311 is there and needs a driver, not
+            just a clock.
+
+            Only when the mic masters its own clocks — with SHARE_CLOCKS on it
+            reads the output port's pins, and that port drives its own MCLK
+            already.
+
+    config OSYNTH_MIC_CODEC_ES8311
+        bool "The mic is an analogue one behind an ES8311 codec"
+        depends on OSYNTH_ENABLE_MIC_IN && OSYNTH_FRONTEND_ES8388
+        default n
+        help
+            For a board whose on-board microphone is an **analogue** element
+            wired to an ES8311's preamp rather than a digital MEMS part on the
+            I2S bus. The ESP32-P4 carrier this was written for is exactly that:
+            its own config says `microphone_type: analog`, `mic_gain: 24DB`.
+
+            That distinction decides whether firmware is needed at all. A
+            digital mic starts talking the moment it sees a clock. An analogue
+            one reaches nothing until the codec's ADC converts it, so the four
+            I2S pins are necessary and not sufficient, and the symptom of
+            leaving this off is the one every fault on this port produces:
+            full blocks, no starves, every sample zero.
+
+            **ADC only.** The codec's DAC is powered down and never touched,
+            and audio output stays entirely with the ES8388 on the main port —
+            different chip, different I2C address (0x18 against 0x10/0x11),
+            different I2S controller. Enabling this changes nothing about the
+            output path.
+
+            Depends on the ES8388 front end because it borrows that driver's
+            I2C bus: both chips sit on the same two wires and the bus may only
+            be opened once. See components/codec/codec_priv.h.
+
+            Run the port at OSYNTH_MIC_SLOT_BITS=16 with it — see the note
+            there.
+
+    config OSYNTH_ES8311_MIC_GAIN
+        int "ES8311 analogue PGA gain step (0-7, 6 dB each)"
+        depends on OSYNTH_MIC_CODEC_ES8311
+        range 0 7
+        default 4
+        help
+            The codec's analogue preamp, ahead of its ADC: 0..7 is
+            0/6/12/18/24/30/36/42 dB. This is the gain that actually buys
+            signal-to-noise, because it lifts the microphone before the
+            conversion rather than multiplying the result afterwards.
+
+            4 (24 dB) is what the P4 carrier's own config asks for, and an
+            analogue electret needs most of it before the converter sees
+            anything worth converting. `in.micgain` rides on top for the
+            digital trim.
+
+            Too high clips in the analogue domain and no firmware gain undoes
+            it — watch the `mic` peak in the heartbeat, which reads before
+            `in.micgain` and after this.
+
+    config OSYNTH_MIC_SLOT_BITS
+        int "Mic slot width in bits (16 or 32)"
+        depends on OSYNTH_ENABLE_MIC_IN && !OSYNTH_MIC_SHARE_CLOCKS
+        range 16 32
+        default 32
+        help
+            Bits on the wire per slot when the mic masters its own clocks.
+            32 for every MEMS mic worth buying: they emit 24 bits MSB-first
+            inside a 32-bit slot and cannot be told otherwise, which is the
+            same reason the PCM1808 forces 32-bit slots on the main port.
+
+            Only 16 and 32 are accepted. Shared clocks ignore this and follow
+            the output port — see OSYNTH_MIC_SHARE_CLOCKS.
+
+    choice OSYNTH_MIC_SLOT
+        prompt "Which slot the mic drives"
+        depends on OSYNTH_ENABLE_MIC_IN
+        default OSYNTH_MIC_SLOT_LEFT
+        help
+            A MEMS mic is strapped to one half of the frame by its L/R pin:
+            tied low it drives the left slot, tied high the right. Read the
+            wrong one and the input is silent while the mic is working
+            perfectly, so this is the first thing to swap when a new mic
+            reads nothing.
+
+            An INMP441 breakout usually ships with L/R floating, which is
+            *not* a defined state — tie it.
+
+        config OSYNTH_MIC_SLOT_LEFT
+            bool "Left (mic L/R pin tied low)"
+        config OSYNTH_MIC_SLOT_RIGHT
+            bool "Right (mic L/R pin tied high)"
+    endchoice
+
+    config OSYNTH_MIC_STEREO
+        bool "Two mics / a stereo capture, keep both slots"
+        depends on OSYNTH_ENABLE_MIC_IN
+        default n
+        help
+            Take both slots as a stereo pair instead of duplicating one to
+            both channels. For a pair of MEMS mics strapped opposite ways on
+            one bus, or an ES7210-class array. OSYNTH_MIC_SLOT is then
+            ignored.
+
+    config OSYNTH_MIC_SHIFT
+        int "Mic digital gain, in bits (0-8)"
+        depends on OSYNTH_ENABLE_MIC_IN
+        range 0 8
+        default 0
+        help
+            Left-shift applied as the 24-bit word is truncated to 16, so it
+            costs nothing: each bit is +6 dB, and it is taken from precision
+            the int16 pipeline was going to discard anyway. Saturating, so an
+            over-shifted loud passage clamps instead of wrapping.
+
+            A MEMS mic at conversational distance sits well below full scale
+            — 2 or 3 here is a reasonable starting point, and `in.gain` (up
+            to +12 dB) rides on top of it. Prefer this to `in.gain` for the
+            standing offset: `in.gain` multiplies a number that has already
+            been truncated, this one moves the truncation point.
+
+            Watch the `in pk` figure in the heartbeat while you set it. It
+            reads after this shift and before `in.gain`, which is exactly the
+            point this knob controls.
+
     config OSYNTH_ES8388_I2C_SDA_GPIO
         int "ES8388 I2C SDA GPIO (codec CDATA pin)"
         depends on OSYNTH_FRONTEND_ES8388
@@ -519,6 +804,30 @@ menu "osynth Synthesizer"
             cannot be fused the way the four fixed engines are, and the
             headroom left after the FX bus does not reliably fit one. The
             fixed engines are unaffected either way.
+
+    config OSYNTH_FX_GPL
+        bool "Include the GPL-3 reverb algorithms (MVerb, DuskVerb)"
+        default n
+        help
+            Adds two more choices to fx.rev.algo: MVerb (Martin Eastwood, a
+            Dattorro figure-of-eight plate) and DuskVerb Plate (Dusk Audio, a
+            Dattorro tank with a density cascade per loop).
+
+            This is a licence switch, not a feature switch. osynth is MIT;
+            both of these algorithms are GPL-3. Building them in makes the
+            resulting firmware image a combined work you may only distribute
+            under GPL-3 — which among other things means shipping the
+            complete corresponding source of whatever you flashed. Leaving
+            it off keeps the default image MIT and still gives you two
+            reverbs: the original freeverb, and the MIT-licensed WetReverb.
+
+            No sound already saved depends on this. The algorithm enum keeps
+            its numbering either way; a patch asking for one of the two GPL
+            algorithms on an MIT build clamps to WetReverb.
+
+            Costs roughly 95 KB of the reverb's shared PSRAM pool (the pool
+            is sized to the largest algorithm compiled in, not to their sum)
+            plus about 6 KB of code.
 
     config OSYNTH_VOICES
         int "Polyphony (number of voices)"

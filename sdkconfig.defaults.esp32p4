@@ -224,13 +224,19 @@ CONFIG_OSYNTH_FRONTEND_ES8388=y
 # Stereo line input on the DAC's own port. The capability is here — the P4's
 # I2S is full duplex and its MCLK routes through the GPIO matrix, which is the
 # pair of properties the classic ESP32 lacks — but the front end above decides
-# whether it costs anything. **Currently off**, because Kconfig defaults it to n
-# on a discrete front end: capture there needs a second chip (a PCM1808) and two
-# more pins, where on the ES8388 the ADC is already in the package.
+# whether it costs anything.
 #
-# So there is nothing to set here today. If the ES8388 is ever restored above,
-# this goes back to defaulting y and DIN/MCLK below come live with it — which is
-# exactly the transition the pin note further down is about.
+# **Currently ON**, and by Kconfig default rather than by anything set here:
+# the symbol is `default y if OSYNTH_FRONTEND_ES8388`, and the ES8388 came back
+# above. On that front end the ADC is already in the package, so it costs no
+# chip and no pin; on a discrete one it would need a PCM1808 and two more GPIOs
+# and defaults to n. DIN and MCLK below are live with it, which is exactly the
+# transition the pin note further down is about.
+#
+# (This block used to say "currently off" and was correct when it was written —
+# the front end above was DISCRETE then. It flipped with the ES8388, and the
+# note did not. Nothing needs setting here either way; the line is left
+# commented because the default is already the wanted value.)
 # CONFIG_OSYNTH_ENABLE_I2S_LINE_IN=y
 
 # Stream to USB *and* the I2S DAC at once. Default y, as on the S3.
@@ -395,6 +401,229 @@ CONFIG_OSYNTH_I2S_DOUT_GPIO=32
 # today, and GPIO33 is free alongside GPIO45 while the front end is discrete.
 CONFIG_OSYNTH_I2S_DIN_GPIO=3
 
+# --- Microphone input (S37) -------------------------------------------------
+
+# A second input device: a digital MEMS mic on the **second** I2S controller.
+# The P4 has three, so one is free.
+#
+# ON by default on this target, unlike the S3. It costs one pin, nothing is
+# heard until `in.source` is moved off `line`, and a port that fails to open
+# costs the output nothing — so the boot log answering "does a second I2S
+# controller come up on this silicon" is worth more than the pin. See the
+# clock-source warning at the end of this block: that answer is not known yet,
+# and this default is how it gets known.
+#
+# On this carrier there are two different microphones this could mean, and only
+# one of them is a config change.
+#
+# **An external MEMS mic on the header.** With SHARE_CLOCKS on it costs exactly
+# one pin, and after the I2S block took 1/2/3/32/33 the header still has GPIO4
+# and GPIO5 free (GPIO20 is the serial-MIDI default). That is the supported
+# path, and GPIO4 is what is set below. Wire SD->GPIO4, SCK->GPIO1 (the DAC's
+# BCLK), WS->GPIO33, and **L/R to GND** — floating is not a defined state.
+# CONFIG_OSYNTH_ENABLE_MIC_IN=y
+# CONFIG_OSYNTH_MIC_SHARE_CLOCKS=y
+# CONFIG_OSYNTH_MIC_DIN_GPIO=4
+#
+# **The board's own microphone, on GPIO48** (GPIO11 until S37h; see the pin
+# setting below for what GPIO11 actually is). Confirmed present, not yet
+# reachable, and the reason is pins rather than code. That mic is clocked by
+# the *board's* I2S pin group — the ESPHome config the board ships gives it
+# `i2s_audio_id: i2s_output`, meaning it listens to whatever BCLK/LRCLK that
+# block defines — while osynth drives the ES8388 at 1/2/3/32/33. So
+# MIC_SHARE_CLOCKS points the port at GPIO1/GPIO33, which that mic is not
+# connected to, and the result is full blocks of zeros with the starve counter
+# flat: the port clocks, the DMA fills, and nothing was ever on the wire.
+#
+# To reach it the port has to *master* the board's own mic pins instead:
+#
+# The pins come from the board repo's own `i2s_audio:` block, the one its
+# microphone entry references by id, and they are set below. Nothing here was
+# guessed: a wrong clock pin is indistinguishable from a wrong data pin, and
+# both look exactly like a dead microphone.
+#
+# Mastering its own pins is also *simpler* than sharing, on this target: a
+# master needs only 12.288 MHz internally, which XTAL clears outright, so the
+# divided-declared-rate workaround below does not apply to this path at all.
+# What it costs is a second clock domain — the mic on XTAL, the DAC on APLL,
+# both nominally 48 kHz with independent fractional dividers — so the two
+# drift slowly against each other and the DMA ring absorbs it. Fine for
+# sampling and monitoring; it is not the sample-locked capture the line input
+# gets.
+#
+# **Settled in S37h:** it is the ADC half of the ES8311, and its data pin is
+# GPIO48. The paragraph below is kept for the reasoning, which was right even
+# though the pin in it was not. It was unresolved whether GPIO11 carries
+# a bare MEMS mic or the ADC half of the on-board **ES8311**, which
+# components/codec/ has no driver for — an ESPHome `adc_type: external` entry
+# does not distinguish them. The boot-time I2C bus scan does: **0x18 answering
+# means an ES8311**, and a codec comes up unconfigured and silent no matter how
+# correct the pins are. Clock pins alone will not wake it; it needs a register
+# init over I2C that does not exist yet. Check the scan before wiring anything
+# to this, and see PINMAP.md, "the two codecs".
+#
+CONFIG_OSYNTH_ENABLE_MIC_IN=y
+# CONFIG_OSYNTH_MIC_SHARE_CLOCKS is not set
+# **GPIO48, and this is the pin the whole S37 investigation turned on.**
+#
+# It was 11 for five rounds, from an `i2s_audio:` block believed to be this
+# board's. It is not: this is a **Guition JC-ESP32P4-M3-DEV** (see
+# schematics/), whose audio block puts the codec's ASDOUT on GPIO48 and uses
+# **GPIO11 as the speaker amplifier's enable**. A PA enable is held low by a
+# pull-down so the amplifier stays off until firmware asks for it, which is
+# exactly what the pin measured: a hard zero through a 45k pull-up, at every
+# stage of boot, that never once switched.
+#
+# Everything else in that block was right — BCLK 12, WS 10, MCLK 13, I2C 7/8
+# — which is why the clocks came up, the codec answered, and its register file
+# read back byte-for-byte identical to Espressif's own driver. The ADC was very
+# likely converting the entire time, onto a pin nothing was reading.
+CONFIG_OSYNTH_MIC_DIN_GPIO=48
+CONFIG_OSYNTH_MIC_BCLK_GPIO=12
+CONFIG_OSYNTH_MIC_WS_GPIO=10
+CONFIG_OSYNTH_MIC_MCLK_GPIO=13
+
+# The mic behind those pins is analogue, into an ES8311's preamp — so it needs
+# a register init before it converts anything, and 16-bit slots because that is
+# the one word length the codec can be set to without depending on a reset
+# default. ADC only: the ES8311's DAC is powered down and the ES8388 keeps the
+# output. See components/codec/codec_es8311.cpp.
+CONFIG_OSYNTH_MIC_CODEC_ES8311=y
+# 32-bit slots, so BCLK is 64 x fs = 3.072 MHz — which is what the ES8311's own
+# clock coefficients for a 12.288 MHz MCLK assume (their bclk_div is 4, i.e.
+# MCLK/4). 16-bit slots were tried first and give 32 x fs: half the bit clock
+# the codec was configured for, with no error anywhere and silence as the only
+# symptom. codec_es8311.cpp derives the codec's word length from this symbol so
+# the two cannot drift apart again.
+CONFIG_OSYNTH_MIC_SLOT_BITS=32
+CONFIG_OSYNTH_ES8311_MIC_GAIN=4
+
+# One slot, folded to both channels (S37i).
+#
+# The ES8311 is a **mono** codec: one ADC, one sample per frame, and which half
+# of the I2S frame it lands in is a property of the chip's output routing
+# (register 0x44) rather than of a strap this firmware can read. That is why
+# this was OSYNTH_MIC_STEREO through the bring-up — taking both slots made the
+# heartbeat name the live one, where taking the wrong single slot would have
+# been indistinguishable from the dead microphone this port kept producing.
+#
+# The answer is now in twice: REG44 = 0x58 is the vendor's "ADCL + DACR", so the
+# ADC is in the **left** slot, and a working mic duly arrived hard left. So the
+# instrument comes off and the mic reads as what it is.
+#
+# Two things follow from the mono path in source_mic.cpp, which reads the one
+# live slot and writes it to *both* channels:
+#
+#   - Monitoring is centred instead of hard left. The other slot was never
+#     silence-with-a-mic-in-it; it is this codec's own DAC output, which osynth
+#     does not feed.
+#   - Mono looper takes stop losing 6 dB. The looper records (L+R)/2 when
+#     loop.mono is on, so a source living in one channel comes back at half
+#     amplitude in every take while metering perfectly. Duplicating rather than
+#     panning is what makes a mono source fold to itself — the same trap the
+#     ES8388's differential input set, resolved the same way.
+#
+# No diagnostic is given up: `raw xxxxxx/xxxxxx` in the heartbeat accumulates
+# both raw slots *before* this branch, so per-slot evidence survives. Put
+# STEREO back if a stereo pair is ever wired to this port.
+# CONFIG_OSYNTH_MIC_STEREO is not set
+CONFIG_OSYNTH_MIC_SLOT_LEFT=y
+
+# GPIO9-13 is the board's audio block and nothing in this firmware had claimed
+# any of it: the I2S port lives at 1/2/3/32/33 and the codec bus at 7/8. GPIO9
+# is the board's DAC data line, which osynth does not drive — only the mic's
+# side of that bus is taken here.
+#
+# **GPIO13 being an MCLK pin is itself the strongest evidence about what is on
+# the other end.** A bare MEMS mic has no such pin; it recovers everything from
+# BCLK. A board that routes a system clock to its audio block has a converter
+# that needs one, which on this class of carrier means the ES8311 at I2C 0x18 —
+# and that is a chip components/codec/ cannot configure yet. Driving these four
+# pins correctly is necessary and may well not be sufficient.
+#
+# The external-mic arrangement above is the fallback and is proven working: the
+# loopback test (OSYNTH_MIC_LOOPBACK_TEST in source_mic.cpp) captured the
+# synth's own output through this port bit-for-bit, so everything from the pin
+# inwards is known good on either path.
+
+# Slot the mic drives (its L/R strap), stereo pair instead, and digital gain
+# in bits at the 24-to-16 truncation. See sdkconfig.defaults.esp32s3 for the
+# full notes on each — they are target-independent. All three are set for real
+# further up this file (SLOT_LEFT, STEREO off, SHIFT 3); this paragraph is here
+# for the external-MEMS path, where LEFT matches an L/R pin tied to GND and
+# swapping it is the first thing to try on a mic that reads silence with the
+# starve counter at 0.
+
+# +18 dB at the 24-to-16 truncation, and on this target that is a measurement
+# problem before it is a taste one. The heartbeat prints the input peak as
+# %.2f, so with no shift at all anything below about -46 dBFS reads 0.00 —
+# indistinguishable from a dead pin, which is exactly the ambiguity the ES8311
+# bring-up kept landing in. Three bits of free gain (taken from precision the
+# int16 path discards anyway, and saturating rather than wrapping) put a quiet
+# analogue mic and a MEMS part at conversational distance both on the scale.
+# `in.micgain` is still the runtime trim; this only decides where the meter
+# starts being able to see anything.
+CONFIG_OSYNTH_MIC_SHIFT=3
+
+# ===== THE CLOCK-SOURCE PROBLEM ON THIS TARGET =============================
+#
+# This took three boots to pin down. Recorded in full because every wrong turn
+# looked plausible and two of them are still sitting in IDF waiting for the
+# next person.
+#
+# The ES8388 front end puts the output port in 32-bit slots. A slave decoding
+# those needs an internal clock of bclk x8 = 24.576 MHz, and IDF refuses any
+# configuration whose source clock does not exceed 1.99x that — about 48.9 MHz.
+# The P4's I2S can be fed from XTAL, APLL, PLL_F160M or an external pin, and
+# every one of those is unavailable here for a different reason:
+#
+#   DEFAULT      broken, not merely unsuitable. `I2S_CLK_SRC_DEFAULT = 0` with
+#                a comment promising auto-selection that nothing implements:
+#                I2S_LL_DEFAULT_CLK_SRC, which would translate the 0, is not
+#                defined for any target in IDF 6.0.2. It reaches the clock tree
+#                as an invalid module clock, the source frequency comes back
+#                zero, and everything is refused as "sample rate is too large".
+#                (The *LL* layer would have taken it — on rev <3 it quietly
+#                means XTAL — so the two layers disagree about one constant.)
+#   PLL_160M     160 MHz and would clear the rule, but i2s_ll_get_clk_src()
+#                puts it behind `#if CHIP_SUPPORT_MIN_REV >= 300` and lands
+#                everything else on HAL_ASSERT. That is an **abort, not an
+#                error return** — this build is pinned to rev <3
+#                (ESP32P4_SELECTS_REV_LESS_V3, above), so asking for it
+#                bootloops in i2s_channel_init_std_mode() instead of falling
+#                through to the next candidate. Do not "just try it".
+#   APLL         would clear it, and is skipped **for a slave only** — there
+#                the declared rate is divided, so the request really would name
+#                a frequency the DAC's does not. On a *master* it is the first
+#                thing tried (S37d): the request is mclk = 256 x fs, the same
+#                figure sink_i2s.cpp asks for, and IDF cannot retune an
+#                occupied APLL anyway (esp_clk_tree_src_set_freq_hz returns
+#                ESP_ERR_INVALID_STATE and reports the running frequency).
+#   EXTERNAL     needs a >24.3 MHz clock fed to the port's MCLK pin. The main
+#                port's MCLK is 12.288 MHz, so even wiring it across is short.
+#
+# That leaves **XTAL, at 40 MHz**, which is 8.9 MHz short of legal at 32-bit
+# slots. The way through is to divide the *declared* sample rate: for a slave
+# the declared rate never reaches a pin — BCLK and WS come from the master, and
+# the driver uses the rate only to size the port's internal clock. At /2 that
+# clock drops to 12.288 MHz, needs only 24.5 MHz to be legal, and still runs
+# four times the real 3.072 MHz BCLK. The resulting fractional divider does not
+# matter the way it would on the output: this clock never leaves the
+# peripheral, and the mic's sample timing comes from the master's BCLK.
+#
+# All of that is automatic — kClockAttempts in components/audio_io/source_mic.cpp
+# walks the candidates and the boot log names the one that took. Expect
+# "clk xtal, declared rate/2" on the shared-clock (external MEMS) path and
+# "clk apll" on the on-board-mic path, where this port masters its own pins and
+# its MCLK is a real pin feeding a codec's clock manager — see the APLL row
+# above. If the port opens but `in starve` climbs every block, raise
+# OSYNTH_MIC_CLK_SKIP in that file by one.
+#
+# What does NOT work, checked so nobody repeats it: mono slot mode. It looks
+# like it should halve the internal clock demand and it does not —
+# i2s_std_set_slot() hardcodes `handle->total_slot = 2` and only moves
+# `active_slot`, so the bclk term is identical either way.
+
 # --- ES8388 codec (only with OSYNTH_FRONTEND_ES8388) ------------------------
 #
 # LIVE again. This is the settled configuration for the M5Stack M144 —
@@ -474,10 +703,11 @@ CONFIG_OSYNTH_ES8388_OUT1=y
 # `in pk L/R` from the heartbeat with a mono source before setting either —
 # see sdkconfig.defaults.esp32s3 for the procedure.
 #
-# Commented out, not set to 0: both symbols `depends on
-# OSYNTH_ENABLE_I2S_LINE_IN`, which is off above, so Kconfig does not emit
-# them and a value here is an unapplied setting rather than a choice. The
-# Kconfig default is 0 anyway — uncomment along with the line input.
+# Commented out, not set to 0: the Kconfig default is 0 and nothing here has
+# measured a reason to move it. Both symbols `depends on
+# OSYNTH_ENABLE_I2S_LINE_IN`, which — unlike when this note was first written —
+# is now **on** by default with the ES8388 front end, so a value set here would
+# take effect rather than being quietly dropped. Measure before uncommenting.
 # CONFIG_OSYNTH_ES8388_ADC_BALANCE=0
 # CONFIG_OSYNTH_ES8388_PGA_BALANCE=0
 
@@ -528,3 +758,18 @@ CONFIG_OSYNTH_ES8388_OUT1=y
 # Kconfig default (21) is not on this board's header; 20 is, and is one of the
 # six pins the I2S block deliberately left free.
 # CONFIG_OSYNTH_SERIAL_MIDI_RX_GPIO=20
+
+
+# --- USB host (S35) ---------------------------------------------------------
+
+# Hub support in IDF's USB host library. On, so a hub between osynth and a
+# controller works and several controllers can be attached at once — they all
+# merge into the MIDI router, which is omni anyway. Costs a little RAM and the
+# hub driver's task; harmless in device mode, where the host library is never
+# installed at all.
+#
+# The host role uses the same high-speed controller and the same OTG socket
+# the device role does (the full-speed controller's GPIO24/25 reach no
+# connector on this carrier — see usb_dev/tusb/usb_descriptors.h), so the two
+# roles are alternatives here exactly as they are on the S3.
+CONFIG_USB_HOST_HUBS_SUPPORTED=y

@@ -39,6 +39,7 @@
 #include "synth_params_c.h"
 #include "synth_voice.h"
 #include "usb_dev.h"
+#include "usb_host_midi.h"
 
 static const char* TAG = "midi";
 
@@ -324,10 +325,15 @@ void midi_route_realtime(uint8_t status) {
 }
 
 #if SYNTH_ENABLE_USB
-/* One 4-byte USB-MIDI event packet, invoked on the TinyUSB task. CINs
- * 0x8..0xE carry complete channel-voice messages; CIN 0xF is a single byte —
- * System Real-Time when >= 0xF8 (routed to the seqarp clock since S12).
- * Everything else (sysex, system common) is dropped here. */
+/* One 4-byte USB-MIDI event packet, invoked on the TinyUSB task (device role)
+ * or the host driver's client task (host role, S35). CINs 0x8..0xE carry
+ * complete channel-voice messages; CIN 0xF is a single byte — System
+ * Real-Time when >= 0xF8 (routed to the seqarp clock since S12). Everything
+ * else (sysex, system common) is dropped here.
+ *
+ * Both roles share this function because they share the wire format: a
+ * USB-MIDI 1.0 event packet is the same four bytes whichever end of the cable
+ * produced it. That is the whole reason the host driver had nothing to parse. */
 static void usb_midi_rx(const uint8_t packet[4], void* ctx) {
     (void)ctx;
     const uint8_t cin = packet[0] & 0x0F;
@@ -341,7 +347,12 @@ static void usb_midi_rx(const uint8_t packet[4], void* ctx) {
 
 esp_err_t midi_init(void) {
 #if SYNTH_ENABLE_USB
+    /* Exactly one of these is live — the port took one role at boot — but
+     * registering both costs two stores and keeps the decision in one place
+     * (usb_mode_resolve, called by main.cpp). The stack that did not start
+     * never calls back. */
     usb_dev_midi_set_rx_callback(usb_midi_rx, NULL);
+    usb_host_midi_set_rx_callback(usb_midi_rx, NULL);
 #endif
 
     esp_err_t err = midi_serial_start();
@@ -351,9 +362,11 @@ esp_err_t midi_init(void) {
     }
 
     ESP_LOGI(TAG,
-             "router up: usb %d, serial %d, omni, 8 common + per-engine CCs, "
-             "wheel = matrix source, NRPN = any param, prog change = engine, "
-             "realtime -> seq clock",
-             SYNTH_ENABLE_USB, SYNTH_ENABLE_SERIAL_MIDI);
+             "router up: usb %d (%s), serial %d, omni, 8 common + per-engine "
+             "CCs, wheel = matrix source, NRPN = any param, prog change = "
+             "engine, realtime -> seq clock",
+             SYNTH_ENABLE_USB,
+             usb_mode_active() == USB_MODE_HOST ? "host" : "device",
+             SYNTH_ENABLE_SERIAL_MIDI);
     return ESP_OK;
 }

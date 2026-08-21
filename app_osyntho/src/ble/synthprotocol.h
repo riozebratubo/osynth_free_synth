@@ -52,6 +52,15 @@ enum Op : quint8 {
   OP_LOAD_PRESET   = 0x05,
   OP_SAVE_PRESET   = 0x06,
   OP_LIST_PRESETS  = 0x07,
+  // USB role (S35). The role itself is an ordinary persisted parameter
+  // (`usb.mode`), so setting it goes over SET_PARAM like anything else; these
+  // two exist because applying it needs a restart, and a restart must never be
+  // a side effect of writing a parameter. USB_STATUS reads what the port is
+  // actually doing, REBOOT asks for the pending change to take effect.
+  // Firmware without the capability answers USB_STATUS with supported = 0,
+  // which is how the page decides whether to offer the control.
+  OP_USB_STATUS    = 0x0A,
+  OP_REBOOT        = 0x0B,
   OP_TRANSPORT     = 0x10,
   OP_ARP           = 0x11,
   OP_NOTE_ON       = 0x20,
@@ -450,6 +459,46 @@ inline PresetList parsePresetList(const QByteArray& payload) {
     out.entries.append(e);
   }
   return out;
+}
+
+// --- USB role (S35) ------------------------------------------------------
+
+// USB_STATUS response:
+// [u8 active][u8 requested][u8 supported][u8 attached][u16 vid][u16 pid][name NUL]
+//
+// `active` is the role the port is in right now; `requested` is what the
+// persisted `usb.mode` says it should be. They differ exactly between writing
+// the parameter and the restart that applies it — so `restartRequired` below
+// is a fact the synth reports, not state the app has to remember across a
+// disconnect.
+enum UsbMode : quint8 { USB_MODE_DEVICE = 0, USB_MODE_HOST = 1 };
+
+struct UsbStatus {
+  bool valid = false;
+  quint8 active = USB_MODE_DEVICE;
+  quint8 requested = USB_MODE_DEVICE;
+  bool supported = false;  // this firmware can take the host role at all
+  int attached = 0;        // MIDI devices claimed (host mode only)
+  quint16 vid = 0;
+  quint16 pid = 0;
+  QString product;
+
+  bool restartRequired() const { return valid && active != requested; }
+};
+
+inline UsbStatus parseUsbStatus(const QByteArray& payload) {
+  UsbStatus s;
+  Reader r(payload);
+  s.active = r.u8();
+  s.requested = r.u8();
+  s.supported = r.u8() != 0;
+  s.attached = r.u8();
+  s.vid = r.u16();
+  s.pid = r.u16();
+  if (!r.ok) return s;
+  s.product = r.cstr();
+  s.valid = true;
+  return s;
 }
 
 // INFO characteristic read:

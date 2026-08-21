@@ -36,7 +36,12 @@ QtObject {
         { label: "Loop", name: "Looper",             icon: "\uf363" },  // repeat
         { label: "Patch", name: "Modular patch",     icon: "\uf542" },  // project-diagram
         { label: "Pre",  name: "Presets",            icon: "\uf0c7" },  // floppy-disk
-        { label: "Lib",  name: "Patch library",      icon: "\uf02d" }   // book
+        { label: "Lib",  name: "Patch library",      icon: "\uf02d" },  // book
+        // The synth's own persisted settings (S35), as opposed to the app's
+        // (SettingsScreen) or the patch's (everything above). Last, because it
+        // is the page you visit least and its index must not shift the ones
+        // people have set as their startup screen.
+        { label: "Dev",  name: "osynth",             icon: "\uf2db" }   // microchip
     ]
 
     // Panel layout (PanelFlow / ParamGroup): true packs the cards left to right

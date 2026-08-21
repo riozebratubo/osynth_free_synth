@@ -15,6 +15,16 @@
  * to the block being played. The capture happens here, at the top of the
  * audio task; where it is mixed is the render chain's business, through the
  * three audio_io_line_in_* stages below.
+ * Session 37: a second input device. With OSYNTH_ENABLE_MIC_IN a digital MEMS
+ * microphone runs on the *second* I2S controller (source_mic.cpp) — a port has
+ * one DIN pin and the line input has it. `in.source` chooses between them and,
+ * since S37b, can take **both** at once: each device is captured into its own
+ * buffer every block and the stages below run one mix pass per device, summing
+ * in float. What stays shared is the placement and the trim — one `in.route`,
+ * one `in.gain` — with `in.micgain` alongside for the level the two devices do
+ * not have in common. Which is why those stages kept their names: what they
+ * place in the render chain is "the input", and how many devices are behind it
+ * is a question no consumer has to ask.
  */
 #pragma once
 
@@ -66,7 +76,7 @@ typedef struct {
      * There is deliberately no fourth stage percentage to go with these: the
      * input costs a fixed ~0.7% that does not vary with anything the player
      * does, so it would never have told anyone anything. These two would. */
-    float in_peak_l;      /* loudest |sample| captured since the previous
+    float in_peak_l[2];   /* loudest |sample| captured since the previous
                            * audio_io_get_stats() call (reset on read),
                            * measured *before* in.gain — the ADC clips in the
                            * analogue domain and no firmware gain undoes it,
@@ -78,11 +88,60 @@ typedef struct {
                            * one silent side still gives a healthy reading
                            * from the other, which is precisely the case you
                            * reach for the meter to diagnose. */
-    float in_peak_r;
-    uint32_t in_starves;  /* cumulative blocks where the ADC had no full
+    float in_peak_r[2];
+    /* Peak of (L+R)/2 over the same window — the mono fold, measured rather
+     * than assumed.
+     *
+     * Two healthy per-channel peaks say nothing about phase, and the looper
+     * records folded whenever loop.mono is on (its default). A differentially
+     * wired input whose legs land anti-phase on L and R therefore meters
+     * perfectly, monitors perfectly through the stereo bus, and is annihilated
+     * on the way into a take. That failure is invisible in in_peak_l/r and this
+     * is the one number that shows it: roughly equal to them on a correlated
+     * source, near zero on an anti-phase pair. Read-and-reset like the two
+     * above. */
+    float in_peak_mono[2];
+    uint32_t in_starves[2]; /* cumulative blocks where the device had no full
                            * block ready; the tail was zero-filled. Should
                            * stay at 0 — a climbing count means the RX side
                            * is not clocking (MCLK, or the ADC's mode straps) */
+    /* The route as the *audio task* resolved it, and the live smoothed gain at
+     * each of the three mix points (mon, fx, dry — the kIn* order).
+     *
+     * Added because in_peak above cannot answer the question it kept raising:
+     * a healthy peak with a silent-looking result says the ADC is fine and
+     * says nothing about *where* the block is being mixed, and that is the
+     * whole of what in.route decides. It is also the difference between an
+     * input the looper records and one it cannot — the record tap sits between
+     * fx/dry and mon (render_chain(), main.cpp) — so "heard but never in a
+     * take" is exactly the symptom these three numbers separate from a
+     * looper fault. Exactly one should be non-zero, and it should be the
+     * position the control surface is showing; anything else means the write
+     * never landed rather than that the tap missed it.
+     *
+     * Not read-and-reset: these are state, not a window. Both stay at their
+     * defaults without SYNTH_ENABLE_LINE_IN. */
+    uint8_t in_route;     /* 0 off, 1 mon, 2 fx, 3 dry */
+    float in_g[3];        /* [kInMon], [kInFx], [kInDry] */
+    /* Live smoothed gain per device, [0] line and [1] mic (S37b), matching
+     * the peak arrays above. Both non-zero means both are being mixed —
+     * either `in.source` is at `both`, or a crossfade between the two is
+     * still running. Index [1] stays 0 on a build with no microphone.
+     *
+     * The mic's entry carries `in.micgain` folded in, so it is a mix
+     * coefficient and not a flag: it is the number that says whether a mic
+     * selected and metering healthily is actually reaching the bus at an
+     * audible level, which is the one thing a peak beside it cannot. */
+    float in_dev_g[2];
+    /* Microphone only (S37d), and raw: every bit that appeared on each I2S slot
+     * since the previous audio_io_get_stats() call, before narrowing and before
+     * any gain. 0 on a build with no microphone.
+     *
+     * This is the meter for the question the peaks above cannot answer. They
+     * are taken after the 24-to-16 truncation and printed as %.2f, so a
+     * microphone 46 dB down and a data pin nobody drives both read 0.00. Here
+     * the first is a small number and the second is exactly zero. */
+    uint32_t mic_raw_or[2];
 } audio_io_stats_t;
 
 /* Called once per block from the render chain (audio task only) with the
@@ -136,6 +195,17 @@ esp_err_t audio_io_start(audio_render_fn render, void* ctx);
 const char* audio_io_sink_name(void);
 
 void audio_io_get_stats(audio_io_stats_t* out);
+
+/* Re-reads the microphone port's pads and logs what is moving (S37f).
+ *
+ * Exists as a public entry point for one reason: the same sweep runs inside
+ * audio_io_start(), and at that moment an input codec has not been configured
+ * yet — so its data pin standing still is the expected reading and not a
+ * finding. Call this again once the codec is up, and the two lines together say
+ * whether configuring it changed anything on the wire.
+ *
+ * A no-op on a build with no microphone. Boot-time only: it busy-polls. */
+void audio_io_mic_probe_pads(void);
 
 /* How long the master output has been inaudibly quiet, in milliseconds
  * (capped; 0 means it is currently making sound).

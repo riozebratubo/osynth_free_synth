@@ -228,8 +228,8 @@ Translator::Translator() {
   pt["Clear all tracks?"] = "Limpar todas as faixas?";
   pt["All recorded tracks are discarded and the loop length is reset."] =
       "Todas as faixas gravadas são descartadas e a duração do loop é zerada.";
-  pt["Looper not available on this synth (needs PSRAM)."] =
-      "Looper não disponível neste synth (precisa de PSRAM).";
+  pt["Looper parameters were not received from this synth."] =
+      "Os parâmetros do looper não foram recebidos deste synth.";
   pt["loop %1 s"] = "loop de %1 s";
   pt["no loop — rec records the first track and sets the length (max %1 s)"] =
       "sem loop — rec grava a primeira faixa e define a duração (máx. %1 s)";

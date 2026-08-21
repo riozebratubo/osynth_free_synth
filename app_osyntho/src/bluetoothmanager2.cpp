@@ -354,6 +354,28 @@ bool BluetoothManager::connectAndSubscribe(SimpleBLE::Peripheral& peripheral) {
   peripheral.set_callback_on_disconnected(
       []() { qDebug() << "Bt | Peripheral disconnected (callback)"; });
 
+  // PARKED — the desktop counterpart of the Android link-loss fix
+  // (bluetoothmanager.cpp: handleLinkLost). Only Android was reproduced and
+  // retested, so this backend is left as it was rather than changed blind.
+  //
+  // The concern it addresses is real here too: the callback above only logs, so
+  // the keep-alive loop below relies on peripheral.is_connected() alone — and
+  // switching the adapter off mid-session can leave the Windows backend
+  // answering a cached `true`. The worker then parks forever, the app never
+  // publishes connectedChanged(false), and SynthController::setConnected(true)
+  // on the way back early-returns on the unchanged value, skipping every reset
+  // and reusing stale discovery state for the session.
+  //
+  // To enable: un-comment m_peripheralDropped in the header, arm it here
+  // *before* installing the callback (so a disconnect in the gap is not
+  // swallowed), set it from the callback, and un-comment the check in the loop.
+  //
+  // m_peripheralDropped.store(false);
+  // peripheral.set_callback_on_disconnected([this]() {
+  //   qDebug() << "Bt | Peripheral disconnected (callback)";
+  //   m_peripheralDropped.store(true);
+  // });
+
   // Keep-alive: the worker parks here while connected, polling for a disconnect
   // or a stop request (startDeviceScan/finish block on this poll).
   while (true) {
@@ -363,6 +385,9 @@ bool BluetoothManager::connectAndSubscribe(SimpleBLE::Peripheral& peripheral) {
     } catch (...) {
       stillConnected = false;
     }
+
+    // PARKED with the callback above — see that note to enable.
+    // if (m_peripheralDropped.load()) stillConnected = false;
 
     if (not stillConnected or m_shouldStopBluetoothThread) {
       qDebug() << "Bt | Thread will quit";

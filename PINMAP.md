@@ -42,6 +42,14 @@ line input **on**.
 **Ports on a two-port devkit:** the "USB" (native) port is the audio/MIDI
 device; the "UART"/"COM" port is for `idf.py flash monitor`.
 
+**In USB host mode (S35)** GPIO19/20 are the same two pins, doing the same job
+in the other direction — the role is a runtime setting (`usb.mode`, on the
+app's osynth page), not a different pinout, and flashing still happens over the
+UART port either way. What host mode *does* need is 5 V on the socket's VBUS to
+power the controller: that comes from the board, not from any GPIO this
+firmware drives, so there is no pin here to assign. A bus-powered controller on
+a socket whose VBUS is not fed will never enumerate.
+
 ---
 
 ## ESP32-P4 (+ ESP32-C6 for BLE)
@@ -54,8 +62,10 @@ I2S signals route through the GPIO matrix. Check every row against your
 schematic before wiring either way.
 
 Ships with the **ES8388 codec** front end and line input **on**, driving an
-external codec module. The on-board 3.5 mm jack is an **ES8311** and is *not*
-what this configures — see "the two codecs" below.
+external codec module, and the **microphone input on** (`OSYNTH_ENABLE_MIC_IN`,
+default y on this target only) reading GPIO4. The on-board 3.5 mm jack is an
+**ES8311** and is *not* what this configures — nor is the board's on-board
+microphone; see "the two codecs" below.
 
 | Pin | Function | Goes to | menuconfig symbol |
 | --- | --- | --- | --- |
@@ -63,9 +73,16 @@ what this configures — see "the two codecs" below.
 | GPIO20 | Serial MIDI RX | 6N138 optocoupler output | `OSYNTH_SERIAL_MIDI_RX_GPIO` |
 | GPIO24 | USB D− | host / computer | **fixed** — USB-OTG FS PHY (port 0) |
 | GPIO25 | USB D+ | host / computer | **fixed** — USB-OTG FS PHY (port 0) |
+| — | USB host / device | the OTG socket (high-speed) | `usb.mode` — runtime, see below |
 | GPIO1 | I2S BCLK | PCM5102A BCK | `OSYNTH_I2S_BCLK_GPIO` |
 | GPIO32 | I2S DOUT (playback) | PCM5102A **DIN** | `OSYNTH_I2S_DOUT_GPIO` |
 | GPIO33 | I2S LRCK/WS | PCM5102A LCK | `OSYNTH_I2S_WS_GPIO` |
+| GPIO10 | Mic LRCK/WS | on-board mic block | `OSYNTH_MIC_WS_GPIO` — **on by default here** |
+| GPIO48 | Mic DIN | on-board mic — ES8311 **ASDOUT** | `OSYNTH_MIC_DIN_GPIO` |
+| GPIO9 | (unused) | ES8311 **DSDIN** — the board's speaker path | — |
+| GPIO11 | (unused) | the speaker amplifier's **enable** — not a data pin | — |
+| GPIO12 | Mic BCLK | on-board mic block | `OSYNTH_MIC_BCLK_GPIO` |
+| GPIO13 | Mic MCLK | on-board mic block | `OSYNTH_MIC_MCLK_GPIO` |
 | GPIO39–44 | micro-SD | on-board socket | SDMMC slot-1 IOMUX — **see below** |
 | GPIO45–47 | — | **nothing — see the warning below** | |
 | GPIO54 | C6 reset | on-board ESP32-C6 | ESP-Hosted — **claimed** |
@@ -77,9 +94,40 @@ no MCLK. Tie the module's **SCK to GND** — that is how its internal PLL engage
 and floating gives silence. Note the naming trap: the module's pin marked `DIN`
 takes the P4's *DOUT*.
 
-That leaves **GPIO2–5 and 20** free for local UI and serial MIDI. GPIO2–5 are
-the JTAG pads (MTCK/MTDI/MTMS/MTDO) — fine as GPIOs, but they cost external
-JTAG.
+That leaves **GPIO4, 5 and 20** free for local UI and serial MIDI once MCLK
+took GPIO2 and DIN took GPIO3 — and **GPIO4 is now the microphone's data pin**,
+so it is really GPIO5 and 20. GPIO2–5 are the JTAG pads (MTCK/MTDI/MTMS/MTDO)
+— fine as GPIOs, but they cost external JTAG.
+
+**The mic default here needs no wiring to be safe.** Sharing clocks means it
+only *reads* GPIO1 and GPIO33, and `in.source` defaults to `line`, so a board
+with nothing on GPIO4 sounds exactly as it did.
+
+> **The clock source on this target took three goes, and one of them
+> bootlooped.** The 32-bit slots the ES8388 front end forces need a slave
+> clock above ~48.9 MHz, and on a P4 pinned to rev <3 every candidate fails
+> differently: `DEFAULT` is broken in IDF 6.0.2 (`= 0`, and nothing translates
+> it, so the source frequency reads zero), `PLL_160M` is fast enough but
+> `i2s_ll_get_clk_src()` gates it on `CHIP_SUPPORT_MIN_REV >= 300` and
+> **`HAL_ASSERT`s** rather than returning an error — an abort, mid-init, so it
+> bootloops — and `EXTERNAL` needs a faster pin clock than the board has. What
+> works **for a slave** is **XTAL with a divided declared rate**: a slave's
+> declared rate never reaches a pin, so halving it halves the internal clock
+> demand and changes nothing on the wire. Expect `clk xtal, declared rate/2` on
+> the shared-clock (external MEMS) path. Full write-up in
+> `sdkconfig.defaults.esp32p4`.
+>
+> **A master takes APLL instead, and the ban on it was wrong** (S37d). It
+> applied to a slave, whose divided declared rate really would ask for a
+> different frequency; a master asks for `mclk = 256 x fs`, the identical figure
+> `sink_i2s.cpp` asks for on the output port. And IDF cannot retune an occupied
+> APLL in any case — `esp_clk_tree_src_set_freq_hz()` returns
+> `ESP_ERR_INVALID_STATE` and hands back the frequency it is already running at.
+> This matters because on a master that MCLK is a *pin*: from the 40 MHz XTAL,
+> 12.288 MHz needs a fractional divider (3 + 49/192), so the clock an ES8311
+> derives its whole ADC timing from dithers between 75 ns and 100 ns periods.
+> Expect `clk apll` on the on-board-mic path — and, as a free consequence, a
+> capture sample-locked to playback rather than in a second clock domain.
 
 > ### ⚠️ GPIO45, 46 and 47 do not drive on this carrier
 >
@@ -111,7 +159,41 @@ the clock-rate signals live there and the two data lines went to 32/33.
 the ES_I2C bus but not the I2S port. osynth drives only the ES8388
 (`components/codec/` implements no other), so the ES8311 stays in its
 power-up state: unconfigured and silent, jack dead. Nothing collides — one
-master, and the addresses differ. The boot-time bus scan is the way to read
+master, and the addresses differ.
+
+That also settles what the board's **on-board microphone** is not:
+it is clocked by the board's own I2S pin group (~GPIO9–13), not the 1/2/3/32/33
+this firmware drives, so `OSYNTH_MIC_SHARE_CLOCKS` would read the wrong pins
+and its real clock pins are neither on the header nor in any schematic to hand.
+**Settled in S37h**: it is the ADC half of the ES8311, its data pin is GPIO48,
+and GPIO11 is the speaker amplifier's enable. The rest of this paragraph is the
+reasoning that got there, which was sound even where the pin was not. It was
+unresolved whether that pin carried a bare MEMS mic or the ADC half of
+the ES8311, which `components/codec/` has no driver for — an ESPHome
+`adc_type: external` entry does not distinguish them, and the bus scan does:
+0x18 present means a codec that must be configured over I2C before it emits
+anything. The default mic input above is an **external** mic on GPIO4, not this
+one.
+
+Reaching it means having its port *master* the board's own pins rather than
+slaving to the ES8388's, and that is what this target now defaults to:
+`OSYNTH_MIC_SHARE_CLOCKS=n`, **DIN 48, BCLK 12, WS 10, MCLK 13** — the numbers
+from the board repo's own `i2s_audio:` block, not inferred. Mastering is also
+simpler here: a master needs only 12.288 MHz internally, which XTAL clears, so
+none of the divided-rate workaround applies. The cost is a second clock domain
+that drifts slowly against the DAC, which the DMA ring absorbs.
+
+**Those pins are necessary and not sufficient.** The board's mic is an
+*analogue* microphone into an **ES8311 at I2C 0x18** (its own config: `platform:
+es8311`, `use_mclk: True`, `microphone_type: analog`, `mic_gain: 24DB`) — which
+is also why GPIO13 carries MCLK at all, since no digital MEMS part has such a
+pin. That codec powers up unconfigured and silent and converts nothing until
+its registers are written, and `components/codec/` drives the ES8388 and
+nothing else. Until an ES8311 init exists, this port reads exactly what it read
+before the pins were right: full blocks, no starves, every sample zero.
+
+The external-mic path — a digital MEMS part on `OSYNTH_MIC_SHARE_CLOCKS` —
+needs no codec at all and is proven working end to end. The boot-time bus scan is the way to read
 it: **0x18** the on-board ES8311, **0x10/0x11** the ES8388, **0x33** the M5
 module's STM32, **0x40/0x41** an ES7210 mic array. Only 0x10/0x11 matters to
 the driver; the rest is the board identifying itself.
@@ -124,6 +206,15 @@ with the SPI role mapping: **CS←DAT3 (42), SCK←CLK (43), MOSI←CMD (44),
 MISO←DAT0 (39)**. Left commented out in `sdkconfig.defaults.esp32p4` because it
 is unverified on this board; confirm the socket really is on slot 1 and that
 DAT1/DAT2 are pulled up before enabling it.
+
+**USB host mode (S35) uses the same socket, not the other controller.** The
+tempting reading of the two rows above is that the P4's second USB controller
+could host while the first stays a device. It cannot on this carrier: GPIO24/25
+are the *full-speed* controller and they reach no connector, so only the
+high-speed controller has a socket — the same one the device role enumerates
+on. Host and device are therefore alternatives here exactly as on the S3, and
+`usb.mode` picks between them at boot. See
+`components/usb_dev/tusb/usb_descriptors.h` for the measurement behind that.
 
 **Do not use:**
 
@@ -182,13 +273,57 @@ A pin only exists if its feature is enabled:
 | I2S BCLK / WS / DOUT | `OSYNTH_ENABLE_I2S_DAC` |
 | I2S DIN | `OSYNTH_ENABLE_I2S_LINE_IN` (S3/P4 only) |
 | I2S MCLK | `OSYNTH_ENABLE_I2S_LINE_IN` **or** `OSYNTH_FRONTEND_ES8388` |
+| Mic DIN | `OSYNTH_ENABLE_MIC_IN` (S3/P4 only) |
+| Mic BCLK / WS | `OSYNTH_ENABLE_MIC_IN` **and** `OSYNTH_MIC_SHARE_CLOCKS`=n — otherwise the mic reads the I2S BCLK/WS pins above |
 | Codec I2C SDA/SCL | `OSYNTH_FRONTEND_ES8388` |
 | SD card ×4 | `OSYNTH_LOOP_STORE_SD` **or** `OSYNTH_DRUM_SD_KITS` (shared bus) |
 | Serial MIDI RX | `OSYNTH_ENABLE_SERIAL_MIDI` |
 | Internal DAC (ESP32) | no I2S DAC enabled |
+| USB D−/D+ as a **host** | `usb.mode` = host — a runtime setting, and only offered when an I2S DAC carries the audio (otherwise the USB *device* is the audio clock) |
 
 Local UI (LCD + encoders + buttons) has **no pins assigned yet** — the
 component compiles to a stub.
+
+### Microphone input (S37)
+
+A digital MEMS mic (INMP441, ICS-43434, SPH0645) runs on the **second** I2S
+controller — the S3 has two and the P4 three, and the line input holds the
+first. Off by default (`OSYNTH_ENABLE_MIC_IN`).
+
+It does **not** get a second DIN on the DAC's port: a port has one RX channel
+and one DIN pin, and the line input has them. That is the whole reason this is
+a second controller rather than a second pin.
+
+| Mic pin | Goes to | With `MIC_SHARE_CLOCKS=y` (default) |
+| --- | --- | --- |
+| SD / DOUT | `OSYNTH_MIC_DIN_GPIO` | the one pin the feature costs |
+| SCK / BCLK | the I2S BCLK pin | shared with the DAC — nothing to wire but the tap |
+| WS / LRCL | the I2S LRCK/WS pin | likewise |
+| L/R | **GND or 3V3, never floating** | picks the slot; match `OSYNTH_MIC_SLOT` |
+| VDD / GND | 3V3 / GND | |
+
+Sharing clocks is the default because it is strictly better: one pin instead of
+three, and the capture is sample-locked to playback exactly the way the line
+input is. The GPIO matrix allows one output driver and any number of input taps
+on a pad, and the I2S driver only enables the input on a pin it takes as an
+input, so a slave reading BCLK/WS does not disturb the master driving them.
+
+Suggested free pins — **S3**: 1, 2, 4, 6, 7, 21, 38–44, 47, 48 (default 4).
+**P4 carrier**: GPIO4 or 5, the only header pins the I2S block left over that
+have no other claim (GPIO20 is the serial-MIDI default).
+
+`in.source` picks which device feeds the input chain — `line`, `mic`, or
+**`both`**, which mixes the two — with `in.micgain` as the microphone's own
+level trim. Both parameters are registered only where both devices are compiled
+in, and both are persisted. Every device is captured every block regardless, so
+the heartbeat meters each one separately (`in line …/… g… mic …/… g…`) and an
+unselected microphone still reads: the `g` figure after each pair is that
+device's live mix gain, which is what separates "not selected" from "selected
+and silent" from "turned all the way down".
+
+**First thing to check on a silent new mic:** the L/R strap against
+`OSYNTH_MIC_SLOT`. Reading the slot the mic does not drive is silence from a
+microphone that is working perfectly, and it looks identical to a wiring fault.
 
 ---
 

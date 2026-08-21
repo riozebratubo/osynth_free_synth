@@ -16,6 +16,7 @@ extern "C" {
  * truth is synth_params.h; static_asserts in synth_params.cpp keep these in
  * sync. */
 #define SYNTH_PID_ENGINE_TYPE       0x0001
+#define SYNTH_PID_USB_MODE          0x000C
 #define SYNTH_PID_COMMON_GLIDE      0x0100
 #define SYNTH_PID_COMMON_BEND_RANGE 0x0101
 #define SYNTH_PID_COMMON_UNISON     0x0102

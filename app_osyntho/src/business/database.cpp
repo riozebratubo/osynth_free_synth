@@ -213,6 +213,47 @@ void Database::runCreateTables() {
 
   const unsigned int dbSchemaVersion = getSchemaVersion();
 
+  // Schema 2 (S36): the synth gained a per-effect enable switch, defaulting to
+  // off, and pushParams() replays only the rows a patch actually stores — it
+  // does not reset anything else to its default. A library patch saved before
+  // S36 therefore has no `on` row at all, and loading it would leave every
+  // effect wherever the *previous* patch happened to leave it: a reverb that
+  // is present or absent depending on what you played last.
+  //
+  // So give those patches the switch they were saved with. An effect whose mix
+  // was above zero was audible on the firmware that saved it, and gets `on` =
+  // 1; an effect at mix 0 was silent either way and is left alone, which is
+  // also the right answer for a patch that never stored that unit at all.
+  //
+  // Written as one INSERT..SELECT per unit rather than a loop over the patch
+  // table because it has to run before the first patch can be loaded, and a
+  // per-row round trip over a few hundred patches is a visible pause on the
+  // slowest phone this app supports. The NOT IN guard makes it idempotent.
+  if (dbSchemaVersion < 2 and tableExists("patch_param")) {
+    // {mix, on} FX parameter ids, matching components/fx/include/fx.h.
+    // Decimal because SQL, hex in the comment because the firmware and
+    // private_docs/PARAM_MAP.md both name them that way.
+    static const struct { int mix; int on; const char* unit; } kFxOn[] = {
+        {768, 771, "chorus"},   // 0x0300 -> 0x0303
+        {784, 791, "delay"},    // 0x0310 -> 0x0317
+        {816, 823, "granular"}, // 0x0330 -> 0x0337
+        {800, 804, "reverb"},   // 0x0320 -> 0x0324
+        {832, 835, "bitcrush"}, // 0x0340 -> 0x0343
+        {864, 869, "drive"},    // 0x0360 -> 0x0365
+        {880, 887, "phaser"},   // 0x0370 -> 0x0377
+        {896, 902, "flanger"},  // 0x0380 -> 0x0386
+    };
+    for (const auto& u : kFxOn) {
+      runQueryNoError(
+          "patch_param",
+          QString("INSERT INTO patch_param(patch_id, param_id, value) "
+                  "SELECT patch_id, %1, 1.0 FROM patch_param "
+                  "WHERE param_id = %2 AND value > 0 AND patch_id NOT IN "
+                  "(SELECT patch_id FROM patch_param WHERE param_id = %1)")
+              .arg(QString::number(u.on), QString::number(u.mix)));
+    }
+  }
+
   // Stamp the schema version only AFTER any migrations above ran.
   if (dbSchemaVersion == 0) {
     runQueryNoError("setting",

@@ -1,7 +1,12 @@
 idf_component_register(
-    SRCS "fx.cpp"
+    SRCS "fx.cpp" "fx_reverb_wet.cpp"
     INCLUDE_DIRS "include"
-    REQUIRES synth_core
+    # fx_gpl always registers but contributes no object files unless
+    # CONFIG_OSYNTH_FX_GPL is set, so naming it here is free on an MIT
+    # build and is what makes fx_gpl.h reachable on a GPL one. It cannot
+    # cycle the way the PRIV_REQUIRES below does: fx_gpl depends only on
+    # synth_core.
+    REQUIRES synth_core fx_gpl
     # S34. drums:  the compressor's sidechain key reads which slot sounded.
     #      seqarp: the live tempo, for note-division delay and LFO rates.
     # Private on both counts — nothing in fx.h exposes either.

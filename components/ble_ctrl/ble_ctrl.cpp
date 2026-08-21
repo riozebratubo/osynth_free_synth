@@ -39,6 +39,7 @@ static const char* TAG = "ble_ctrl";
 #include <cstring>
 
 #include "esp_heap_caps.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -65,12 +66,14 @@ static const char* TAG = "ble_ctrl";
 #endif
 #include "looper.h"
 #include "midi.h"
+#include "persist.h"
 #include "presets.h"
 #include "seq_model.h"
 #include "seq_play.h"
 #include "seqarp.h"
 #include "synth_params.h"
 #include "synth_voice.h"
+#include "usb_host_midi.h"
 
 using osynth::ParamDesc;
 using osynth::ParamOrigin;
@@ -101,6 +104,15 @@ enum : uint8_t {
     OP_LIST_PRESETS = 0x07,
     OP_RENAME_PRESET = 0x08, /* reserved in v1 */
     OP_BULK = 0x09,          /* reserved in v1 */
+    /* USB role (S35). Two opcodes, not a parameter listener, on purpose: the
+     * role *is* an ordinary parameter (`usb.mode`, persisted like any other),
+     * but restarting the synth must never be a side effect of writing one.
+     * SET_PARAM is the path a preset load, a bulk value sweep and a knob drag
+     * all take, and any of those touching a self-rebooting parameter would
+     * restart the instrument mid-performance. So the write only persists the
+     * choice, and this asks for it to be applied. */
+    OP_USB_STATUS = 0x0A,
+    OP_REBOOT = 0x0B,
     OP_TRANSPORT = 0x10,
     OP_ARP = 0x11,
     OP_NOTE_ON = 0x20,
@@ -292,20 +304,27 @@ size_t avail_payload() {
  * one parses standalone. ble_cmd task only. */
 class Chunker {
 public:
+    /* `paced` waits for an mbuf instead of failing (send_frame_paced), for a
+     * response whose partial loss the *client* cannot detect. It blocks, so it
+     * is only legal from ble_cmd — which is where every command handler runs.
+     * Default off: an event must never park the flush task. */
     void begin(uint8_t first_byte, uint8_t seq, const uint8_t* prefix,
-               size_t prefix_len, bool suppress_empty) {
+               size_t prefix_len, bool suppress_empty, bool paced = false) {
         first_ = first_byte;
         seq_ = seq;
         prefix_len_ = prefix_len;
         suppress_empty_ = suppress_empty;
+        paced_ = paced;
         if (prefix_len > 0) memcpy(prefix_, prefix, prefix_len);
         fill_ = 0;
         failed_ = false;
     }
 
-    /* True if any frame of this response could not be sent. Only the event
-     * path acts on it — a dropped *response* is the app's to retry, but a
-     * dropped *event* is gone for good unless the sender re-arms it. */
+    /* True if any frame of this response could not be sent. The event path acts
+     * on it because a dropped *event* is gone for good unless the sender
+     * re-arms it, and the PARAM_INFO id list acts on it because a dropped frame
+     * there is undetectable by the client (see that call site). For every other
+     * response a loss is the app's to notice and re-request. */
     bool failed() const { return failed_; }
     void append(const void* rec, size_t len) {
         if (fill_ + len > cap()) {
@@ -335,7 +354,10 @@ private:
         wr16(s_tx + 2, (uint16_t)(1 + prefix_len_ + fill_));
         s_tx[4] = more ? (uint8_t)(ST_OK | ST_MORE) : (uint8_t)ST_OK;
         if (prefix_len_ > 0) memcpy(s_tx + 5, prefix_, prefix_len_);
-        if (!send_frame(s_tx, 4 + 1 + prefix_len_ + fill_)) failed_ = true;
+        const size_t len = 4 + 1 + prefix_len_ + fill_;
+        const bool ok =
+            paced_ ? send_frame_paced(s_tx, len) : send_frame(s_tx, len);
+        if (!ok) failed_ = true;
         fill_ = 0;
     }
 
@@ -346,6 +368,7 @@ private:
     uint8_t prefix_[8] = {};
     size_t prefix_len_ = 0, fill_ = 0;
     bool suppress_empty_ = false;
+    bool paced_ = false;
 };
 
 Chunker s_chunker;
@@ -402,14 +425,34 @@ void handle_param_info(uint8_t seq, const uint8_t* p, uint16_t plen) {
         const synth_engine_t* e = engines_get(eng);
         const uint8_t prefix[2] = {(uint8_t)eng,
                                    (uint8_t)(e != nullptr ? e->caps : 0)};
-        s_chunker.begin(OP_PARAM_INFO | 0x80, seq, prefix, sizeof(prefix),
-                        false);
+        /* Paced, unlike every other response here, because this is the one the
+         * client cannot repair. The others are recoverable by re-asking: a lost
+         * preset or sequencer frame leaves a page short and the app re-requests
+         * it. The id list is what tells the app *which parameters exist* — and
+         * the app ends the list on the frame without the continuation bit, so a
+         * lost middle frame is not short, it is invisible. Those ids are then
+         * never registered, never requested, and never missed, for the life of
+         * the connection: the symptom is a whole feature reported absent (the
+         * looper page's "parameters were not received") on a synth that
+         * registered it perfectly well. Waiting for an mbuf costs a few ms on a
+         * congested link and removes the failure mode. */
+        s_chunker.begin(OP_PARAM_INFO | 0x80, seq, prefix, sizeof(prefix), false,
+                        /*paced=*/true);
         for (size_t i = 0; i < n; ++i) {
             uint8_t rec[2];
             wr16(rec, ids[i]);
             s_chunker.append(rec, sizeof(rec));
         }
         s_chunker.finish();
+        /* Pacing waits out congestion but not a dropped link, so this can still
+         * fail. Logged loudly because the app has no way to tell: it will carry
+         * on with a short list and quietly hide whatever was in the lost frame. */
+        if (s_chunker.failed()) {
+            ESP_LOGE(TAG,
+                     "id list (%u ids) could not be sent in full — the app's "
+                     "parameter list is incomplete and it cannot detect that",
+                     (unsigned)n);
+        }
         return;
     }
 
@@ -431,6 +474,31 @@ void handle_param_info(uint8_t seq, const uint8_t* p, uint16_t plen) {
     /* header + status + id + type + curve + enum_count + min/max/def */
     constexpr size_t kFixedLen = 5 + 2 + 1 + 1 + 1 + 4 + 4 + 4;
     if (kFixedLen > limit) {
+        send_status(OP_PARAM_INFO, seq, ST_UNSUPPORTED);
+        return;
+    }
+    /* The *name* has to fit too, and this is a refusal rather than a partial
+     * answer for the same reason the header check above is one.
+     *
+     * The copy below drops the name when it does not fit and then sends ST_OK
+     * regardless, which hands the client a parameter with no name and no way to
+     * learn that one was withheld. An app that resolves controls by name — the
+     * osynth app does, paramIdForName() — records the metadata as *known*, finds
+     * no match, and reports the whole feature absent; the looper page's "not
+     * received" is that, and it survives for the life of the connection because
+     * nothing looks wrong to either side. Enum labels are different and stay
+     * best-effort below: a control with no labels still works, one with no name
+     * cannot be found at all.
+     *
+     * Costs a client on a sub-35-byte MTU the metadata it was already only
+     * half-getting, and gives it a status it can act on. */
+    const size_t name_len = strlen(d->name) + 1;
+    if (kFixedLen + name_len > limit) {
+        ESP_LOGW(TAG,
+                 "param 0x%04x (%s): MTU too small for the name (need %u, have "
+                 "%u) — refusing rather than answering nameless",
+                 d->id, d->name, (unsigned)(kFixedLen + name_len),
+                 (unsigned)limit);
         send_status(OP_PARAM_INFO, seq, ST_UNSUPPORTED);
         return;
     }
@@ -493,6 +561,70 @@ void handle_list_presets(uint8_t seq, const uint8_t* p, uint16_t plen) {
         s_chunker.append(rec, sizeof(rec));
     }
     s_chunker.finish();
+}
+
+/* USB role and what is plugged into it (S35).
+ *
+ * `active` is the role the port is actually in; `requested` is what
+ * `usb.mode` says it should be. They differ exactly between a write and the
+ * restart that applies it, which is what lets the app show "restart to
+ * apply" without keeping that state itself — a truth the synth can always
+ * answer beats one the app has to remember across a reconnect.
+ *
+ * `supported` is the build capability. False means the control is not offered
+ * at all: either no USB-OTG on this target, or the USB sink is the audio
+ * clock and giving up the device role would leave the synth silent. */
+void handle_usb_status(uint8_t seq) {
+    usb_host_midi_info_t info;
+    usb_host_midi_get_info(&info);
+
+    const bool supported = usb_mode_host_supported();
+    /* Unregistered on a build without the capability, and ParamStore::get()
+     * answers 0.0f for an unknown id — which is device, the right answer. */
+    const uint8_t requested =
+        ParamStore::instance().get(osynth::PID_USB_MODE) >= 0.5f ? 1 : 0;
+
+    uint8_t f[5 + 8 + sizeof(info.product)] = {(uint8_t)(OP_USB_STATUS | 0x80),
+                                               seq, 0, 0, ST_OK};
+    size_t n = 5;
+    f[n++] = (uint8_t)usb_mode_active();
+    f[n++] = requested;
+    f[n++] = supported ? 1 : 0;
+    f[n++] = info.attached;
+    wr16(f + n, info.vid);
+    n += 2;
+    wr16(f + n, info.pid);
+    n += 2;
+    const size_t plen = strlen(info.product);
+    memcpy(f + n, info.product, plen);
+    n += plen;
+    f[n++] = 0; /* NUL, so the app's cstr() reader terminates */
+
+    wr16(f + 2, (uint16_t)(n - 4));
+    send_frame(f, n);
+}
+
+/* Applies a pending role change by restarting.
+ *
+ * persist_save_now() first, and not optionally: the writer coalesces and then
+ * waits for the output to go quiet before touching flash (persist.h), so a
+ * `usb.mode` written a second ago is still only marked dirty. Rebooting
+ * without flushing would discard exactly the setting this restart exists to
+ * apply — and the header names this case as the reason the call is public.
+ *
+ * The delay is what gets the response out of the door. It runs on the
+ * ble_cmd task, so it stalls nothing that matters, and the synth is a
+ * quarter-second from gone in any case. */
+void handle_reboot(uint8_t seq) {
+    send_status(OP_REBOOT, seq, ST_OK);
+    const esp_err_t err = persist_save_now();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "persist flush before reboot failed: %s",
+                 esp_err_to_name(err));
+    }
+    ESP_LOGI(TAG, "restarting on app request");
+    vTaskDelay(pdMS_TO_TICKS(250));
+    esp_restart();
 }
 
 void handle_transport(uint8_t seq, const uint8_t* p, uint16_t plen) {
@@ -1308,6 +1440,16 @@ void handle_frame(const uint8_t* d, size_t n) {
             break;
         case OP_LIST_PRESETS:
             handle_list_presets(seq, p, plen);
+            break;
+        case OP_USB_STATUS:
+            handle_usb_status(seq);
+            break;
+        case OP_REBOOT:
+            /* No payload, and deliberately no "are you sure" byte: the
+             * confirmation belongs in the app, where there is a user to ask.
+             * A magic number here would only be ceremony on a link that
+             * already needs a paired connection to reach. */
+            handle_reboot(seq);
             break;
         case OP_TRANSPORT:
             handle_transport(seq, p, plen);

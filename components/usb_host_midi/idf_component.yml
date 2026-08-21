@@ -1,0 +1,13 @@
+## usb_host_midi — IDF's USB Host Library (S35). Since ESP-IDF 6.0 it is no
+## longer a core `usb` component but a managed one, `espressif/usb`, which is
+## what the framework's own usb_host_lib example depends on. The CMake
+## requirement name is therefore `espressif__usb`, not `usb`.
+##
+## The classic ESP32 has no USB-OTG hardware, so the dependency is skipped
+## there and only the stubs in usb_host_midi.c compile — the same rule usb_dev
+## uses for TinyUSB.
+dependencies:
+  espressif/usb:
+    version: "^1.0.0"
+    rules:
+      - if: target in [esp32s3, esp32p4]

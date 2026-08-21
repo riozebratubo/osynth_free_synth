@@ -111,6 +111,21 @@ class BluetoothManager : public IBluetoothManager {
 
   // Cached connection state, so the QML accessors never call into SimpleBLE.
   // The strings ride m_handleMutex with the handles they describe.
+  // PARKED — desktop/SimpleBLE counterpart of the Android link-loss fix in
+  // bluetoothmanager.cpp (handleLinkLost). Not enabled because the bug was
+  // only reproduced on Android and this backend was not retested; keep it
+  // together with the two commented blocks in bluetoothmanager2.cpp if the
+  // desktop build ever shows the same "still connected after the adapter is
+  // switched off" symptom.
+  //
+  // Set by SimpleBLE's on_disconnected callback, cleared before each keep-alive
+  // loop. The loop's own peripheral.is_connected() poll is not reliable on every
+  // backend — with the adapter switched off mid-session the Windows one can keep
+  // reporting a cached `true`, so the loop parks forever and the app never
+  // publishes connectedChanged(false). The callback does fire in that case, so
+  // it is the authoritative signal; it just cannot do the teardown itself
+  // (wrong thread), hence a flag the loop reads.
+  // std::atomic<bool> m_peripheralDropped{false};
   std::atomic<bool> m_connectedCache{false};
   std::atomic<int> m_mtu{0};
   QString m_deviceNameCache;

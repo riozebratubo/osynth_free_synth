@@ -1,0 +1,16 @@
+# Reference only, for codec_es8311.cpp — **not linked against**, and deleted
+# once that file's register table is confirmed.
+#
+# Espressif's own ES8311 driver is where this project's table came from, and
+# deleting this manifest too early already cost a round trip: the analogue bias
+# registers (REG10/REG11) were missing from the transcription, the chip held
+# every value it was given and converted silence, and by the time the register
+# dump proved that the source was no longer on disk to check against.
+#
+# So it stays until codec_es8311.cpp's sequence has been verified line by line
+# against device/es8311/es8311.c — specifically the head of es8311_open(),
+# which writes the clock manager and the analogue reference *before* REG00
+# leaves reset. Then delete it: an unused dependency on a build this size is
+# not free, and this component links none of it.
+dependencies:
+  espressif/esp_codec_dev: "^1.3.4"

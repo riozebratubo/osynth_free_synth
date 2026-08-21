@@ -552,6 +552,7 @@ ApplicationWindow {
                 GraphScreen {}
                 PresetsScreen {}
                 PatchLibraryScreen {}
+                OsynthScreen {}
             }
 
             // The bottom performance strip: drum pads on the left, keyboard

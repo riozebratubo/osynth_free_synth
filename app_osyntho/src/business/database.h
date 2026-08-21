@@ -65,7 +65,9 @@ class Database : public IDatabase {
   // The schema version this build migrates databases to. Public (together with
   // getSchemaVersion) so tests can assert a DB ends up stamped at it after the
   // create/migrate pass.
-  static constexpr unsigned int currentSchemaVersion = 1;
+  // 2 (S36): back-fills the per-effect enable switches into patches saved
+  // before they existed. See the migration in Database::createTables().
+  static constexpr unsigned int currentSchemaVersion = 2;
   // Version recorded in the DB's schema_version table (0 = none/pre-versioning).
   // Stamped at the END of the create/migrate pass, so a migration interrupted
   // mid-way keeps the old version recorded and is retried on the next open.

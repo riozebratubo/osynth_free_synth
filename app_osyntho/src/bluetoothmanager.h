@@ -69,6 +69,12 @@ class BluetoothManager : public IBluetoothManager {
 
   void setIsConnected(bool is);
   void teardownConnection();
+  // Declares a link we believed was up to be gone, from a signal that is not
+  // QLowEnergyController::disconnected. Android does not reliably emit that one
+  // when the adapter is switched off or the peer vanishes, so without this the
+  // app stays "connected" forever over a dead GATT link. Safe to call from
+  // inside a QLowEnergyService handler: the teardown is deferred.
+  void handleLinkLost(const QString& why);
   // Called once the osynth service's details are discovered: reads INFO, enables
   // EVT notifications, then announces the connection.
   void onServiceDetailsDiscovered();
@@ -117,6 +123,10 @@ class BluetoothManager : public IBluetoothManager {
   QBluetoothAddress t_deviceAddress;
   QBluetoothDeviceInfo t_remoteDeviceInfo;
   bool m_isConnected;
+  // Consecutive CharacteristicWriteErrors with no write succeeding in between.
+  // One is ordinary (a refused frame on a busy link); a run of them means the
+  // link is dead and Android has not said so. Reset by characteristicWritten.
+  int m_consecutiveWriteErrors = 0;
 
   // False until initializeBt() succeeds; finish() resets it so pending
   // singleShot scan/discover steps go quiet.

@@ -83,6 +83,18 @@ void BluetoothManager::initializeBt() {
   if (btAllowed) {
     if (localDevice != nullptr) localDevice->deleteLater();
     localDevice = new QBluetoothLocalDevice{};
+    // The adapter being switched off is the one disconnect cause with an
+    // unambiguous signal, and it is exactly the case QLowEnergyController stays
+    // quiet about on Android: no disconnected(), no useful error, just writes
+    // that fail from then on. Catching it here means the app gives up the link
+    // at once instead of waiting for the write-error run below to notice.
+    connect(localDevice, &QBluetoothLocalDevice::hostModeStateChanged, this,
+            [this](QBluetoothLocalDevice::HostMode mode) {
+              qDebug() << "bt | Host mode:" << mode;
+              if (mode == QBluetoothLocalDevice::HostPoweredOff) {
+                handleLinkLost(QStringLiteral("adapter powered off"));
+              }
+            });
   }
   qDebug() << "bt | Bt available: " << localDevice->isValid()
            << " allowed: " << btAllowed;
@@ -375,6 +387,23 @@ void BluetoothManager::teardownConnection() {
   }
 }
 
+void BluetoothManager::handleLinkLost(const QString& why) {
+  if (not m_isConnected) return;
+  qWarning() << "bt | Link lost:" << why << "— dropping the connection";
+  m_consecutiveWriteErrors = 0;
+  // Publish first: SynthController::setConnected(false) is what resets its link
+  // state, and it early-returns on an unchanged value — so a reconnection that
+  // is never preceded by a false skips every reset and reuses stale discovery
+  // state for the life of the session.
+  setIsConnected(false);
+  // Deferred, because this can run from inside a QLowEnergyService signal and
+  // teardownConnection() deletes that service.
+  QTimer::singleShot(0, this, [this]() {
+    teardownConnection();
+    idleAction();
+  });
+}
+
 void BluetoothManager::discover(QString deviceAddress) {
   qDebug() << "bt | Discover: " << deviceAddress;
 
@@ -449,6 +478,9 @@ void BluetoothManager::discover(QString deviceAddress) {
             // advance on its watchdog.
             connect(service, &QLowEnergyService::characteristicWritten, this,
                     [this](const QLowEnergyCharacteristic& c, const QByteArray&) {
+                      // A write got through, so the run of failures below (if
+                      // any) was congestion rather than a dead link.
+                      m_consecutiveWriteErrors = 0;
                       if (c.uuid() == ctrlUuid) onWriteSettled();
                     });
 
@@ -463,6 +495,21 @@ void BluetoothManager::discover(QString deviceAddress) {
                         // it still goes out — the controller retries what
                         // matters off the BUSY/timeout paths it already has.
                         onWriteSettled();
+                        // A run of these with nothing succeeding in between is
+                        // the only notice Android gives that a GATT link has
+                        // died: switch the adapter off mid-session and
+                        // QLowEnergyController emits neither disconnected() nor
+                        // a usable error, so m_isConnected stayed true and every
+                        // periodic write failed forever. The osynth page's 3 s
+                        // usb.status poll turned that into the visible loop.
+                        // Three strikes rather than one, so an ordinary refused
+                        // frame on a busy link does not drop a good connection.
+                        constexpr int kWriteErrorsMeanDead = 3;
+                        if (++m_consecutiveWriteErrors >= kWriteErrorsMeanDead) {
+                          handleLinkLost(
+                              QStringLiteral("%1 consecutive write errors")
+                                  .arg(m_consecutiveWriteErrors));
+                        }
                       }
                     });
 

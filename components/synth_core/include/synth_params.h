@@ -55,6 +55,29 @@ constexpr uint16_t PID_LINE_IN_PGA   = 0x000A;
  * down for headphones; master.volume stays the digital control the player
  * actually rides. */
 constexpr uint16_t PID_OUT_LEVEL     = 0x000B;
+/* Which role the USB-OTG port takes at boot (S35): 0 = device (audio + MIDI
+ * to a computer), 1 = host (drives a USB MIDI controller). Registered only on
+ * builds where both roles are reachable — see SYNTH_ENABLE_USB_HOST — so on a
+ * build where USB is the audio clock the app never offers a control that
+ * would silence the synth. Persisted, and read back at the next boot: the two
+ * roles cannot share the one port, so a change needs a restart. */
+constexpr uint16_t PID_USB_MODE      = 0x000C;
+/* Which device feeds the one input chain (S37): 0 = line, 1 = mic. Registered
+ * only on a build that has both compiled in — see SYNTH_ENABLE_IN_SOURCE_SEL.
+ *
+ * Persisted alongside the route and the trim, and for the same reason: it
+ * describes what is plugged into the box, not what patch is loaded. Presets
+ * skip it, so its default is what every existing patch keeps meaning — and
+ * that default is `line`, which is the source every build before this one
+ * had. */
+constexpr uint16_t PID_LINE_IN_SOURCE = 0x000D;
+/* Level trim for the microphone alone (S37b), so `both` is usable: a line
+ * source arrives at whatever the ADC was set up to take, a MEMS mic at
+ * conversational distance arrives far below full scale, and one shared
+ * `in.gain` across the pair is a control that is wrong for one of them
+ * whichever way it is set. Registered on the same condition as the selector,
+ * since with one device `in.gain` already is the trim. */
+constexpr uint16_t PID_LINE_IN_MICGAIN = 0x000E;
 
 /* Engine-common parameters (0x01xx) — registered by the voice manager,
  * meaningful for every engine. C code uses the SYNTH_PID_* mirrors in
@@ -96,8 +119,10 @@ public:
      * widest fixed engine registers 30. With the drum bus (71), the
      * sequencer, the FX bus, the matrix and the looper all resident, a full
      * graph lands near 270 — 323 since S34, which added 53 to the FX bus
-     * (six units, note-division sync and two LFOs), and 326 since S35 added
-     * the three FX level-compensation switches. Raised from 384 to 448 in
+     * (six units, note-division sync and two LFOs), 326 since S35 added
+     * the three FX level-compensation switches, and 340 since S36 added the
+     * eight per-effect enable switches plus the reverb's algorithm selector
+     * and its five shared stages. Raised from 384 to 448 in
      * S34 to keep the margin that number was chosen for, because
      * overflow is per-parameter and partial — a patch would come up with some
      * of a node's controls missing rather than failing outright, which is a

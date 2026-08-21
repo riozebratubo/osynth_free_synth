@@ -15,6 +15,15 @@
  * On a discrete build every function here is a no-op that returns ESP_OK, so
  * the call in main.cpp needs no #if.
  *
+ * S37c — the ES8311 is a known gap, not an oversight. The ESP32-P4 carrier's
+ * on-board microphone is an *analogue* mic into an ES8311's PGA at I2C 0x18,
+ * so it needs exactly what the ES8388 needs and gets none of it here: this
+ * component drives one chip. codec_es8311.cpp closes that gap, and osynth
+ * clocks the mic's I2S pins for it (DIN 48, BCLK 12, WS 10, MCLK 13 — see
+ * sdkconfig.defaults.esp32p4). The external-mic path
+ * (OSYNTH_MIC_SHARE_CLOCKS, a digital MEMS part) needs none of this and is
+ * proven working.
+ *
  * Ordering: OPEN QUESTION, currently back to the original — codec_init() runs
  * *after* audio_io_start(), with the port and MCLK already up.
  *
@@ -133,6 +142,43 @@ esp_err_t codec_init(void);
 /* "none" on a discrete front end, "es8388" once up, "es8388?" if the chip was
  * expected but never answered. Never NULL, valid before init. */
 const char* codec_name(void);
+
+/* Where codec_mic_init() sits relative to audio_io_start(), and note that this
+ * is a *different question* from OSYNTH_CODEC_INIT_BEFORE_I2S above rather
+ * than the same one applied twice.
+ *
+ *   0 — after the port, MCLK running. The default, and what every reference
+ *       driver does: the ES8311's clock manager is configured from the MCLK
+ *       pin, so writing that configuration before the clock exists leaves the
+ *       chip to reach its operating point afterwards rather than under the
+ *       writes that set it. The symptom is a clean init log and a converter
+ *       producing silence — which is exactly where this landed on the first
+ *       attempt, when the call sat next to codec_init() and the P4's
+ *       BEFORE_I2S branch put the port start in between.
+ *   1 — before the port. Try this if the *control bus* refuses the table here,
+ *       which is the failure OSYNTH_CODEC_INIT_BEFORE_I2S exists for on this
+ *       board. The two switches pull in opposite directions on purpose: that
+ *       one is about a bus going deaf while the main port clocks pins next to
+ *       it, this one is about a converter needing its clock. If both turn out
+ *       to be true at once the answer is a bus retry, not an ordering.
+ */
+#define OSYNTH_ES8311_INIT_BEFORE_I2S 0
+
+/* Brings up the *microphone* codec (S37c) — an ES8311 whose ADC is the only
+ * path to a board's on-board analogue mic. ADC only: its DAC is powered down
+ * and audio output stays entirely with the ES8388 on the other port.
+ *
+ * Call after audio_io_start(), so the mic port is driving MCLK — see
+ * OSYNTH_ES8311_INIT_BEFORE_I2S above.
+ *
+ * Returns ESP_ERR_NOT_FOUND when nothing answers at 0x18, which means a board
+ * without such a codec rather than a fault. A no-op returning ESP_OK on builds
+ * with no on-board mic codec, so the call site needs no #if. */
+esp_err_t codec_mic_init(void);
+
+/* "none", "es8311" once up, or "es8311?" if it was expected and never
+ * answered. Never NULL, valid before init. */
+const char* codec_mic_name(void);
 
 #ifdef __cplusplus
 }

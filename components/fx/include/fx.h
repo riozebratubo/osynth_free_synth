@@ -27,9 +27,36 @@ extern "C" {
  * Each unit owns a 16-id block and appends inside it. That is not tidiness:
  * ids are the on-wire form for presets and NRPN, so a unit that outgrows its
  * block takes the next free one rather than pushing its neighbour along. */
+/* Per-unit enable switches (S36).
+ *
+ * Every unit already skipped itself when fully dry, so this is not a CPU
+ * feature — it is the missing *bypass*. Before it, auditioning a patch
+ * without its reverb meant winding `mix` to zero and losing the setting you
+ * were comparing against; the switch is the A/B that mix cannot be.
+ *
+ * The switch gates the mix rather than replacing it: the unit runs only when
+ * `on` is set AND `mix` is above zero, so a unit left at mix 0 still costs
+ * nothing whatever the switch says. Both directions ramp through the same
+ * unit_gate() smoother, so toggling crossfades instead of stepping.
+ *
+ * Off by default, which is why S36 also bumps the preset file version: a
+ * sparse .osp stores only non-defaults, so "no `on` pair" cannot otherwise be
+ * told apart from "deliberately bypassed". Files written before the bump are
+ * migrated on load — see presets.cpp's legacy_fx_enable().
+ *
+ * The three units that already had a switch (filter, EQ, compressor) keep it
+ * and gain nothing here: theirs has always been the gate, and a second one
+ * would be two controls for one decision.
+ *
+ * `fx.st` is deliberately absent. It is the master output stage, not an
+ * effect — `fx.st.amp` and `fx.st.pan` live there — so a bypass would mute
+ * the instrument rather than remove an effect. Its own neutral-value check
+ * already skips the stereo work when nothing is asked of it. */
+#define FX_PID_CHO_ON    0x0303
 #define FX_PID_CHO_MIX   0x0300
 #define FX_PID_CHO_RATE  0x0301
 #define FX_PID_CHO_DEPTH 0x0302
+#define FX_PID_DLY_ON    0x0317
 #define FX_PID_DLY_MIX   0x0310
 #define FX_PID_DLY_TIME  0x0311
 #define FX_PID_DLY_FB    0x0312
@@ -45,10 +72,49 @@ extern "C" {
  * the sound of every patch that uses the unit, and a preset saved before S35
  * has to load and sound exactly as it did. */
 #define FX_PID_DLY_COMP  0x0316
+#define FX_PID_REV_ON    0x0324
 #define FX_PID_REV_MIX   0x0320
 #define FX_PID_REV_SIZE  0x0321
 #define FX_PID_REV_DAMP  0x0322
 #define FX_PID_REV_COMP  0x0323
+
+/* Reverb algorithm (S36). Four topologies behind one unit, because they are
+ * four answers to the same question and nobody wants two of them at once:
+ * one set of lines, one CPU cost, whichever is selected.
+ *
+ * 0 `freeverb`  — the original 8-comb/4-allpass Schroeder bus. Its path is
+ *                 byte-identical to pre-S36, which is what lets every saved
+ *                 patch keep its sound: entry 0 is not a favourite, it is the
+ *                 backward-compatibility contract, so this enum is
+ *                 append-only and 0 never moves.
+ * 1 `wetreverb` — Yonie's WET Reverb, a half-rate Schroeder bank with a
+ *                 tapped early-reflection field and 80s digital character.
+ * 2 `mverb`     — Martin Eastwood's MVerb, a Dattorro figure-of-eight plate.
+ * 3 `duskverb`  — Dusk Audio's DuskVerb "Plate": a Dattorro tank with a
+ *                 density cascade in each loop.
+ *
+ * 2 and 3 are GPL-3 and are compiled in only under CONFIG_OSYNTH_FX_GPL
+ * (see components/fx_gpl); 0 and 1 are MIT and always present. That is why
+ * the two GPL entries are last and not in licence-blind alphabetical order:
+ * an enum's index *is* its stored value, so compiling a middle entry out
+ * would renumber the tail and quietly change what every saved patch means.
+ * Dropping them off the end instead leaves 0 and 1 meaning what they always
+ * did, and a patch asking for 2 or 3 on an MIT build clamps to 1 — a reverb
+ * that is at least still a reverb.
+ *
+ * The five parameters below are the shared front and back of the unit, run
+ * outside whichever algorithm is selected. All five are exact no-ops at
+ * their defaults, so they cost nothing and change nothing until moved —
+ * again, for the sake of patches saved before S36. */
+#define FX_PID_REV_ALGO  0x0325
+#define FX_PID_REV_PRE   0x0326
+#define FX_PID_REV_TONE  0x0327
+#define FX_PID_REV_WIDTH 0x0328
+/* Algorithm-specific; freeverb has no diffusion or early field to control
+ * and ignores both. */
+#define FX_PID_REV_DIFF  0x0329
+#define FX_PID_REV_EARLY 0x032A
+#define FX_PID_GRN_ON    0x0337
 #define FX_PID_GRN_MIX   0x0330
 #define FX_PID_GRN_SIZE  0x0331
 #define FX_PID_GRN_DENS  0x0332
@@ -56,6 +122,7 @@ extern "C" {
 #define FX_PID_GRN_FB    0x0334
 #define FX_PID_GRN_SPRAY 0x0335
 #define FX_PID_GRN_COMP  0x0336
+#define FX_PID_CRUSH_ON   0x0343
 #define FX_PID_CRUSH_MIX  0x0340
 #define FX_PID_CRUSH_BITS 0x0341
 #define FX_PID_CRUSH_DOWN 0x0342
@@ -76,6 +143,7 @@ extern "C" {
  * First in the chain: dirt belongs before the time effects, for the same
  * reason the master filter is last (a distorted reverb tail reads as a
  * mistake, a reverb on a distorted source reads as an effect). */
+#define FX_PID_DRV_ON    0x0365
 #define FX_PID_DRV_MIX   0x0360
 #define FX_PID_DRV_MODE  0x0361
 #define FX_PID_DRV_DRIVE 0x0362
@@ -85,6 +153,7 @@ extern "C" {
 /* phaser (S34) — a chain of first-order allpasses swept by an LFO. No delay
  * line at all, which is what makes it a different effect from the chorus and
  * not a preset of it. */
+#define FX_PID_PHS_ON     0x0377
 #define FX_PID_PHS_MIX    0x0370
 #define FX_PID_PHS_STAGES 0x0371
 #define FX_PID_PHS_RATE   0x0372
@@ -95,6 +164,7 @@ extern "C" {
 
 /* flanger (S34) — a short modulated delay with feedback. Signed feedback:
  * negative inverts the comb, which is the hollow half of the sound. */
+#define FX_PID_FLG_ON     0x0386
 #define FX_PID_FLG_MIX    0x0380
 #define FX_PID_FLG_RATE   0x0381
 #define FX_PID_FLG_DEPTH  0x0382

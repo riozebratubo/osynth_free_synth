@@ -61,6 +61,16 @@ constexpr int kDiscoveryBudgetMs = 40000;  // overall safety cap
 // shorter: a top-up is a node's worth of ids on an otherwise idle link, not a
 // whole registry competing with a connect burst.
 constexpr int kInfoTopUpBudgetMs = 5000;
+
+// Waiting out a deliberate restart (S35). The synth is gone for a second or
+// two on the S3; on the P4 the BLE controller lives on a companion chip and
+// the ESP-Hosted link has to come up before NimBLE does, so the wait is
+// several times longer. 45 s is generous against both, and the cost of being
+// generous is only how long the page says "restarting…" before admitting it
+// does not know — against re-scan, re-connect and re-discovery all having to
+// land inside it.
+constexpr int kRestartPollMs = 1000;
+constexpr int kRestartTimeoutMs = 45000;
 // How long a seq.rev change settles before the app re-reads. Recording live
 // bumps the revision once per note, and each re-read is a sequencer refresh —
 // so this is the trade between how quickly a recorded step appears and how much
@@ -218,6 +228,31 @@ SynthController::SynthController(QObject* parent) : QObject(parent) {
   m_infoRequestTimer.setSingleShot(false);
   m_infoRequestTimer.setInterval(kInfoPumpIntervalMs);
   connect(&m_infoRequestTimer, &QTimer::timeout, this, &SynthController::pumpInfoRequests);
+
+  // Restart watch (S35). The BluetoothManager already rescans and reconnects
+  // on its own whenever the link is down (idleAction), so this does not drive
+  // the reconnection — it only keeps the page's "restarting…" state honest and
+  // gives up after a while rather than showing it forever. Once the link is
+  // back, the poll is what proves the synth is answering again, not merely
+  // connected.
+  m_restartTimer.setSingleShot(false);
+  m_restartTimer.setInterval(kRestartPollMs);
+  connect(&m_restartTimer, &QTimer::timeout, this, [this]() {
+    if (!m_restarting) {
+      m_restartTimer.stop();
+      return;
+    }
+    if (nowMs() > m_restartDeadlineMs) {
+      m_restartTimer.stop();
+      m_restarting = false;
+      emit restartingChanged();
+      emit restartTimedOut();
+      return;
+    }
+    // Only worth asking once there is a link to ask over; otherwise wait for
+    // the manager to find the synth again.
+    if (m_connected) refreshUsbStatus();
+  });
 
   m_followPatternTimer.setSingleShot(true);
   m_followPatternTimer.setInterval(kFollowPatternMs);
@@ -408,8 +443,23 @@ void SynthController::setConnected(bool connected) {
     // The manager emits connectedChanged AFTER subscribing to EVT and reading
     // INFO, so it is safe to talk now. The EVT_ENGINE greeting normally kicks
     // discovery; this is a fallback in case it was missed.
+    //
+    // It also covers the greeting that was *not* missed but arrived too early.
+    // Subscribing is what makes the firmware send it, and that happens before
+    // this runs, so a greeting-started pass can already be underway when the
+    // resetState() above wipes m_awaitingInfoList and stops the list watchdog.
+    // Its list response is then unroutable (handleFrame matches on
+    // m_awaitingInfoList) and nothing will ask again — this timer is the only
+    // recovery. `m_ready` is the honest test for that: it is set the moment an
+    // id list lands, so "not ready and not discovering" is precisely the
+    // abandoned-pass state, and it does not care what stale ids happen to be in
+    // the map the way `m_paramOrder.isEmpty()` did. A list that arrived but
+    // arrived *short* is a separate, still-open failure: handleParamInfoList()
+    // appends whatever turns up and the final frame ends the list, so a lost
+    // middle continuation is undetectable here and permanent for the session.
+    // The two Discovery log lines are what would show it.
     QTimer::singleShot(300, this, [this]() {
-      if (m_connected && m_paramOrder.isEmpty() && !m_discovering) beginDiscovery();
+      if (m_connected && !m_discovering && !m_ready) beginDiscovery();
     });
   }
 }
@@ -447,6 +497,20 @@ void SynthController::resetState() {
   m_requestRetryQueue.clear();
   m_sentRequests.clear();
   m_sentRequestOrder.clear();
+  // Back to the start of the seq space with the maps that interpret it.
+  //
+  // This is load-bearing, not tidiness. A seq is only meaningful while it is
+  // unique among outstanding requests, and it is a quint8: one discovery pass
+  // costs about one request per parameter — ~250 here, plus the list, the
+  // priority prefetch and two value sweeps — so a pass very nearly spans the
+  // whole space. Carrying the counter across a reconnect moved the wrap from
+  // the harmless end of the walk into the middle of it, and three places
+  // resolve seq -> id and then act destructively on the answer: onInfoBusy(),
+  // onInfoBadArg() (which drops the id from m_pendingInfoIds for good) and the
+  // pump's timeout reap. A repeated seq there abandons a parameter that was
+  // never rejected, with no later pass to notice. That is why discovery worked
+  // on the first connection of an app session and on no other.
+  m_seq = 0;
   // The link is gone, so anything it was holding is released on the synth side
   // too (the firmware runs voice_manager_all_notes_off() on disconnect).
   m_noteOffTimer.stop();
@@ -520,6 +584,47 @@ void SynthController::onInfoRead(const QByteArray& info) {
   emit infoChanged();
 }
 
+/* -------------------------------------------------------------- USB role */
+
+void SynthController::refreshUsbStatus() {
+  if (!m_connected) return;
+  send(OP_USB_STATUS, {}, false);
+}
+
+void SynthController::handleUsbStatus(const QByteArray& payload) {
+  const SynthProto::UsbStatus s = parseUsbStatus(payload);
+  if (!s.valid) {
+    qWarning() << "Synth | USB_STATUS malformed";
+    return;
+  }
+  const bool changed = s.active != m_usb.active || s.requested != m_usb.requested ||
+                       s.supported != m_usb.supported || s.attached != m_usb.attached ||
+                       s.product != m_usb.product || !m_usb.valid;
+  m_usb = s;
+  if (changed) emit usbStatusChanged();
+
+  // An answer is the proof a restart finished: the link being back only means
+  // the radio came up, and on the P4 that happens well before the synth is
+  // serving commands again.
+  if (m_restarting) {
+    m_restartTimer.stop();
+    m_restarting = false;
+    emit restartingChanged();
+  }
+}
+
+void SynthController::restartSynth() {
+  if (!m_connected) return;
+  // withResponse: the ACK is not what drives the state machine (see the
+  // OP_REBOOT case in handleFrame), but an acked write is the one that gets
+  // out before the firmware's 250 ms grace period expires.
+  send(OP_REBOOT, {}, true);
+  m_restarting = true;
+  m_restartDeadlineMs = nowMs() + kRestartTimeoutMs;
+  emit restartingChanged();
+  m_restartTimer.start();
+}
+
 /* ------------------------------------------------------------- discovery */
 
 void SynthController::beginDiscovery(DiscoveryScope scope) {
@@ -591,6 +696,22 @@ void SynthController::onParamListComplete() {
       queueInfoId(id);
     }
   }
+  // How many ids the listing actually delivered. Worth logging because the
+  // chunked list has no frame accounting: handleParamInfoList() appends
+  // whatever arrives, and the *final* frame is what ends the list — so a
+  // dropped middle continuation is invisible here. The ids in it are then
+  // never in m_paramOrder, never in m_pendingInfoIds, and never requested, so
+  // their metadata stays unknown for the whole session with nothing logging a
+  // complaint. Compare this against the firmware's own "registry: N
+  // parameter(s)" at boot; a shortfall is a lost frame, not a lost parameter.
+  //
+  // Pages gated on a single id are where that surfaces first — LooperScreen's
+  // `available` is just loop.mode being known — so name the usual suspect
+  // rather than making the next person cross-reference an id.
+  qDebug() << "Synth | Discovery: id list complete —" << m_infoListAccum.size()
+           << "ids;" << m_pendingInfoIds.size() << "need metadata; loop.mode"
+           << (m_infoListAccum.contains(0x0601) ? "present" : "MISSING");
+
   setEngineCaps(m_infoListEngine, m_infoListCaps);
 
   // Ready as soon as the ids are known: pages render their shells and fill in as
@@ -615,6 +736,11 @@ void SynthController::onParamListComplete() {
   // pump is even primed.
   requestAllParamValues();
 
+  // What the USB port is doing (S35). Asked once per discovery pass rather
+  // than polled: it only changes on a restart or when something is plugged
+  // in, and the osynth page refreshes it itself while it is on screen.
+  refreshUsbStatus();
+
   if (m_pendingInfoIds.isEmpty()) {
     finishDiscovery();
     return;
@@ -638,7 +764,32 @@ void SynthController::queueInfoId(quint16 id) {
 }
 
 void SynthController::sendInfoRequest(quint16 id) {
-  const quint8 seq = nextSeq();
+  quint8 seq = nextSeq();
+  // While a list request is outstanding its seq is reserved. handleFrame()
+  // routes PARAM_INFO by seq and tests the list first, so a per-id request that
+  // drew this value would have its one-parameter payload parsed as an id list —
+  // the failure the comment on that branch describes, which registers a garbage
+  // entry and can declare discovery finished before it started. A wrap is the
+  // only way to draw it, which is exactly why it went unseen.
+  if (m_awaitingInfoList && seq == m_infoListSeq) seq = nextSeq();
+  // The seq space is 255 wide and a registry can approach that in one pass, so
+  // a wrap can hand out a seq an *older* outstanding request is still using.
+  // Inserting over it would silently transfer that request's identity to this
+  // id: the older response then resolves here, and a BUSY or BAD_ARG answer
+  // would retry or abandon the wrong parameter. Resetting the counter per
+  // connection keeps this rare, but "rare" is what made it a bug that only
+  // showed on reconnects — so the collision is handled rather than hoped away.
+  //
+  // The displaced request cannot be routed by seq any more, so its id goes back
+  // on the queue and the window slot it held is released. Its response, if it
+  // ever arrives, is still applied by payload id in handleParamInfoSingle() —
+  // only the flow-control bookkeeping is lost, and re-asking costs one frame.
+  const auto stale = m_infoSeqToId.constFind(seq);
+  if (stale != m_infoSeqToId.constEnd() && stale.value() != id) {
+    const quint16 displaced = stale.value();
+    m_infoInflight.remove(displaced);
+    if (m_pendingInfoIds.contains(displaced)) queueInfoId(displaced);
+  }
   m_infoSeqToId.insert(seq, id);
   m_infoInflight.insert(id, nowMs());
   sendWithSeq(OP_PARAM_INFO, seq, payloadParamInfo(id), false);
@@ -784,6 +935,17 @@ void SynthController::finishDiscovery() {
   m_infoInflight.clear();
   m_infoSeqToId.clear();
   m_infoQueue.clear();
+  // Pairs with the id-list line in onParamListComplete(): that one says what
+  // the listing delivered, this one says what the walk actually resolved. Two
+  // lines per pass is enough to tell a listing problem from a metadata one
+  // without re-running anything — which matters most across a reconnect, where
+  // the first pass of a session behaves differently from the rest.
+  qDebug() << "Synth | Discovery: pass done —"
+           << (m_discoveryScope == DiscoveryScope::EngineParams ? "engine" : "full")
+           << "scope;" << m_paramOrder.size() << "ids known;"
+           << m_pendingInfoIds.size() << "infos unresolved; loop.mode info"
+           << (m_params.value(0x0601).infoKnown ? "known" : "UNKNOWN");
+
   // Also on the budget-spent path, where ids are still outstanding: a pass
   // that gives up must not leave them marked, or the next beginDiscovery()
   // would skip them (see the note there).
@@ -1012,6 +1174,15 @@ void SynthController::handleFrame(const Frame& f) {
     case OP_PING:
       // uptime u32 — informational only.
       break;
+    case OP_USB_STATUS:
+      handleUsbStatus(f.payload);
+      break;
+    case OP_REBOOT:
+      // Acknowledged; the synth is about to go. Nothing to do here — the
+      // disconnect arrives on its own and m_restarting is already set, from
+      // restartSynth() rather than from here, so a lost ACK does not leave
+      // the page thinking nothing happened.
+      break;
     case OP_SEQ_INFO:
       handleSeqInfo(f.payload);
       break;
@@ -1070,6 +1241,18 @@ void SynthController::handleParamInfoList(const QByteArray& payload) {
 void SynthController::handleParamInfoSingle(const QByteArray& payload) {
   const ParamInfo pi = parseParamInfo(payload);
   if (!pi.valid) return;
+  // A nameless answer is not an answer. Firmware before the matching fix drops
+  // the name when the ATT MTU cannot carry it and still reports ST_OK, so
+  // caching this as "known" is what makes a control permanently unfindable:
+  // every lookup goes through paramIdForName() and matches on the name. Leaving
+  // it unknown keeps it in the pending set, so the pump retries it and the pass
+  // reports it as unresolved instead of quietly succeeding.
+  if (pi.name.isEmpty()) {
+    qWarning() << "Synth | PARAM_INFO for id" << Qt::hex << pi.id
+               << "arrived with no name (MTU" << Qt::dec << m_linkMtu
+               << ") — not caching";
+    return;
+  }
   Param& p = m_params[pi.id];
   const bool wasUnknown = !p.infoKnown;
   p.info = pi;
@@ -1180,7 +1363,20 @@ void SynthController::applyValue(quint16 id, float value, bool echo) {
 
 void SynthController::handleEngineEvent(const QByteArray& payload) {
   const EngineEvent e = parseEngineEvent(payload);
+  // Captured before setEngineCaps() moves m_engine: whether this event is a
+  // real engine switch or just the connect greeting is the only honest basis
+  // for the scope decision below, and afterwards it is unrecoverable.
+  const bool switched = (int(e.engine) != m_engine);
   setEngineCaps(e.engine, e.caps);
+
+  // A pass already in progress is this connection's pass, and the greeting is
+  // not news to it. Restarting it here discarded its pending set and its
+  // in-flight window mid-walk; anything not yet resolved was re-queued only
+  // because the replacement pass re-fetches the list, so the cost was a wasted
+  // round trip on a good link and a stranded page on a bad one. A genuine
+  // switch still has to interrupt: setEngineCaps() has just dropped the 0x02xx
+  // infos and only a new pass will fetch them back.
+  if (m_discovering && !switched) return;
   // (Re)discover, but only what the switch actually changed: the 0x02xx map is
   // re-registered per engine, and setEngineCaps() has just dropped the stale
   // half of it. Everything else the synth holds — the pattern data, the kit,
@@ -1188,14 +1384,22 @@ void SynthController::handleEngineEvent(const QByteArray& payload) {
   //
   // Except on the greeting: the firmware announces engine + caps to every fresh
   // subscriber, and *that* EVT_ENGINE is the connect pass (see setConnected,
-  // whose timer is only a fallback for when this one is missed). Whether it
-  // lands before or after the manager publishes the connection is a race, and
-  // on the side where it lands after, an engine-scoped pass skipped the
-  // sequencer, kit, graph and song reads for the whole session — they are
-  // requested from finishDiscovery() only on a full pass. Nothing known yet
-  // means nothing to keep, so read everything.
-  beginDiscovery(m_paramOrder.isEmpty() ? DiscoveryScope::Full
-                                        : DiscoveryScope::EngineParams);
+  // whose timer is only a fallback for when this one is missed). It must read
+  // everything, because nothing is known yet.
+  //
+  // Scoping that off `m_paramOrder.isEmpty()` is what made a reconnection
+  // behave differently from a first connection, and it is the bug this replaces.
+  // The manager subscribes to EVT before it publishes the connection, so the
+  // greeting can be handled before setConnected() — and therefore before the
+  // resetState() that clears the previous session's ids. On a first connection
+  // there are none, so the test read "empty" and the pass was full; on every
+  // reconnection the same greeting saw a populated map left over from the last
+  // link and took the engine-scoped branch, which skips the sequencer, kit,
+  // graph and song reads (finishDiscovery) for the whole session. `switched` is
+  // the real question and does not depend on when this runs.
+  beginDiscovery(switched && !m_paramOrder.isEmpty()
+                     ? DiscoveryScope::EngineParams
+                     : DiscoveryScope::Full);
 }
 
 void SynthController::setEngineCaps(quint8 engine, quint8 caps) {

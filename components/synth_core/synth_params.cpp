@@ -7,6 +7,7 @@
 #include "freertos/FreeRTOS.h"
 
 static_assert(SYNTH_PID_ENGINE_TYPE == osynth::PID_ENGINE_TYPE);
+static_assert(SYNTH_PID_USB_MODE == osynth::PID_USB_MODE);
 static_assert(SYNTH_PID_COMMON_GLIDE == osynth::PID_COMMON_GLIDE);
 static_assert(SYNTH_PID_COMMON_BEND_RANGE == osynth::PID_COMMON_BEND_RANGE);
 static_assert(SYNTH_PID_COMMON_UNISON == osynth::PID_COMMON_UNISON);

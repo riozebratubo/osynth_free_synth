@@ -798,7 +798,13 @@ Item {
     Label {
         anchors.centerIn: parent
         visible: Synth.ready && !root.available
-        text: t.t("Looper not available on this synth (needs PSRAM).")
+        // Says what the app actually knows — that loop.mode never arrived —
+        // rather than guessing why. The old text asserted "needs PSRAM", which
+        // the app has no way to determine: a firmware built without PSRAM
+        // registers no looper params, but so does any discovery that lost them,
+        // and the two are indistinguishable from here. Blaming the hardware
+        // sent a real enumeration bug undiagnosed for a long time.
+        text: t.t("Looper parameters were not received from this synth.")
         opacity: 0.5
         color: Material.foreground
     }

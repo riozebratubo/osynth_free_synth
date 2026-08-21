@@ -88,8 +88,18 @@
 #include "seqarp.h"  /* seqarp_bpm() / beat grid: note-division sync (S34) */
 #include "synth_config.h"
 #include "synth_dsp.h"
+#include "synth_line.h"
 #include "synth_params.h"
+#include "synth_reverb_algo.h"
 #include "synth_smooth.h"
+
+/* The reverb algorithms. Below synth_config.h on purpose: SYNTH_ENABLE_FX_GPL
+ * is defined there, and an unguarded fx_gpl.h would drag GPL declarations
+ * into a build that deliberately excludes them. */
+#include "fx_reverb_wet.h" /* algorithm 1, MIT, always built */
+#if SYNTH_ENABLE_FX_GPL
+#include "fx_gpl.h" /* algorithms 2 and 3, GPL-3, opt-in */
+#endif
 
 static const char* TAG = "fx";
 
@@ -139,17 +149,24 @@ constexpr int kPhsStagesMax = 12; /* allpass sections per channel */
  * and keep kParams below in exactly this order: tools/check_param_tables.py
  * verifies the two agree, because a short initializer list is silently
  * zero-filled and would register phantom parameters at id 0. */
+/* The `_ON` switch leads each unit's run rather than trailing it: the app
+ * builds an FX panel by walking the registry in registration order, so this
+ * is what puts the bypass at the top-left of the card instead of after the
+ * knobs it governs. */
 enum PIdx {
-    CHO_MIX, CHO_RATE, CHO_DEPTH,
-    DLY_MIX, DLY_TIME, DLY_FB, DLY_TONE, DLY_PP, DLY_DIV, DLY_COMP,
-    GRN_MIX, GRN_SIZE, GRN_DENS, GRN_PITCH, GRN_FB, GRN_SPRAY, GRN_COMP,
-    REV_MIX, REV_SIZE, REV_DAMP, REV_COMP,
-    CRUSH_MIX, CRUSH_BITS, CRUSH_DOWN,
+    CHO_ON, CHO_MIX, CHO_RATE, CHO_DEPTH,
+    DLY_ON, DLY_MIX, DLY_TIME, DLY_FB, DLY_TONE, DLY_PP, DLY_DIV, DLY_COMP,
+    GRN_ON, GRN_MIX, GRN_SIZE, GRN_DENS, GRN_PITCH, GRN_FB, GRN_SPRAY,
+    GRN_COMP,
+    REV_ON, REV_ALGO, REV_MIX, REV_SIZE, REV_DAMP, REV_COMP, REV_PRE, REV_TONE,
+    REV_WIDTH, REV_DIFF, REV_EARLY,
+    CRUSH_ON, CRUSH_MIX, CRUSH_BITS, CRUSH_DOWN,
     FLT_ON, FLT_TYPE, FLT_MODE, FLT_CUTOFF, FLT_RESO, FLT_DRIVE, FLT_SPREAD,
     FLT_VOWEL,
-    DRV_MIX, DRV_MODE, DRV_DRIVE, DRV_TONE, DRV_LEVEL,
-    PHS_MIX, PHS_STAGES, PHS_RATE, PHS_DEPTH, PHS_CENTER, PHS_FB, PHS_SPREAD,
-    FLG_MIX, FLG_RATE, FLG_DEPTH, FLG_DELAY, FLG_FB, FLG_SPREAD,
+    DRV_ON, DRV_MIX, DRV_MODE, DRV_DRIVE, DRV_TONE, DRV_LEVEL,
+    PHS_ON, PHS_MIX, PHS_STAGES, PHS_RATE, PHS_DEPTH, PHS_CENTER, PHS_FB,
+    PHS_SPREAD,
+    FLG_ON, FLG_MIX, FLG_RATE, FLG_DEPTH, FLG_DELAY, FLG_FB, FLG_SPREAD,
     EQ_ON, EQ_LOW, EQ_LOFREQ, EQ_MID, EQ_MIDFREQ, EQ_MIDQ, EQ_HIGH, EQ_HIFREQ,
     COMP_ON, COMP_THRESH, COMP_RATIO, COMP_ATTACK, COMP_RELEASE, COMP_MAKEUP,
     COMP_MIX, COMP_KEY, COMP_SLOT,
@@ -207,6 +224,17 @@ const char* const kLfoWaves[] = {"sine", "tri",    "saw up",
  * slot's trigger, which is what fx.comp.slot then picks. */
 const char* const kCompKeys[] = {"mix", "drum"};
 
+/* Reverb algorithms (S36). Append-only, and the two GPL-licensed entries sit
+ * at the end so CONFIG_OSYNTH_FX_GPL=n can shorten the list instead of
+ * punching a hole in it — the index is the stored value, so removing a middle
+ * entry would renumber the tail and change what saved patches mean. The
+ * reasoning in full is in fx.h above FX_PID_REV_ALGO. */
+const char* const kRevAlgos[] = {"freeverb", "wetreverb",
+#if SYNTH_ENABLE_FX_GPL
+                                 "mverb", "duskverb",
+#endif
+};
+
 template <typename T, size_t N>
 constexpr int count_of(const T (&)[N]) {
     return (int)N;
@@ -217,6 +245,17 @@ constexpr int kLfoSyncCount = count_of(kLfoSyncNames);
 constexpr int kLfoWaveCount = count_of(kLfoWaves);
 constexpr int kDrvModeCount = count_of(kDrvModes);
 constexpr int kCompKeyCount = count_of(kCompKeys);
+constexpr int kRevAlgoCount = count_of(kRevAlgos);
+enum RevAlgo { kAlgoFreeverb = 0, kAlgoWet = 1, kAlgoMVerb = 2, kAlgoDusk = 3 };
+
+/* Shared pre/post stages around whichever algorithm is selected.
+ *
+ * kRevToneOpen is the wet lowpass's "off" position and doubles as its
+ * registered maximum, so the default *is* the bypass: above Nyquist there is
+ * nothing left for a one-pole to remove, and the code skips the filter
+ * outright rather than running a coefficient that rounds to unity. */
+constexpr float kRevPreMaxMs = 120.0f;
+constexpr float kRevToneOpen = 20000.0f;
 /* A name list and its value list that disagree would read one past the end
  * of the shorter one, from a value the app is entitled to send. */
 static_assert(count_of(kDlyDivBeats) == kDlyDivCount, "delay division tables");
@@ -309,12 +348,18 @@ static_assert(enum_bytes(kLfoDests, kLfoDestCount) <= kLfoDestBudget,
               "app would silently show a truncated list");
 
 const ParamDesc kParams[P_COUNT] = {
+    /* Bypass. Gates the mix below rather than replacing it — see the
+     * enable-switch note in fx.h. */
+    {FX_PID_CHO_ON, "fx.cho.on", ParamType::Bool, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0},
     {FX_PID_CHO_MIX, "fx.cho.mix", ParamType::Float, ParamCurve::Linear,
      0.0f, 1.0f, 0.0f, nullptr, 0}, /* 0.5 ~ classic chorus, 1 = pure vibrato */
     {FX_PID_CHO_RATE, "fx.cho.rate", ParamType::Float, ParamCurve::Exp,
      0.05f, 8.0f, 0.8f, nullptr, 0},
     {FX_PID_CHO_DEPTH, "fx.cho.depth", ParamType::Float, ParamCurve::Linear,
      0.0f, kChoDepthMaxMs, 3.5f, nullptr, 0}, /* ms */
+    {FX_PID_DLY_ON, "fx.dly.on", ParamType::Bool, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0},
     {FX_PID_DLY_MIX, "fx.dly.mix", ParamType::Float, ParamCurve::Linear,
      0.0f, 1.0f, 0.0f, nullptr, 0},
     {FX_PID_DLY_TIME, "fx.dly.time", ParamType::Float, ParamCurve::Exp,
@@ -335,6 +380,8 @@ const ParamDesc kParams[P_COUNT] = {
      * delay_process). Off by default like the other two. */
     {FX_PID_DLY_COMP, "fx.dly.comp", ParamType::Bool, ParamCurve::Linear,
      0.0f, 1.0f, 0.0f, nullptr, 0},
+    {FX_PID_GRN_ON, "fx.grn.on", ParamType::Bool, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0},
     {FX_PID_GRN_MIX, "fx.grn.mix", ParamType::Float, ParamCurve::Linear,
      0.0f, 1.0f, 0.0f, nullptr, 0},
     {FX_PID_GRN_SIZE, "fx.grn.size", ParamType::Float, ParamCurve::Exp,
@@ -350,6 +397,11 @@ const ParamDesc kParams[P_COUNT] = {
     /* Window + pan make-up, and the sparse-setting duty. */
     {FX_PID_GRN_COMP, "fx.grn.comp", ParamType::Bool, ParamCurve::Linear,
      0.0f, 1.0f, 0.0f, nullptr, 0},
+    {FX_PID_REV_ON, "fx.rev.on", ParamType::Bool, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0},
+    {FX_PID_REV_ALGO, "fx.rev.algo", ParamType::Enum, ParamCurve::Linear,
+     0.0f, (float)(kRevAlgoCount - 1), 0.0f /* freeverb */, kRevAlgos,
+     kRevAlgoCount},
     {FX_PID_REV_MIX, "fx.rev.mix", ParamType::Float, ParamCurve::Linear,
      0.0f, 1.0f, 0.15f, nullptr, 0}, /* subtle room out of the box */
     {FX_PID_REV_SIZE, "fx.rev.size", ParamType::Float, ParamCurve::Linear,
@@ -358,6 +410,25 @@ const ParamDesc kParams[P_COUNT] = {
      0.0f, 1.0f, 0.3f, nullptr, 0},
     /* Undoes the Freeverb staging's ~6 dB and takes `size` out of the level. */
     {FX_PID_REV_COMP, "fx.rev.comp", ParamType::Bool, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0},
+    /* The shared front and back of the unit, outside the algorithm: a
+     * pre-delay in, then a wet-only tilt and width out. Every default is
+     * the exact bypass of its stage (0 ms, filter open, width unity), so a
+     * patch saved before S36 renders sample-for-sample as it did — and so
+     * freeverb, which gained all three for free, is unchanged until asked. */
+    {FX_PID_REV_PRE, "fx.rev.pre", ParamType::Float, ParamCurve::Linear,
+     0.0f, kRevPreMaxMs, 0.0f, nullptr, 0}, /* ms */
+    {FX_PID_REV_TONE, "fx.rev.tone", ParamType::Float, ParamCurve::Exp,
+     500.0f, kRevToneOpen, kRevToneOpen, nullptr, 0}, /* wet LP; max = off */
+    {FX_PID_REV_WIDTH, "fx.rev.width", ParamType::Float, ParamCurve::Linear,
+     0.0f, 2.0f, 1.0f, nullptr, 0}, /* wet only: 0 mono, 1 as rendered */
+    /* Ignored by freeverb, which has neither a diffusion coefficient worth
+     * exposing (its allpasses are fixed at 0.5) nor an early field. */
+    {FX_PID_REV_DIFF, "fx.rev.diff", ParamType::Float, ParamCurve::Linear,
+     0.0f, 1.0f, 0.7f, nullptr, 0},
+    {FX_PID_REV_EARLY, "fx.rev.early", ParamType::Float, ParamCurve::Linear,
+     0.0f, 1.0f, 0.4f, nullptr, 0}, /* 0 all late, 1 all early */
+    {FX_PID_CRUSH_ON, "fx.crush.on", ParamType::Bool, ParamCurve::Linear,
      0.0f, 1.0f, 0.0f, nullptr, 0},
     {FX_PID_CRUSH_MIX, "fx.crush.mix", ParamType::Float, ParamCurve::Linear,
      0.0f, 1.0f, 0.0f, nullptr, 0}, /* 1 = fully crushed */
@@ -387,6 +458,8 @@ const ParamDesc kParams[P_COUNT] = {
      0.0f, 1.0f, 0.0f, nullptr, 0}, /* vowel: morph a-e-i-o-u */
 
     /* ---- drive (S34) ---- */
+    {FX_PID_DRV_ON, "fx.drv.on", ParamType::Bool, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0},
     {FX_PID_DRV_MIX, "fx.drv.mix", ParamType::Float, ParamCurve::Linear,
      0.0f, 1.0f, 0.0f, nullptr, 0},
     {FX_PID_DRV_MODE, "fx.drv.mode", ParamType::Enum, ParamCurve::Linear,
@@ -404,6 +477,8 @@ const ParamDesc kParams[P_COUNT] = {
      * summing the swept allpass chain against the dry signal, and an allpass
      * on its own has flat magnitude. At 1 what is left is the feedback
      * resonance, which is a real sound but not the one most people mean. */
+    {FX_PID_PHS_ON, "fx.phs.on", ParamType::Bool, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0},
     {FX_PID_PHS_MIX, "fx.phs.mix", ParamType::Float, ParamCurve::Linear,
      0.0f, 1.0f, 0.0f, nullptr, 0},
     /* Int, not enum: the notch count is stages/2 and every value in between
@@ -422,6 +497,8 @@ const ParamDesc kParams[P_COUNT] = {
      0.0f, 0.5f, 0.25f, nullptr, 0}, /* R LFO phase offset; 0.25 = quadrature */
 
     /* ---- flanger (S34) ---- */
+    {FX_PID_FLG_ON, "fx.flg.on", ParamType::Bool, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0},
     {FX_PID_FLG_MIX, "fx.flg.mix", ParamType::Float, ParamCurve::Linear,
      0.0f, 1.0f, 0.0f, nullptr, 0},
     {FX_PID_FLG_RATE, "fx.flg.rate", ParamType::Float, ParamCurve::Exp,
@@ -558,60 +635,32 @@ inline float pvm(PIdx i) {
 
 /* ---- int16 circular delay line ---- */
 
-struct Line {
-    int16_t* buf = nullptr;
-    uint32_t len = 0;
-    uint32_t w = 0; /* next write index */
-};
-
-size_t s_bytes_spiram = 0;
-size_t s_bytes_internal = 0;
-
-bool line_alloc(Line& l, uint32_t len) {
-    int16_t* p = nullptr;
-#if CONFIG_SPIRAM
-    p = (int16_t*)heap_caps_calloc(len, sizeof(int16_t),
-                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-#endif
-    if (p == nullptr) {
-        p = (int16_t*)heap_caps_calloc(len, sizeof(int16_t),
-                                       MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        if (p == nullptr) return false;
-    }
-    (esp_ptr_external_ram(p) ? s_bytes_spiram : s_bytes_internal) +=
-        (size_t)len * sizeof(int16_t);
-    l.buf = p;
-    l.len = len;
-    l.w = 0;
-    return true;
-}
-
-inline void line_push(Line& l, float v) {
-    int32_t s = (int32_t)(v * 32767.0f);
-    if (s > 32767) s = 32767;
-    if (s < -32768) s = -32768;
-    l.buf[l.w] = (int16_t)s;
-    if (++l.w == l.len) l.w = 0;
-}
-
-/* Oldest sample — a delay of exactly len; read before line_push overwrites. */
-inline float line_tap(const Line& l) {
-    return (float)l.buf[l.w] * (1.0f / 32768.0f);
-}
-
-/* x[n - d] with fractional d in [1, len-3], linear interpolation; call
- * before pushing sample n. */
-inline float line_read_frac(const Line& l, float d) {
-    const uint32_t di = (uint32_t)d;
-    const float frac = d - (float)di;
-    uint32_t i0 = l.w + l.len - di;
-    if (i0 >= l.len) i0 -= l.len;
-    const uint32_t i1 = (i0 == 0) ? l.len - 1 : i0 - 1;
-    const float a = (float)l.buf[i0];
-    return (a + frac * ((float)l.buf[i1] - a)) * (1.0f / 32768.0f);
-}
+/* Moved to synth_core/synth_line.h in S36 so components/fx_gpl can build its
+ * two reverbs on the same primitive without either component including the
+ * other's sources. Pulled back in unqualified here, so every use below reads
+ * exactly as it did before the move. */
+using osynth::dsp::Line;
+using osynth::dsp::line_alloc;
+using osynth::dsp::line_push;
+using osynth::dsp::line_read;
+using osynth::dsp::line_read_frac;
+using osynth::dsp::line_tap;
 
 /* ---- per-effect dry/wet gate with incremental bypass scrub ---- */
+
+/* The enable switch (S36) folded into a unit's dry/wet target.
+ *
+ * `on` is read with pv() and not pvm(): a Bool has no meaningful in-between
+ * value and is not a legal LFO destination. The result still goes through
+ * unit_gate(), so flipping the switch crossfades over the same ~90 ms a mix
+ * sweep would, rather than stepping.
+ *
+ * Zeroing the target rather than branching around the whole unit is what
+ * keeps the older contract intact: a unit sitting at mix 0 costs nothing
+ * whatever the switch says, and the bypass scrub still runs, so re-enabling
+ * a reverb never replays the tail it had when you switched it off. */
+inline float gated(float on, float mix) { return on >= 0.5f ? mix : 0.0f; }
+
 
 constexpr float kMixSlew = 0.08f;      /* per block: ~90 ms for a full swing */
 constexpr float kSilent = 1e-3f;
@@ -779,7 +828,7 @@ void SYNTH_RENDER_IRAM drive_kernel(DriveFx& d, float* __restrict__ bl,
 void SYNTH_RENDER_IRAM drive_process(float* __restrict__ bl,
                                      float* __restrict__ br, size_t frames) {
     DriveFx& d = s_drv;
-    const float m = unit_gate(d.u, pvm(DRV_MIX), nullptr, 0);
+    const float m = unit_gate(d.u, gated(pv(DRV_ON), pvm(DRV_MIX)), nullptr, 0);
     if (m < 0.0f) {
         d.lpl = d.lpr = 0.0f;
         return;
@@ -839,7 +888,7 @@ void SYNTH_RENDER_IRAM chorus_process(float* __restrict__ bl,
     ChorusFx& c = s_cho;
     if (!c.ok) return;
     Line* const lines[] = {&c.l, &c.r};
-    const float m = unit_gate(c.u, pvm(CHO_MIX), lines, 2);
+    const float m = unit_gate(c.u, gated(pv(CHO_ON), pvm(CHO_MIX)), lines, 2);
     if (m < 0.0f) {
         c.dl = c.dr = -1.0f;
         return;
@@ -912,7 +961,7 @@ void SYNTH_RENDER_IRAM flanger_process(float* __restrict__ bl,
     FlangerFx& f = s_flg;
     if (!f.ok) return;
     Line* const lines[] = {&f.l, &f.r};
-    const float m = unit_gate(f.u, pvm(FLG_MIX), lines, 2);
+    const float m = unit_gate(f.u, gated(pv(FLG_ON), pvm(FLG_MIX)), lines, 2);
     if (m < 0.0f) {
         f.dl = f.dr = -1.0f;
         return;
@@ -996,7 +1045,7 @@ inline float phs_coef(float fc) {
 void SYNTH_RENDER_IRAM phaser_process(float* __restrict__ bl,
                                       float* __restrict__ br, size_t frames) {
     PhaserFx& p = s_phs;
-    const float m = unit_gate(p.u, pvm(PHS_MIX), nullptr, 0);
+    const float m = unit_gate(p.u, gated(pv(PHS_ON), pvm(PHS_MIX)), nullptr, 0);
     if (m < 0.0f) {
         memset(p.st, 0, sizeof(p.st));
         p.fbl = p.fbr = 0.0f;
@@ -1085,7 +1134,7 @@ void SYNTH_RENDER_IRAM delay_process(float* __restrict__ bl,
     DelayFx& d = s_dly;
     if (!d.ok) return;
     Line* const lines[] = {&d.l, &d.r};
-    const float m = unit_gate(d.u, pvm(DLY_MIX), lines, 2);
+    const float m = unit_gate(d.u, gated(pv(DLY_ON), pvm(DLY_MIX)), lines, 2);
     if (m < 0.0f) {
         d.lpl = d.lpr = 0.0f;
         d.t = -1.0f;
@@ -1258,7 +1307,7 @@ void SYNTH_RENDER_IRAM granular_process(float* __restrict__ bl,
     GranularFx& g = s_grn;
     if (!g.ok) return;
     Line* const lines[] = {&g.line};
-    const float m = unit_gate(g.u, pvm(GRN_MIX), lines, 1);
+    const float m = unit_gate(g.u, gated(pv(GRN_ON), pvm(GRN_MIX)), lines, 1);
     if (m < 0.0f) {
         for (int i = 0; i < kGrainMax; ++i) g.g[i].nt = 0;
         g.acc = 0.0f;
@@ -1380,10 +1429,44 @@ struct ReverbFx {
     osynth::dsp::Smooth s_fb, s_damp;
     UnitState u;
     bool ok = false;
+
+    /* ---- S36: the algorithm selector and the stages shared across it ---- */
+
+    /* 0xFF so the first block always takes the switch path and populates
+     * s_rev_lines; there is no valid algorithm this can be mistaken for. */
+    uint8_t algo = 0xFF;
+    uint8_t nlines = 0;
+    /* A second scrub cursor, used only while changing algorithm. It is
+     * separate from `u` because the two scrubs happen for different reasons
+     * and can be in flight at once: `u` clears a unit the player switched
+     * off, this clears a topology nobody is listening to yet. Sharing one
+     * cursor would have the later reason silently cancel the earlier one. */
+    UnitState sw;
+    bool switching = false;
+
+    Line pre_l, pre_r;                 /* shared pre-delay, in front of all */
+    float tone_l = 0.0f, tone_r = 0.0f;
+    osynth::dsp::Smooth s_pre, s_tone, s_width;
 };
 
 ReverbFx s_rev;
-Line* s_rev_lines[24]; /* every line, for the bypass scrub */
+
+/* Whether each optional algorithm got its buffers at boot. Checked by
+ * rev_impl() so a selection that cannot render falls back rather than
+ * going silent — the same sink-fallback rule the rest of the bus follows. */
+bool s_rev_wet_ok = false;
+#if SYNTH_ENABLE_FX_GPL
+bool s_rev_mverb_ok = false;
+bool s_rev_dusk_ok = false;
+#endif
+
+/* The shared pre-delay plus every line of whichever algorithm is selected,
+ * for the bypass scrub. Worst case is DuskVerb at 2 + 38 = 40; the array is
+ * 192 bytes, and being one entry short of an algorithm's line count would
+ * leave a tail unscrubbed — a stale-audio bug that only shows up the second
+ * time you enable the effect, which is the worst kind to go looking for. */
+constexpr size_t kRevLineMax = 48;
+Line* s_rev_lines[kRevLineMax];
 
 inline float comb_next(Comb& c, float in, float fb, float damp) {
     const float out = line_tap(c.line);
@@ -1398,36 +1481,15 @@ inline float allpass_next(Line& l, float in) {
     return b - in;
 }
 
-void SYNTH_RENDER_IRAM reverb_process(float* __restrict__ bl,
-                                      float* __restrict__ br, size_t frames) {
-    ReverbFx& v = s_rev;
-    if (!v.ok) return;
-    const float m = unit_gate(v.u, pvm(REV_MIX), s_rev_lines, 24);
-    if (m < 0.0f) {
-        for (int i = 0; i < 8; ++i) v.cl[i].store = v.cr[i].store = 0.0f;
-        return;
-    }
-
-    /* Both feed the comb loop per sample: a raw jump steps the running tail
-     * (a size change is audible as a click on a long decay). Smoothed S21. */
-    const float fb =
-        0.70f + 0.28f * osynth::dsp::smooth_lin(v.s_fb, pvm(REV_SIZE));
-    const float damp =
-        0.95f * osynth::dsp::smooth_lin(v.s_damp, pvm(REV_DAMP));
-
-    /* kRevWet is folded into the wet gain here rather than multiplied per
-     * sample below, which is where the make-up joins it. */
-    float makeup = kRevWet;
-    const bool comp = pv(REV_COMP) >= 0.5f;
-    if (comp) {
-        const float g = sqrtf(fmaxf(1.0f - fb * fb, 1e-4f)) /
-                        (kRevRefGain * kRevCombSum);
-        makeup = kRevWet * fminf(fmaxf(g, kRevCompMin), kRevCompMax);
-    }
-    const MixGains mg = mix_gains(m, comp, makeup);
-
+/* Freeverb's own render, wet only, so the dispatch below has one shape for
+ * all four algorithms. Byte-for-byte the arithmetic it has always run — the
+ * only change is that the dry/wet mix moved out to the caller, which does it
+ * identically for every algorithm. */
+void SYNTH_RENDER_IRAM freeverb_render(ReverbFx& v, const float* il,
+                                       const float* ir, float* wl, float* wr,
+                                       size_t frames, float fb, float damp) {
     for (size_t i = 0; i < frames; ++i) {
-        const float in = (bl[i] + br[i]) * kRevInGain;
+        const float in = (il[i] + ir[i]) * kRevInGain;
         float sl = 0.0f, sr = 0.0f;
         for (int c = 0; c < 8; ++c) {
             sl += comb_next(v.cl[c], in, fb, damp);
@@ -1439,8 +1501,201 @@ void SYNTH_RENDER_IRAM reverb_process(float* __restrict__ bl,
             sl = allpass_next(v.al[a], sl);
             sr = allpass_next(v.ar[a], sr);
         }
-        bl[i] = mg.dry * bl[i] + mg.wet * sl;
-        br[i] = mg.dry * br[i] + mg.wet * sr;
+        wl[i] = sl;
+        wr[i] = sr;
+    }
+}
+
+/* The implementation behind an algorithm index, or nullptr for freeverb,
+ * which lives in this file and has no RevAlgorithm to hand back. Also
+ * nullptr for an algorithm whose init() failed, which is how a board short
+ * of PSRAM ends up refusing a selection instead of rendering silence. */
+osynth::fx::RevAlgorithm* rev_impl(int algo) {
+    switch (algo) {
+        case kAlgoWet:
+            return s_rev_wet_ok ? osynth::fx::wetreverb_instance() : nullptr;
+#if SYNTH_ENABLE_FX_GPL
+        case kAlgoMVerb:
+            return s_rev_mverb_ok ? osynth::fx::mverb_instance() : nullptr;
+        case kAlgoDusk:
+            return s_rev_dusk_ok ? osynth::fx::duskverb_instance() : nullptr;
+#endif
+        default:
+            return nullptr;
+    }
+}
+
+/* Rebuilds s_rev_lines for `algo` and returns how many entries it holds.
+ *
+ * The shared pre-delay goes in whatever the algorithm is. It is not part of
+ * any of them, but it is still a delay line holding audio, and leaving it out
+ * would mean a unit switched off and back on replays up to 120 ms of whatever
+ * was playing before — the exact thing the scrub exists to prevent, hidden
+ * behind a control most patches leave at zero. */
+size_t rev_collect_lines(int algo) {
+    size_t n = 0;
+    s_rev_lines[n++] = &s_rev.pre_l;
+    s_rev_lines[n++] = &s_rev.pre_r;
+    if (algo == kAlgoFreeverb) {
+        for (int i = 0; i < 8; ++i) {
+            s_rev_lines[n++] = &s_rev.cl[i].line;
+            s_rev_lines[n++] = &s_rev.cr[i].line;
+        }
+        for (int i = 0; i < 4; ++i) {
+            s_rev_lines[n++] = &s_rev.al[i];
+            s_rev_lines[n++] = &s_rev.ar[i];
+        }
+        return n;
+    }
+    osynth::fx::RevAlgorithm* a = rev_impl(algo);
+    if (a == nullptr) return n;
+    return n + a->lines(s_rev_lines + n, kRevLineMax - n);
+}
+
+/* Wet scratch. One block, stereo — the algorithms write here and the shared
+ * post stages and the dry/wet mix read it back, so no algorithm has to know
+ * what the dry signal was. */
+float s_rev_wl[SYNTH_BLOCK_SIZE];
+float s_rev_wr[SYNTH_BLOCK_SIZE];
+
+void SYNTH_RENDER_IRAM reverb_process(float* __restrict__ bl,
+                                      float* __restrict__ br, size_t frames) {
+    ReverbFx& v = s_rev;
+    if (!v.ok) return;
+    /* The scratch below is one block wide, and audio_io never asks for
+     * more; bailing beats overrunning it if that ever changes. */
+    if (frames > (size_t)SYNTH_BLOCK_SIZE) return;
+
+    /* An out-of-range or unavailable selection falls back to freeverb rather
+     * than to silence: on a build without CONFIG_OSYNTH_FX_GPL the store
+     * clamps 2 and 3 down to 1 already, so reaching here means the algorithm
+     * exists but could not allocate, and a reverb the player can hear beats
+     * a reverb that is correct about being absent. */
+    int algo = (int)pv(REV_ALGO);
+    if (algo < 0 || algo >= kRevAlgoCount) algo = kAlgoFreeverb;
+    osynth::fx::RevAlgorithm* impl = rev_impl(algo);
+    if (algo != kAlgoFreeverb && impl == nullptr) algo = kAlgoFreeverb;
+
+    const float m =
+        unit_gate(v.u, gated(pv(REV_ON), pvm(REV_MIX)), s_rev_lines, v.nlines);
+    if (m < 0.0f) {
+        for (int i = 0; i < 8; ++i) v.cl[i].store = v.cr[i].store = 0.0f;
+        v.tone_l = v.tone_r = 0.0f;
+        return;
+    }
+
+    /* Changing topology mid-tail. The new algorithm's lines hold whatever the
+     * last selection left in them, and there is no arrangement of a few
+     * hundred KB of memset that fits in a 1.33 ms block, so the unit goes
+     * quiet and scrubs a chunk per block — about 40 ms at the largest
+     * algorithm. A brief gap on an algorithm change is what the plugins these
+     * came from do too; a burst of somebody else's reverb tail is not. */
+    if (algo != v.algo) {
+        v.algo = (uint8_t)algo;
+        v.nlines = (uint8_t)rev_collect_lines(algo);
+        if (impl != nullptr) {
+            impl->reset();
+        } else {
+            for (int i = 0; i < 8; ++i) v.cl[i].store = v.cr[i].store = 0.0f;
+        }
+        v.tone_l = v.tone_r = 0.0f;
+        v.sw.sl = 0;
+        v.sw.sp = 0;
+        v.switching = true;
+    }
+    if (v.switching) {
+        if (scrub_step(v.sw, s_rev_lines, v.nlines)) v.switching = false;
+        return; /* dry through; the wet is not ready to be heard */
+    }
+
+    /* ---- shared front: pre-delay ---- */
+    const float pre_ms = osynth::dsp::smooth_lin(v.s_pre, pvm(REV_PRE));
+    const float pre_d = pre_ms * 0.001f * (float)kSr;
+    const bool do_pre = pre_d >= 1.0f;
+    for (size_t i = 0; i < frames; ++i) {
+        const float dl = bl[i], dr = br[i];
+        if (do_pre) {
+            s_rev_wl[i] = line_read_frac(v.pre_l, pre_d);
+            s_rev_wr[i] = line_read_frac(v.pre_r, pre_d);
+        } else {
+            s_rev_wl[i] = dl;
+            s_rev_wr[i] = dr;
+        }
+        /* Kept primed even while bypassed, so dialling pre-delay up from zero
+         * fades in real signal instead of a hole the length of the delay. */
+        line_push(v.pre_l, dl);
+        line_push(v.pre_r, dr);
+    }
+
+    /* ---- the algorithm ---- */
+    float makeup = 1.0f;
+    bool comp = false;
+    if (algo == kAlgoFreeverb) {
+        /* Both feed the comb loop per sample: a raw jump steps the running
+         * tail (a size change is audible as a click on a long decay).
+         * Smoothed S21. */
+        const float fb =
+            0.70f + 0.28f * osynth::dsp::smooth_lin(v.s_fb, pvm(REV_SIZE));
+        const float damp =
+            0.95f * osynth::dsp::smooth_lin(v.s_damp, pvm(REV_DAMP));
+
+        /* kRevWet is folded into the wet gain here rather than multiplied per
+         * sample below, which is where the make-up joins it. */
+        makeup = kRevWet;
+        comp = pv(REV_COMP) >= 0.5f;
+        if (comp) {
+            const float g = sqrtf(fmaxf(1.0f - fb * fb, 1e-4f)) /
+                            (kRevRefGain * kRevCombSum);
+            makeup = kRevWet * fminf(fmaxf(g, kRevCompMin), kRevCompMax);
+        }
+        freeverb_render(v, s_rev_wl, s_rev_wr, s_rev_wl, s_rev_wr, frames, fb,
+                        damp);
+    } else {
+        /* The other three are level-matched by construction and take the
+         * knobs raw: each smooths internally what it needs to, and their
+         * `size` moves delay lengths rather than a feedback coefficient, so
+         * the S21 argument for smoothing here does not apply to them.
+         *
+         * fx.rev.comp stays freeverb-only. It undoes one specific staging
+         * decision in *that* algorithm — see the derivation above — and has
+         * nothing to undo in the others. */
+        const osynth::fx::RevParams rp = {pvm(REV_SIZE), pvm(REV_DAMP),
+                                          pvm(REV_DIFF), pvm(REV_EARLY)};
+        impl->render(s_rev_wl, s_rev_wr, s_rev_wl, s_rev_wr, frames, rp);
+    }
+
+    /* ---- shared back: tone, then width ---- */
+    const float tone_hz = osynth::dsp::smooth_exp(v.s_tone, pvm(REV_TONE));
+    if (tone_hz < kRevToneOpen * 0.999f) {
+        /* One-pole, wet only. A tone control on the dry path would be an EQ,
+         * and the bus already has one of those. */
+        const float c = 1.0f - expf(-kTwoPi * tone_hz / kSr);
+        for (size_t i = 0; i < frames; ++i) {
+            v.tone_l += c * (s_rev_wl[i] - v.tone_l);
+            v.tone_r += c * (s_rev_wr[i] - v.tone_r);
+            s_rev_wl[i] = v.tone_l;
+            s_rev_wr[i] = v.tone_r;
+        }
+    }
+
+    const float width = osynth::dsp::smooth_lin(v.s_width, pvm(REV_WIDTH));
+    if (fabsf(width - 1.0f) > 1e-4f) {
+        /* Skipped rather than run at unity: a mid/side round trip at width 1
+         * is only *almost* the identity in float, and "almost" is the
+         * difference between a pre-S36 patch rendering identically and
+         * rendering nearly identically. */
+        for (size_t i = 0; i < frames; ++i) {
+            const float mid = (s_rev_wl[i] + s_rev_wr[i]) * 0.5f;
+            const float side = (s_rev_wl[i] - s_rev_wr[i]) * 0.5f * width;
+            s_rev_wl[i] = mid + side;
+            s_rev_wr[i] = mid - side;
+        }
+    }
+
+    const MixGains mg = mix_gains(m, comp, makeup);
+    for (size_t i = 0; i < frames; ++i) {
+        bl[i] = mg.dry * bl[i] + mg.wet * s_rev_wl[i];
+        br[i] = mg.dry * br[i] + mg.wet * s_rev_wr[i];
     }
 }
 
@@ -1464,7 +1719,7 @@ CrushFx s_crush;
 void SYNTH_RENDER_IRAM crush_process(float* __restrict__ bl,
                                      float* __restrict__ br, size_t frames) {
     CrushFx& c = s_crush;
-    const float m = unit_gate(c.u, pvm(CRUSH_MIX), nullptr, 0);
+    const float m = unit_gate(c.u, gated(pv(CRUSH_ON), pvm(CRUSH_MIX)), nullptr, 0);
     if (m < 0.0f) {
         c.hl = c.hr = 0.0f;
         c.cnt = 0;
@@ -2059,22 +2314,40 @@ esp_err_t fx_init(void) {
     s_grn.ok = line_alloc(s_grn.line, kGrnLen);
     if (!s_grn.ok) ESP_LOGW(TAG, "granular disabled: line alloc failed");
 
+    /* Freeverb's own lines. s_rev_lines is no longer filled here: which lines
+     * the bypass scrub walks depends on the selected algorithm, so
+     * rev_collect_lines() rebuilds it on the first block and on every
+     * algorithm change. */
     s_rev.ok = true;
-    size_t nl = 0;
     for (int i = 0; i < 8; ++i) {
         s_rev.ok = s_rev.ok && line_alloc(s_rev.cl[i].line, rv(kCombTune[i]));
         s_rev.ok =
             s_rev.ok && line_alloc(s_rev.cr[i].line, rv(kCombTune[i] + kSpread));
-        s_rev_lines[nl++] = &s_rev.cl[i].line;
-        s_rev_lines[nl++] = &s_rev.cr[i].line;
     }
     for (int i = 0; i < 4; ++i) {
         s_rev.ok = s_rev.ok && line_alloc(s_rev.al[i], rv(kApTune[i]));
         s_rev.ok = s_rev.ok && line_alloc(s_rev.ar[i], rv(kApTune[i] + kSpread));
-        s_rev_lines[nl++] = &s_rev.al[i];
-        s_rev_lines[nl++] = &s_rev.ar[i];
     }
+    /* The shared pre-delay sits in front of every algorithm, so it belongs to
+     * the unit rather than to any of them, and its failure takes the whole
+     * unit down the same way a comb's would. */
+    const uint32_t prelen = (uint32_t)(kRevPreMaxMs * 0.001f * (float)kSr) + 8;
+    s_rev.ok = s_rev.ok && line_alloc(s_rev.pre_l, prelen);
+    s_rev.ok = s_rev.ok && line_alloc(s_rev.pre_r, prelen);
     if (!s_rev.ok) ESP_LOGW(TAG, "reverb disabled: line alloc failed");
+
+    /* The other algorithms allocate their own lines, and each is allowed to
+     * fail on its own: a board that cannot fit WetReverb's comb bank still
+     * gets freeverb, and says so, rather than losing the reverb entirely. */
+    constexpr uint32_t kSrHz = (uint32_t)SYNTH_SAMPLE_RATE;
+    s_rev_wet_ok = osynth::fx::wetreverb_instance()->init(kSrHz);
+    if (!s_rev_wet_ok) ESP_LOGW(TAG, "reverb: wetreverb unavailable (alloc)");
+#if SYNTH_ENABLE_FX_GPL
+    s_rev_mverb_ok = osynth::fx::mverb_instance()->init(kSrHz);
+    if (!s_rev_mverb_ok) ESP_LOGW(TAG, "reverb: mverb unavailable (alloc)");
+    s_rev_dusk_ok = osynth::fx::duskverb_instance()->init(kSrHz);
+    if (!s_rev_dusk_ok) ESP_LOGW(TAG, "reverb: duskverb unavailable (alloc)");
+#endif
 
     s_flg.ok = line_alloc(s_flg.l, kFlgLen) && line_alloc(s_flg.r, kFlgLen);
     if (!s_flg.ok) ESP_LOGW(TAG, "flanger disabled: line alloc failed");
@@ -2087,8 +2360,8 @@ esp_err_t fx_init(void) {
              "delay max %.2f s, %d grains / %.2f s window, buffers %u KB "
              "PSRAM + %u KB internal",
              (unsigned)P_COUNT, (double)kDelayMaxS, kGrainMax,
-             (double)kGrnLen / (double)kSr, (unsigned)(s_bytes_spiram / 1024),
-             (unsigned)(s_bytes_internal / 1024));
+             (double)kGrnLen / (double)kSr, (unsigned)(osynth::dsp::g_line_bytes_spiram / 1024),
+             (unsigned)(osynth::dsp::g_line_bytes_internal / 1024));
     return ESP_OK;
 }
 

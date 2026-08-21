@@ -1,4 +1,4 @@
-set(priv_reqs bt engines midi seqarp drums graph looper esp_timer)
+set(priv_reqs bt engines midi seqarp drums graph looper persist usb_host_midi esp_timer)
 
 # Radio-less target: the NimBLE host still comes from `bt`, but its controller
 # is on the companion chip and ESP-Hosted is what reaches it. Named with the

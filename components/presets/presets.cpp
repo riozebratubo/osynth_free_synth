@@ -54,6 +54,7 @@
 
 #include "drums.h"
 #include "engines.h"
+#include "fx.h" /* FX_PID_*: the S36 enable-switch migration */
 #include "seq_model.h"
 #include "seqarp.h"
 #include "synth_config.h"
@@ -92,7 +93,19 @@ constexpr int kSwitchWaitMs = 2000;
  * version 2 (S28): the same, then a modular graph blob — the node kinds and
  * cables that give the 0x02xx ids in the pairs their meaning. Written only
  * for the modular engine, so every other bank's files stay byte-identical
- * v1 and nothing already on the device is rewritten or invalidated. */
+ * v1 and nothing already on the device is rewritten or invalidated.
+ * version 3 / 4 (S36): the same two layouts again — 3 without a graph blob,
+ * 4 with one — but written by firmware that has the per-effect enable
+ * switches (fx.<unit>.on).
+ *
+ * The version bump buys exactly one thing, and it is not a layout change.
+ * A .osp is sparse: do_save() writes only values that differ from their
+ * default, and the switches default to off. So in a v3 file, "no `fx.rev.on`
+ * pair" means the player bypassed the reverb — while in a v1 file it means
+ * the firmware had no such parameter and the reverb was governed by its mix
+ * alone. Identical bytes, opposite meanings, and no way to tell them apart
+ * except by asking which firmware wrote them. That is what the version byte
+ * now answers, and legacy_fx_enable() is what acts on the answer. */
 struct __attribute__((packed)) PresetHdr {
     uint32_t magic;
     uint8_t version; /* 1, or 2 when a graph blob follows the pairs */
@@ -101,8 +114,28 @@ struct __attribute__((packed)) PresetHdr {
     char name[PRESETS_NAME_MAX]; /* NUL-padded */
 };
 static_assert(sizeof(PresetHdr) == 32, "on-disk layout");
-constexpr uint8_t kPresetVersion = 1;
-constexpr uint8_t kPresetVersionGraph = 2;
+constexpr uint8_t kPresetVersionLegacy = 1;
+constexpr uint8_t kPresetVersionLegacyGraph = 2;
+constexpr uint8_t kPresetVersion = 3;
+constexpr uint8_t kPresetVersionGraph = 4;
+
+/* Whether this firmware can read `v` at all. Every version ever written is
+ * still readable — the differences are all in interpretation, not layout. */
+constexpr bool preset_version_known(uint8_t v) {
+    return v == kPresetVersionLegacy || v == kPresetVersionLegacyGraph ||
+           v == kPresetVersion || v == kPresetVersionGraph;
+}
+
+/* Whether `v` carries a modular graph blob after the pairs. */
+constexpr bool preset_version_has_graph(uint8_t v) {
+    return v == kPresetVersionLegacyGraph || v == kPresetVersionGraph;
+}
+
+/* Whether `v` predates the per-effect enable switches and therefore needs
+ * legacy_fx_enable() run over it after its pairs land. */
+constexpr bool preset_version_pre_fx_on(uint8_t v) {
+    return v == kPresetVersionLegacy || v == kPresetVersionLegacyGraph;
+}
 
 #if SYNTH_ENABLE_MODULAR
 /* Staging for the graph blob between fetch_snapshot() and do_load(). Both
@@ -111,6 +144,15 @@ constexpr uint8_t kPresetVersionGraph = 2;
 uint8_t s_graph_blob[osynth::graph::kSerialMaxBytes];
 #endif
 size_t s_graph_len = 0;
+
+/* Set by fetch_snapshot() alongside the pairs: true when the source was a
+ * .osp written before the S36 enable switches existed, and its effects
+ * therefore have to be inferred from their mix values. Staged rather than
+ * returned because fetch_snapshot() already returns the pair count, and a
+ * second out-parameter for one bool on a two-call path is worse than the
+ * static the graph blob next to it already uses. False for factory
+ * presets, which name their switches explicitly. */
+bool s_legacy_fx = false;
 
 /* A set file: this header, then `params` pairs, then `song_len` chain
  * entries, then `patterns` pattern blobs each prefixed by its u32 length.
@@ -207,8 +249,12 @@ bool read_slot_name(int engine, int slot, char name[PRESETS_NAME_MAX]) {
     FILE* fp = fopen(path, "rb");
     if (fp == nullptr) return false;
     PresetHdr h;
+    /* Every known version, not just v1. Hard-coding v1 here was a bug from
+     * S28 onwards: do_save() writes v2 for the modular engine, so a modular
+     * user preset loaded fine when asked for by number but disappeared from
+     * the listing on the next boot, which reads as "my preset is gone". */
     const bool ok = fread(&h, sizeof(h), 1, fp) == 1 &&
-                    h.magic == kPresetMagic && h.version == 1;
+                    h.magic == kPresetMagic && preset_version_known(h.version);
     fclose(fp);
     if (!ok) return false;
     if (name != nullptr) {
@@ -313,6 +359,12 @@ bool skip_id(uint16_t id) {
         case osynth::PID_LINE_IN_ROUTE:
         case osynth::PID_LINE_IN_GAIN:
         case osynth::PID_LINE_IN_PGA:
+        /* And which socket it is (S37), for the same reason and one more: a
+         * preset that changed the source would put the input through a
+         * mute-swap-unmute on load, so the surprise would be audible even
+         * with the route at off on the way in. */
+        case osynth::PID_LINE_IN_SOURCE:
+        case osynth::PID_LINE_IN_MICGAIN:
         case osynth::PID_OUT_LEVEL:
         case PRESET_PID_LOAD:
         case PRESET_PID_SAVE:
@@ -361,6 +413,7 @@ int fetch_snapshot(int engine, int slot, char name[PRESETS_NAME_MAX]) {
      * otherwise inherit the previous file's graph and re-patch the synth
      * with a patch nobody selected. */
     s_graph_len = 0;
+    s_legacy_fx = false;
     if (slot < kUserFirst) {
         const factory_preset_t* f = &g_factory_presets[engine][slot];
         strlcpy(name, f->name, PRESETS_NAME_MAX);
@@ -382,13 +435,13 @@ int fetch_snapshot(int engine, int slot, char name[PRESETS_NAME_MAX]) {
     }
     PresetHdr h;
     if (fread(&h, sizeof(h), 1, fp) != 1 || h.magic != kPresetMagic ||
-        (h.version != kPresetVersion && h.version != kPresetVersionGraph) ||
-        h.engine != engine) {
+        !preset_version_known(h.version) || h.engine != engine) {
         fclose(fp);
         ESP_LOGW(TAG, "load %s/%d: bad file header, ignoring",
                  engine_name(engine), slot);
         return -1;
     }
+    s_legacy_fx = preset_version_pre_fx_on(h.version);
     int n = h.count < kMaxPairs ? h.count : kMaxPairs;
     n = (int)fread(s_pairs, sizeof(preset_pair_t), (size_t)n, fp);
     /* A v2 file carries the graph after the pairs. Read it here rather than
@@ -397,7 +450,7 @@ int fetch_snapshot(int engine, int slot, char name[PRESETS_NAME_MAX]) {
      * parameter snapshot is enforced. */
     s_graph_len = 0;
 #if SYNTH_ENABLE_MODULAR
-    if (h.version == kPresetVersionGraph) {
+    if (preset_version_has_graph(h.version)) {
         s_graph_len = fread(s_graph_blob, 1, sizeof(s_graph_blob), fp);
     }
 #endif
@@ -409,7 +462,46 @@ int fetch_snapshot(int engine, int slot, char name[PRESETS_NAME_MAX]) {
 
 /* Defaults first, stored values on top — a sparse snapshot lands on a
  * defined state and files missing newer params stay valid. */
-void apply_snapshot(int count) {
+/* The eight units that gained a switch in S36, as {mix, on} id pairs.
+ *
+ * The three that already had one (filter, EQ, compressor) are deliberately
+ * absent: their switch has always been the gate, so a legacy file already
+ * carries the right value for it and inferring one would overwrite the
+ * player's actual choice with a guess. */
+struct FxOnPair {
+    uint16_t mix;
+    uint16_t on;
+};
+const FxOnPair kFxOnPairs[] = {
+    {FX_PID_CHO_MIX, FX_PID_CHO_ON},     {FX_PID_DLY_MIX, FX_PID_DLY_ON},
+    {FX_PID_GRN_MIX, FX_PID_GRN_ON},     {FX_PID_REV_MIX, FX_PID_REV_ON},
+    {FX_PID_CRUSH_MIX, FX_PID_CRUSH_ON}, {FX_PID_DRV_MIX, FX_PID_DRV_ON},
+    {FX_PID_PHS_MIX, FX_PID_PHS_ON},     {FX_PID_FLG_MIX, FX_PID_FLG_ON},
+};
+
+/* Turn on every effect a pre-S36 file had audible, so it sounds on load the
+ * way it sounded when it was saved.
+ *
+ * Runs against the parameter store rather than against the pair list, and
+ * that is the important part: a v1 file that never mentions fx.rev.mix still
+ * gets the registered default of 0.15, which on pre-S36 firmware was an
+ * audible reverb. Reading the store catches that; scanning the file's pairs
+ * would not, and the patch would come back dry.
+ *
+ * Deliberately one-way. Nothing here can turn a switch *off*, so running it
+ * on a file that does not need it would be harmless — it is gated on the
+ * version anyway, because a v3 file's bypassed units are a decision and not
+ * an absence. */
+void legacy_fx_enable() {
+    ParamStore& ps = ParamStore::instance();
+    for (const FxOnPair& p : kFxOnPairs) {
+        if (ps.describe(p.mix) == nullptr || ps.describe(p.on) == nullptr)
+            continue;
+        if (ps.get(p.mix) > 0.0f) ps.set(p.on, 1.0f, ParamOrigin::Preset);
+    }
+}
+
+void apply_snapshot(int count, bool legacy_fx) {
     ParamStore& ps = ParamStore::instance();
     const size_t n = ps.listIds(s_ids, ParamStore::kMaxParams);
     for (size_t i = 0; i < n; ++i) {
@@ -422,6 +514,9 @@ void apply_snapshot(int count) {
         /* unregistered ids (older firmware, foreign engine) fail silently */
         ps.set(s_pairs[i].id, s_pairs[i].val, ParamOrigin::Preset);
     }
+    /* After the pairs, never before: the inference reads the mix values the
+     * file just set. */
+    if (legacy_fx) legacy_fx_enable();
 }
 
 void do_load(int linear) {
@@ -485,7 +580,7 @@ void do_load(int linear) {
     }
 #endif
 
-    apply_snapshot(count);
+    apply_snapshot(count, s_legacy_fx);
     s_cur_load = linear;
     reflect(PRESET_PID_LOAD, linear);
     ESP_LOGI(TAG, "loaded %s/%d '%s' (%s, %d values)", engine_name(engine),
@@ -570,6 +665,9 @@ void do_save(int linear, const char* name_in) {
 
         PresetHdr h = {};
         h.magic = kPresetMagic;
+        /* Always the current pair, never the legacy pair: a file this
+         * firmware wrote has meaningful `on` values in it, including the
+         * absent ones. */
         h.version = (graph_len > 0) ? kPresetVersionGraph : kPresetVersion;
         h.engine = (uint8_t)engine;
         h.count = (uint16_t)count;

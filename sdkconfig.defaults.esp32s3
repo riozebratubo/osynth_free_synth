@@ -103,6 +103,65 @@ CONFIG_OSYNTH_I2S_DIN_GPIO=15
 # not play at all. Only with line input or the ES8388 front end.
 CONFIG_OSYNTH_I2S_MCLK_GPIO=14
 
+# --- Microphone input (S37) -------------------------------------------------
+
+# A second input device: a digital MEMS mic (INMP441 / ICS-43434 / SPH0645) on
+# the **second** I2S controller. Off by default, and a build with it off is
+# byte-for-byte the input path that shipped before it existed.
+#
+# Why a second controller and not a second DIN pin on the port above: a port
+# has one RX channel and one DIN, and the line input has them. The S3 has two
+# controllers, so the second is free.
+#
+# `in.source` (line / mic) picks which device feeds the one input chain — the
+# same `in.route`, the same `in.gain`, the same meters. It is only registered
+# on a build that has both, and it is persisted, so the box comes back on the
+# input it was left on. Switching is fenced: the route gains ramp to zero, the
+# source swaps at silence, the gains ramp back, so a monitored input does not
+# click when you change it.
+# CONFIG_OSYNTH_ENABLE_MIC_IN=y
+
+# Run the mic's controller as an I2S *slave* off the BCLK and WS the output
+# port already drives, instead of mastering a second pair. Default y, and
+# worth keeping: one pin instead of three, and the capture is sample-locked to
+# playback the same way the line input is. The GPIO matrix allows one output
+# driver and any number of input taps on a pad.
+#
+# The slot width then follows the output port and is not yours to set — 32-bit
+# on a build with MCLK (ES8388 or PCM1808 present), 16-bit on a bare PCM5102A.
+# Both decode a 24-bit MSB-first MEMS mic; see OSYNTH_MIC_SLOT_BITS.
+# CONFIG_OSYNTH_MIC_SHARE_CLOCKS=y
+
+# The mic's data pin (its SD / DOUT). Free on these defaults: 1, 2, 4, 6, 7,
+# 21, 38-44, 47, 48. **GPIO33-37 are the octal PSRAM**, GPIO0/3/45/46 are
+# strapping pins, GPIO19/20 are the USB PHY, and 8-18 are the codec bus, the
+# SD card and the I2S port.
+# CONFIG_OSYNTH_MIC_DIN_GPIO=4
+
+# Only when the mic masters its own clocks (SHARE_CLOCKS=n).
+# CONFIG_OSYNTH_MIC_BCLK_GPIO=6
+# CONFIG_OSYNTH_MIC_WS_GPIO=7
+# CONFIG_OSYNTH_MIC_SLOT_BITS=32
+
+# Which half of the frame the mic drives — its L/R strap decides, and reading
+# the wrong one is silence from a mic that is working perfectly. An INMP441
+# breakout usually ships with L/R floating, which is not a defined state: tie
+# it. The chosen slot is duplicated to both channels on the way in, so a mono
+# mic folds to itself and a mono looper take does not lose 6 dB.
+# CONFIG_OSYNTH_MIC_SLOT_LEFT=y
+# CONFIG_OSYNTH_MIC_SLOT_RIGHT=y
+
+# Two mics on one bus strapped opposite ways, or an ES7210-class array: keep
+# both slots as a real stereo pair and ignore the choice above.
+# CONFIG_OSYNTH_MIC_STEREO=y
+
+# Digital gain in bits, applied where the 24-bit word is truncated to 16, so
+# it is free — each bit is +6 dB out of precision the int16 pipeline was going
+# to discard. Saturating. A MEMS mic at conversational distance sits well
+# below full scale; 2 or 3 is a reasonable start, with `in.gain` on top. Watch
+# `in pk` in the heartbeat, which reads after this and before `in.gain`.
+# CONFIG_OSYNTH_MIC_SHIFT=0
+
 # --- ES8388 codec (only with OSYNTH_FRONTEND_ES8388) ------------------------
 
 # Control bus. Internal pull-ups are enabled so a bare chip has some chance of
@@ -219,3 +278,16 @@ CONFIG_OSYNTH_LOOP_STORE_SD=y
 # sdkconfig.defaults) is on. Default 5 on this target. Rarely wanted here —
 # USB-MIDI comes free with the USB-OTG peripheral this chip has.
 # CONFIG_OSYNTH_SERIAL_MIDI_RX_GPIO=5
+
+# --- USB host (S35) ---------------------------------------------------------
+
+# Hub support in IDF's USB host library. On, so a hub between osynth and a
+# controller works and several controllers can be attached at once — they all
+# merge into the MIDI router, which is omni anyway. Costs a little RAM and the
+# hub driver's task; harmless in device mode, where the host library is never
+# installed at all.
+#
+# Only reachable when the port is in host mode (`usb.mode` = host, persisted
+# and applied at boot). On a build with no I2S DAC the USB sink is the audio
+# clock and host mode is refused outright — see SYNTH_USB_IS_AUDIO_CLOCK.
+CONFIG_USB_HOST_HUBS_SUPPORTED=y

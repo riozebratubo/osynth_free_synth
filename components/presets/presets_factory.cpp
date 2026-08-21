@@ -64,6 +64,7 @@ static const preset_pair_t kSubFatSaw[] = {
     P(SYNTH_PID_COMMON_UNISON, 2), P(SYNTH_PID_COMMON_UNI_DETUNE, 16.0f),
     P(SYNTH_PID_COMMON_UNI_SPREAD, 0.8f),
     MOD(0, SYNTH_MOD_SRC_WHEEL, SUB_PID_LFO1_PITCH, 0.35f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.18f),
 };
 
@@ -77,6 +78,7 @@ static const preset_pair_t kSubAcid[] = {
     P(SUB_PID_ENV1_RELEASE, 0.08f),
     P(SYNTH_PID_COMMON_GLIDE, 0.07f),
     MOD(0, SYNTH_MOD_SRC_WHEEL, SUB_PID_FLT_CUTOFF, 0.5f),
+    P(FX_PID_DLY_ON, 1),
     P(FX_PID_DLY_MIX, 0.22f), P(FX_PID_DLY_TIME, 0.375f),
     P(FX_PID_DLY_FB, 0.45f), P(FX_PID_DLY_PP, 1),
 };
@@ -91,6 +93,7 @@ static const preset_pair_t kSubWarmPad[] = {
     P(SUB_PID_ENV1_ATTACK, 0.7f), P(SUB_PID_ENV1_DECAY, 1.0f),
     P(SUB_PID_ENV1_SUSTAIN, 0.9f), P(SUB_PID_ENV1_RELEASE, 1.8f),
     P(SUB_PID_LFO2_RATE, 0.25f), P(SUB_PID_LFO2_CUTOFF, 0.3f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.4f), P(FX_PID_REV_MIX, 0.35f),
     P(FX_PID_REV_SIZE, 0.7f),
 };
@@ -104,6 +107,7 @@ static const preset_pair_t kSubPwmStrings[] = {
     P(SUB_PID_LFO2_RATE, 0.6f),
     MOD(0, SYNTH_MOD_SRC_LFO2, SUB_PID_OSC1_PW, 0.35f),
     MOD(1, SYNTH_MOD_SRC_WHEEL, SUB_PID_LFO1_PITCH, 0.3f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.5f), P(FX_PID_REV_MIX, 0.25f),
 };
 
@@ -125,6 +129,7 @@ static const preset_pair_t kSubDeepSub[] = {
     P(SUB_PID_FLT_CUTOFF, 700.0f),
     P(SUB_PID_ENV1_ATTACK, 0.003f), P(SUB_PID_ENV1_DECAY, 0.4f),
     P(SUB_PID_ENV1_SUSTAIN, 0.9f), P(SUB_PID_ENV1_RELEASE, 0.12f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.05f),
 };
 
@@ -136,6 +141,7 @@ static const preset_pair_t kSubRiser[] = {
     P(SUB_PID_ENV2_ATTACK, 3.5f), P(SUB_PID_ENV2_SUSTAIN, 1.0f),
     P(SUB_PID_ENV1_ATTACK, 1.5f), P(SUB_PID_ENV1_SUSTAIN, 1.0f),
     P(SUB_PID_ENV1_RELEASE, 1.5f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.4f), P(FX_PID_REV_SIZE, 0.8f),
 };
 
@@ -150,7 +156,9 @@ static const preset_pair_t kSubRaveStab[] = {
     P(SUB_PID_ENV1_RELEASE, 0.3f),
     P(SYNTH_PID_COMMON_UNISON, 3), P(SYNTH_PID_COMMON_UNI_DETUNE, 30.0f),
     P(SYNTH_PID_COMMON_UNI_SPREAD, 1.0f),
+    P(FX_PID_DLY_ON, 1),
     P(FX_PID_DLY_MIX, 0.25f), P(FX_PID_DLY_TIME, 0.25f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_DLY_PP, 1), P(FX_PID_REV_MIX, 0.2f),
 };
 
@@ -163,6 +171,7 @@ static const preset_pair_t kSubGlideLead[] = {
     P(SUB_PID_FLT_CUTOFF, 2400.0f), P(SUB_PID_FLT_RESO, 0.3f),
     P(SUB_PID_ENV1_SUSTAIN, 0.8f),
     MOD(0, SYNTH_MOD_SRC_WHEEL, SUB_PID_LFO1_PITCH, 0.4f),
+    P(FX_PID_DLY_ON, 1),
     P(FX_PID_DLY_MIX, 0.3f), P(FX_PID_DLY_TIME, 0.48f),
     P(FX_PID_DLY_FB, 0.5f), P(FX_PID_DLY_TONE, 3000.0f),
 };
@@ -176,6 +185,7 @@ static const preset_pair_t kSubBrass[] = {
     P(SUB_PID_ENV1_ATTACK, 0.045f), P(SUB_PID_ENV1_SUSTAIN, 0.9f),
     P(SUB_PID_ENV1_RELEASE, 0.25f),
     P(SYNTH_PID_COMMON_UNISON, 2), P(SYNTH_PID_COMMON_UNI_DETUNE, 9.0f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.2f),
 };
 
@@ -200,6 +210,7 @@ static const preset_pair_t kSubHollowKeys[] = {
     P(SUB_PID_FLT_CUTOFF, 3800.0f), P(SUB_PID_FLT_ENV, 0.8f),
     P(SUB_PID_ENV1_DECAY, 0.7f), P(SUB_PID_ENV1_SUSTAIN, 0.25f),
     P(SUB_PID_ENV1_RELEASE, 0.4f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.3f), P(FX_PID_REV_MIX, 0.3f),
 };
 
@@ -212,7 +223,9 @@ static const preset_pair_t kSubStringMachine[] = {
     P(SUB_PID_ENV1_RELEASE, 1.1f),
     P(SYNTH_PID_COMMON_UNISON, 2), P(SYNTH_PID_COMMON_UNI_DETUNE, 20.0f),
     P(SYNTH_PID_COMMON_UNI_SPREAD, 1.0f),
+    P(FX_PID_CHO_ON, 1),
     P(FX_PID_CHO_MIX, 0.55f), P(FX_PID_CHO_RATE, 0.7f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_DEPTH, 5.0f), P(FX_PID_REV_MIX, 0.3f),
 };
 
@@ -224,6 +237,7 @@ static const preset_pair_t kSubZapPerc[] = {
     P(SUB_PID_ENV2_ATTACK, 0.12f), P(SUB_PID_ENV2_SUSTAIN, 1.0f),
     P(SUB_PID_ENV1_DECAY, 0.18f), P(SUB_PID_ENV1_SUSTAIN, 0.0f),
     P(SUB_PID_ENV1_RELEASE, 0.12f),
+    P(FX_PID_DLY_ON, 1),
     P(FX_PID_DLY_MIX, 0.25f), P(FX_PID_DLY_PP, 1),
 };
 
@@ -235,6 +249,7 @@ static const preset_pair_t kSubSoftKeys[] = {
     P(SUB_PID_ENV1_ATTACK, 0.01f), P(SUB_PID_ENV1_DECAY, 0.9f),
     P(SUB_PID_ENV1_SUSTAIN, 0.4f), P(SUB_PID_ENV1_RELEASE, 0.6f),
     MOD(0, SYNTH_MOD_SRC_VEL, SUB_PID_FLT_CUTOFF, 0.35f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.2f), P(FX_PID_REV_MIX, 0.25f),
 };
 
@@ -265,6 +280,7 @@ static const preset_pair_t kSubLadderLead[] = {
     P(SUB_PID_ENV1_SUSTAIN, 0.8f), P(SUB_PID_ENV1_RELEASE, 0.2f),
     P(SYNTH_PID_COMMON_GLIDE, 0.06f),
     MOD(0, SYNTH_MOD_SRC_WHEEL, SUB_PID_LFO1_PITCH, 0.4f),
+    P(FX_PID_DLY_ON, 1),
     P(FX_PID_DLY_MIX, 0.18f), P(FX_PID_DLY_TIME, 0.28f),
 };
 
@@ -278,6 +294,7 @@ static const preset_pair_t kSubLadderAcid[] = {
     P(SUB_PID_ENV1_DECAY, 0.25f), P(SUB_PID_ENV1_SUSTAIN, 0.3f),
     P(SUB_PID_ENV1_RELEASE, 0.06f),
     P(SYNTH_PID_COMMON_GLIDE, 0.05f),
+    P(FX_PID_DLY_ON, 1),
     P(FX_PID_DLY_MIX, 0.22f), P(FX_PID_DLY_FB, 0.4f),
 };
 
@@ -290,6 +307,7 @@ static const preset_pair_t kSubVowelPad[] = {
     P(SUB_PID_ENV1_ATTACK, 0.5f), P(SUB_PID_ENV1_SUSTAIN, 0.9f),
     P(SUB_PID_ENV1_RELEASE, 1.2f),
     MOD(0, SYNTH_MOD_SRC_WHEEL, SUB_PID_FLT_VOWEL, 0.7f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.4f), P(FX_PID_REV_SIZE, 0.7f),
 };
 
@@ -303,6 +321,7 @@ static const preset_pair_t kSubTalkingLead[] = {
     P(SUB_PID_LFO2_RATE, 3.2f), P(SUB_PID_LFO2_WAVE, 1),
     MOD(0, SYNTH_MOD_SRC_LFO2, SUB_PID_FLT_VOWEL, 0.5f),
     MOD(1, SYNTH_MOD_SRC_VEL, SUB_PID_FLT_VOWEL, 0.3f),
+    P(FX_PID_DLY_ON, 1),
     P(FX_PID_DLY_MIX, 0.2f),
 };
 
@@ -315,6 +334,7 @@ static const preset_pair_t kSubFormantStab[] = {
     P(SUB_PID_ENV2_DECAY, 0.09f), P(SUB_PID_ENV2_SUSTAIN, 0.0f),
     P(SUB_PID_ENV1_ATTACK, 0.002f), P(SUB_PID_ENV1_DECAY, 0.18f),
     P(SUB_PID_ENV1_SUSTAIN, 0.0f), P(SUB_PID_ENV1_RELEASE, 0.1f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.22f),
 };
 
@@ -326,6 +346,7 @@ static const preset_pair_t kSubNotchSweep[] = {
     P(SUB_PID_LFO2_RATE, 0.35f), P(SUB_PID_LFO2_CUTOFF, 2.2f),
     P(SUB_PID_ENV1_ATTACK, 0.15f), P(SUB_PID_ENV1_SUSTAIN, 0.9f),
     P(SUB_PID_ENV1_RELEASE, 0.5f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.25f),
 };
 
@@ -338,6 +359,7 @@ static const preset_pair_t kSubPhaseKeys[] = {
     P(SUB_PID_LFO2_RATE, 0.6f), P(SUB_PID_LFO2_CUTOFF, 3.0f),
     P(SUB_PID_ENV1_DECAY, 1.2f), P(SUB_PID_ENV1_SUSTAIN, 0.45f),
     P(SUB_PID_ENV1_RELEASE, 0.7f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.25f), P(FX_PID_REV_MIX, 0.3f),
 };
 
@@ -349,6 +371,7 @@ static const preset_pair_t kSubPeakSweep[] = {
     P(SUB_PID_ENV2_DECAY, 0.7f), P(SUB_PID_ENV2_SUSTAIN, 0.25f),
     P(SUB_PID_ENV1_SUSTAIN, 0.75f), P(SUB_PID_ENV1_RELEASE, 0.35f),
     MOD(0, SYNTH_MOD_SRC_WHEEL, SUB_PID_FLT_CUTOFF, 0.5f),
+    P(FX_PID_DLY_ON, 1),
     P(FX_PID_DLY_MIX, 0.15f),
 };
 
@@ -361,6 +384,7 @@ static const preset_pair_t kSubDualStab[] = {
     P(SUB_PID_ENV2_DECAY, 0.2f), P(SUB_PID_ENV2_SUSTAIN, 0.0f),
     P(SUB_PID_ENV1_DECAY, 0.3f), P(SUB_PID_ENV1_SUSTAIN, 0.25f),
     P(SUB_PID_ENV1_RELEASE, 0.18f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.2f),
 };
 
@@ -372,6 +396,7 @@ static const preset_pair_t kSubNarrowLead[] = {
     P(SUB_PID_OSC1_WAVE, 3), P(SUB_PID_OSC1_PW, 0.25f),
     P(SUB_PID_ENV1_SUSTAIN, 0.85f), P(SUB_PID_ENV1_RELEASE, 0.12f),
     P(SYNTH_PID_COMMON_GLIDE, 0.04f),
+    P(FX_PID_DLY_ON, 1),
     P(FX_PID_DLY_MIX, 0.25f), P(FX_PID_DLY_FB, 0.35f),
 };
 
@@ -384,6 +409,7 @@ static const preset_pair_t kSubDrivenSaw[] = {
     P(SUB_PID_MIX_OSC2, 0.6f),
     P(SUB_PID_ENV1_SUSTAIN, 0.8f), P(SUB_PID_ENV1_RELEASE, 0.25f),
     P(SYNTH_PID_COMMON_UNISON, 2), P(SYNTH_PID_COMMON_UNI_DETUNE, 14.0f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.2f),
 };
 
@@ -408,6 +434,7 @@ static const preset_pair_t kSubSuperSaw[] = {
     P(SUB_PID_ENV1_RELEASE, 0.6f),
     P(SYNTH_PID_COMMON_UNISON, 4), P(SYNTH_PID_COMMON_UNI_DETUNE, 22.0f),
     P(SYNTH_PID_COMMON_UNI_SPREAD, 1.0f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_DLY_ON, 1),
     P(FX_PID_REV_MIX, 0.3f), P(FX_PID_DLY_MIX, 0.15f),
 };
 
@@ -434,6 +461,7 @@ static const preset_pair_t kSubOrganTone[] = {
     P(SUB_PID_FLT_CUTOFF, 7000.0f), P(SUB_PID_FLT_ENV, 0.0f),
     P(SUB_PID_ENV1_ATTACK, 0.004f), P(SUB_PID_ENV1_DECAY, 0.05f),
     P(SUB_PID_ENV1_SUSTAIN, 1.0f), P(SUB_PID_ENV1_RELEASE, 0.05f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.3f), P(FX_PID_REV_MIX, 0.15f),
 };
 
@@ -482,6 +510,7 @@ static const preset_pair_t kSubSnareSynth[] = {
     P(SUB_PID_ENV2_DECAY, 0.06f), P(SUB_PID_ENV2_SUSTAIN, 0.0f),
     P(SUB_PID_ENV1_ATTACK, 0.001f), P(SUB_PID_ENV1_DECAY, 0.16f),
     P(SUB_PID_ENV1_SUSTAIN, 0.0f), P(SUB_PID_ENV1_RELEASE, 0.1f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.2f),
 };
 
@@ -495,6 +524,7 @@ static const preset_pair_t kSubTomSynth[] = {
     P(SUB_PID_ENV2_DECAY, 0.08f), P(SUB_PID_ENV2_SUSTAIN, 0.0f),
     P(SUB_PID_ENV1_ATTACK, 0.001f), P(SUB_PID_ENV1_DECAY, 0.45f),
     P(SUB_PID_ENV1_SUSTAIN, 0.0f), P(SUB_PID_ENV1_RELEASE, 0.25f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.18f),
 };
 
@@ -507,6 +537,7 @@ static const preset_pair_t kSubWindNoise[] = {
     P(SUB_PID_LFO2_RATE, 0.18f), P(SUB_PID_LFO2_CUTOFF, 2.5f),
     P(SUB_PID_ENV1_ATTACK, 1.2f), P(SUB_PID_ENV1_SUSTAIN, 1.0f),
     P(SUB_PID_ENV1_RELEASE, 1.5f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.45f), P(FX_PID_REV_SIZE, 0.8f),
 };
 
@@ -519,6 +550,7 @@ static const preset_pair_t kSubDarkDrone[] = {
     P(SUB_PID_ENV1_ATTACK, 2.0f), P(SUB_PID_ENV1_SUSTAIN, 1.0f),
     P(SUB_PID_ENV1_RELEASE, 2.5f),
     P(SUB_PID_LFO2_RATE, 0.09f), P(SUB_PID_LFO2_CUTOFF, 1.2f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.5f), P(FX_PID_REV_SIZE, 0.85f),
 };
 
@@ -530,6 +562,7 @@ static const preset_pair_t kSubGlassPad[] = {
     P(SUB_PID_OSC2_FINE, 9.0f), P(SUB_PID_MIX_OSC2, 0.45f),
     P(SUB_PID_ENV1_ATTACK, 0.8f), P(SUB_PID_ENV1_SUSTAIN, 0.85f),
     P(SUB_PID_ENV1_RELEASE, 1.4f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.35f), P(FX_PID_REV_MIX, 0.45f),
 };
 
@@ -543,6 +576,7 @@ static const preset_pair_t kSubBellPluck[] = {
     P(SUB_PID_ENV2_DECAY, 0.25f), P(SUB_PID_ENV2_SUSTAIN, 0.0f),
     P(SUB_PID_ENV1_ATTACK, 0.001f), P(SUB_PID_ENV1_DECAY, 1.6f),
     P(SUB_PID_ENV1_SUSTAIN, 0.0f), P(SUB_PID_ENV1_RELEASE, 1.2f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.35f),
 };
 
@@ -552,6 +586,7 @@ static const preset_pair_t kSubOctaveStack[] = {
     P(SUB_PID_MIX_OSC1, 0.6f), P(SUB_PID_MIX_OSC2, 0.4f),
     P(SUB_PID_FLT_CUTOFF, 3200.0f), P(SUB_PID_FLT_ENV, 1.4f),
     P(SUB_PID_ENV1_SUSTAIN, 0.85f), P(SUB_PID_ENV1_RELEASE, 0.3f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.2f),
 };
 
@@ -565,6 +600,7 @@ static const preset_pair_t kSubDetunedKeys[] = {
     P(SUB_PID_ENV2_DECAY, 0.2f), P(SUB_PID_ENV2_SUSTAIN, 0.15f),
     P(SUB_PID_ENV1_DECAY, 0.8f), P(SUB_PID_ENV1_SUSTAIN, 0.45f),
     P(SUB_PID_ENV1_RELEASE, 0.4f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.2f), P(FX_PID_REV_MIX, 0.25f),
 };
 
@@ -576,6 +612,7 @@ static const preset_pair_t kSubSoftChords[] = {
     P(SUB_PID_FLT_CUTOFF, 2200.0f), P(SUB_PID_FLT_ENV, 0.8f),
     P(SUB_PID_ENV1_ATTACK, 0.35f), P(SUB_PID_ENV1_SUSTAIN, 0.9f),
     P(SUB_PID_ENV1_RELEASE, 1.0f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.3f), P(FX_PID_REV_MIX, 0.35f),
 };
 
@@ -589,6 +626,7 @@ static const preset_pair_t kSubVelKeys[] = {
     P(SUB_PID_ENV1_RELEASE, 0.35f),
     MOD(0, SYNTH_MOD_SRC_VEL, SUB_PID_FLT_CUTOFF, 0.7f),
     MOD(1, SYNTH_MOD_SRC_VEL, SUB_PID_FLT_DRIVE, 0.4f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.25f),
 };
 
@@ -601,6 +639,7 @@ static const preset_pair_t kSubDropTail[] = {
     P(SUB_PID_ENV1_ATTACK, 0.005f), P(SUB_PID_ENV1_DECAY, 3.0f),
     P(SUB_PID_ENV1_SUSTAIN, 0.0f), P(SUB_PID_ENV1_RELEASE, 2.0f),
     P(SYNTH_PID_COMMON_GLIDE, 0.5f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.3f),
 };
 
@@ -613,6 +652,7 @@ static const preset_pair_t kSubFifthLead[] = {
     P(SUB_PID_FLT_CUTOFF, 5000.0f), P(SUB_PID_FLT_ENV, 0.0f),
     P(SUB_PID_ENV1_ATTACK, 0.002f), P(SUB_PID_ENV1_SUSTAIN, 1.0f),
     P(SUB_PID_ENV1_RELEASE, 0.05f),
+    P(FX_PID_DLY_ON, 1),
     P(FX_PID_DLY_MIX, 0.22f), P(FX_PID_DLY_TIME, 0.2f),
 };
 
@@ -627,6 +667,7 @@ static const preset_pair_t kSubBandWash[] = {
     P(SUB_PID_LFO2_CUTOFF, 3.5f),
     P(SUB_PID_ENV1_ATTACK, 1.5f), P(SUB_PID_ENV1_SUSTAIN, 1.0f),
     P(SUB_PID_ENV1_RELEASE, 2.0f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.5f), P(FX_PID_REV_SIZE, 0.8f),
 };
 
@@ -647,6 +688,7 @@ static const preset_pair_t kAddTonewheel[] = {
     P(ADD_PID_ENV1_ATTACK, 0.002f), P(ADD_PID_ENV1_DECAY, 0.1f),
     P(ADD_PID_ENV1_SUSTAIN, 1.0f), P(ADD_PID_ENV1_RELEASE, 0.06f),
     P(ADD_PID_LFO1_RATE, 6.5f), P(ADD_PID_LFO1_PITCH, 0.05f),
+    P(FX_PID_CHO_ON, 1),
     P(FX_PID_CHO_MIX, 0.25f),
 };
 
@@ -663,6 +705,7 @@ static const preset_pair_t kAddGlassHarp[] = {
     P(ADD_PID_ENV2_DECAY, 1.2f), P(ADD_PID_ENV2_SUSTAIN, 0.0f),
     P(ADD_PID_ENV1_ATTACK, 0.004f), P(ADD_PID_ENV1_DECAY, 1.8f),
     P(ADD_PID_ENV1_SUSTAIN, 0.0f), P(ADD_PID_ENV1_RELEASE, 1.2f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.35f), P(FX_PID_REV_SIZE, 0.7f),
 };
 
@@ -674,6 +717,7 @@ static const preset_pair_t kAddCarillon[] = {
     P(ADD_PID_ENV2_DECAY, 1.5f), P(ADD_PID_ENV2_SUSTAIN, 0.0f),
     P(ADD_PID_ENV1_ATTACK, 0.001f), P(ADD_PID_ENV1_DECAY, 2.5f),
     P(ADD_PID_ENV1_SUSTAIN, 0.0f), P(ADD_PID_ENV1_RELEASE, 2.0f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.3f), P(FX_PID_REV_SIZE, 0.7f),
 };
 
@@ -690,6 +734,7 @@ static const preset_pair_t kAddChiffFlute[] = {
     P(ADD_PID_ENV1_ATTACK, 0.06f), P(ADD_PID_ENV1_DECAY, 0.2f),
     P(ADD_PID_ENV1_SUSTAIN, 0.9f), P(ADD_PID_ENV1_RELEASE, 0.25f),
     MOD(0, SYNTH_MOD_SRC_WHEEL, ADD_PID_LFO1_PITCH, 0.3f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.2f),
 };
 
@@ -700,6 +745,7 @@ static const preset_pair_t kAddChoirPad[] = {
     P(ADD_PID_ENV2_ATTACK, 0.8f), P(ADD_PID_ENV2_SUSTAIN, 0.7f),
     P(ADD_PID_ENV1_ATTACK, 0.5f), P(ADD_PID_ENV1_DECAY, 0.5f),
     P(ADD_PID_ENV1_SUSTAIN, 0.95f), P(ADD_PID_ENV1_RELEASE, 1.2f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.4f), P(FX_PID_REV_MIX, 0.4f),
     P(FX_PID_REV_SIZE, 0.75f),
 };
@@ -712,6 +758,7 @@ static const preset_pair_t kAddClavBars[] = {
     P(ADD_PID_ENV2_DECAY, 0.15f), P(ADD_PID_ENV2_SUSTAIN, 0.0f),
     P(ADD_PID_ENV1_ATTACK, 0.001f), P(ADD_PID_ENV1_DECAY, 0.5f),
     P(ADD_PID_ENV1_SUSTAIN, 0.15f), P(ADD_PID_ENV1_RELEASE, 0.1f),
+    P(FX_PID_DLY_ON, 1),
     P(FX_PID_DLY_MIX, 0.15f), P(FX_PID_DLY_TIME, 0.28f),
     P(FX_PID_DLY_FB, 0.3f),
 };
@@ -729,7 +776,9 @@ static const preset_pair_t kAddKalimba[] = {
     P(ADD_PID_ENV2_DECAY, 0.2f), P(ADD_PID_ENV2_SUSTAIN, 0.0f),
     P(ADD_PID_ENV1_ATTACK, 0.001f), P(ADD_PID_ENV1_DECAY, 0.45f),
     P(ADD_PID_ENV1_SUSTAIN, 0.0f), P(ADD_PID_ENV1_RELEASE, 0.35f),
+    P(FX_PID_DLY_ON, 1),
     P(FX_PID_DLY_MIX, 0.2f), P(FX_PID_DLY_TIME, 0.3f), P(FX_PID_DLY_PP, 1),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.25f),
 };
 
@@ -740,6 +789,7 @@ static const preset_pair_t kAddEvenBells[] = {
     P(ADD_PID_ENV2_DECAY, 1.2f), P(ADD_PID_ENV2_SUSTAIN, 0.0f),
     P(ADD_PID_ENV1_DECAY, 2.0f), P(ADD_PID_ENV1_SUSTAIN, 0.0f),
     P(ADD_PID_ENV1_RELEASE, 1.5f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.35f),
 };
 
@@ -749,6 +799,7 @@ static const preset_pair_t kAddDarkOrgan[] = {
     P(ADD_PID_ENV_BRIGHT, 0.0f), P(ADD_PID_VEL_BRIGHT, 0.0f),
     P(ADD_PID_ENV1_ATTACK, 0.004f), P(ADD_PID_ENV1_SUSTAIN, 1.0f),
     P(ADD_PID_ENV1_RELEASE, 0.1f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.25f), P(FX_PID_REV_DAMP, 0.6f),
 };
 
@@ -759,6 +810,7 @@ static const preset_pair_t kAddHarmonicRiser[] = {
     P(ADD_PID_ENV2_ATTACK, 3.0f), P(ADD_PID_ENV2_SUSTAIN, 1.0f),
     P(ADD_PID_ENV1_ATTACK, 0.8f), P(ADD_PID_ENV1_SUSTAIN, 1.0f),
     P(ADD_PID_ENV1_RELEASE, 1.0f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.4f),
 };
 
@@ -769,6 +821,7 @@ static const preset_pair_t kAddShimmerKeys[] = {
     P(ADD_PID_LFO2_RATE, 0.5f), P(ADD_PID_LFO2_BRIGHT, 0.25f),
     P(ADD_PID_ENV1_DECAY, 1.2f), P(ADD_PID_ENV1_SUSTAIN, 0.3f),
     P(ADD_PID_ENV1_RELEASE, 0.8f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.3f), P(FX_PID_REV_MIX, 0.3f),
 };
 
@@ -781,6 +834,7 @@ static const preset_pair_t kAddDroneStack[] = {
     P(ADD_PID_ENV1_RELEASE, 2.5f),
     P(SYNTH_PID_COMMON_UNISON, 2), P(SYNTH_PID_COMMON_UNI_DETUNE, 10.0f),
     P(SYNTH_PID_COMMON_UNI_SPREAD, 1.0f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.45f), P(FX_PID_REV_SIZE, 0.85f),
 };
 
@@ -791,6 +845,7 @@ static const preset_pair_t kAddToyPiano[] = {
     P(ADD_PID_ENV2_DECAY, 0.3f), P(ADD_PID_ENV2_SUSTAIN, 0.0f),
     P(ADD_PID_ENV1_ATTACK, 0.001f), P(ADD_PID_ENV1_DECAY, 0.8f),
     P(ADD_PID_ENV1_SUSTAIN, 0.0f), P(ADD_PID_ENV1_RELEASE, 0.5f),
+    P(FX_PID_DLY_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_DLY_MIX, 0.12f), P(FX_PID_REV_MIX, 0.2f),
 };
 
@@ -800,6 +855,7 @@ static const preset_pair_t kAddDriftPad[] = {
     P(ADD_PID_LFO2_RATE, 0.2f), P(ADD_PID_LFO2_BRIGHT, 0.35f),
     P(ADD_PID_ENV1_ATTACK, 0.6f), P(ADD_PID_ENV1_SUSTAIN, 0.9f),
     P(ADD_PID_ENV1_RELEASE, 1.5f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.35f), P(FX_PID_REV_MIX, 0.35f),
 };
 
@@ -837,6 +893,7 @@ static const preset_pair_t kAddFullOrgan[] = {
     P(ADD_PID_VEL_BRIGHT, 0.0f),
     P(ADD_PID_ENV1_ATTACK, 0.003f), P(ADD_PID_ENV1_SUSTAIN, 1.0f),
     P(ADD_PID_ENV1_RELEASE, 0.06f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.3f), P(FX_PID_REV_MIX, 0.2f),
 };
 
@@ -852,6 +909,7 @@ static const preset_pair_t kAddJazzOrgan[] = {
     P(ADD_PID_ENV1_ATTACK, 0.004f), P(ADD_PID_ENV1_SUSTAIN, 1.0f),
     P(ADD_PID_ENV1_RELEASE, 0.05f),
     P(ADD_PID_LFO1_RATE, 6.8f), P(ADD_PID_LFO1_PITCH, 0.04f),
+    P(FX_PID_CHO_ON, 1),
     P(FX_PID_CHO_MIX, 0.35f),
 };
 
@@ -868,6 +926,7 @@ static const preset_pair_t kAddGospelOrgan[] = {
     P(ADD_PID_ENV1_RELEASE, 0.05f),
     P(ADD_PID_FLT_ON, 1), P(ADD_PID_FLT_DRIVE, 0.45f),
     P(ADD_PID_FLT_CUTOFF, 5000.0f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.3f), P(FX_PID_REV_MIX, 0.2f),
 };
 
@@ -878,6 +937,7 @@ static const preset_pair_t kAddReedPipe[] = {
     P(ADD_PID_VEL_BRIGHT, 0.2f),
     P(ADD_PID_ENV1_ATTACK, 0.05f), P(ADD_PID_ENV1_SUSTAIN, 1.0f),
     P(ADD_PID_ENV1_RELEASE, 0.12f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.3f), P(FX_PID_REV_SIZE, 0.65f),
 };
 
@@ -892,6 +952,7 @@ static const preset_pair_t kAddPrincipalPipe[] = {
     P(ADD_PID_BRIGHT, 0.5f), P(ADD_PID_ENV_BRIGHT, 0.25f),
     P(ADD_PID_ENV1_ATTACK, 0.12f), P(ADD_PID_ENV1_SUSTAIN, 1.0f),
     P(ADD_PID_ENV1_RELEASE, 0.5f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.45f), P(FX_PID_REV_SIZE, 0.85f),
 };
 
@@ -906,6 +967,7 @@ static const preset_pair_t kAddOctaveOrgan[] = {
     P(ADD_PID_BRIGHT, 0.7f), P(ADD_PID_ENV_BRIGHT, 0.0f),
     P(ADD_PID_ENV1_ATTACK, 0.003f), P(ADD_PID_ENV1_SUSTAIN, 1.0f),
     P(ADD_PID_ENV1_RELEASE, 0.06f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.2f), P(FX_PID_REV_MIX, 0.2f),
 };
 
@@ -920,6 +982,7 @@ static const preset_pair_t kAddFifthOrgan[] = {
     P(ADD_PID_BRIGHT, 0.68f), P(ADD_PID_ENV_BRIGHT, 0.0f),
     P(ADD_PID_ENV1_ATTACK, 0.004f), P(ADD_PID_ENV1_SUSTAIN, 1.0f),
     P(ADD_PID_ENV1_RELEASE, 0.07f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.25f),
 };
 
@@ -933,6 +996,7 @@ static const preset_pair_t kAddVocalAh[] = {
     P(ADD_PID_ENV1_ATTACK, 0.25f), P(ADD_PID_ENV1_SUSTAIN, 0.95f),
     P(ADD_PID_ENV1_RELEASE, 0.8f),
     P(ADD_PID_LFO1_RATE, 5.2f), P(ADD_PID_LFO1_PITCH, 0.06f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.45f), P(FX_PID_REV_SIZE, 0.75f),
 };
 
@@ -944,6 +1008,7 @@ static const preset_pair_t kAddVocalOoh[] = {
     P(ADD_PID_FLT_CUTOFF, 900.0f),
     P(ADD_PID_ENV1_ATTACK, 0.4f), P(ADD_PID_ENV1_SUSTAIN, 0.95f),
     P(ADD_PID_ENV1_RELEASE, 1.0f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.25f), P(FX_PID_REV_MIX, 0.5f),
 };
 
@@ -959,6 +1024,7 @@ static const preset_pair_t kAddFormantChoir[] = {
     P(ADD_PID_ENV1_RELEASE, 1.2f),
     MOD(0, SYNTH_MOD_SRC_ENV2, ADD_PID_FLT_VOWEL, 0.55f),
     MOD(1, SYNTH_MOD_SRC_WHEEL, ADD_PID_FLT_VOWEL, 0.4f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.5f), P(FX_PID_REV_SIZE, 0.8f),
 };
 
@@ -976,6 +1042,7 @@ static const preset_pair_t kAddVibraphone[] = {
     P(ADD_PID_ENV1_ATTACK, 0.002f), P(ADD_PID_ENV1_DECAY, 2.2f),
     P(ADD_PID_ENV1_SUSTAIN, 0.0f), P(ADD_PID_ENV1_RELEASE, 1.5f),
     P(ADD_PID_LFO2_RATE, 5.0f), P(ADD_PID_LFO2_BRIGHT, 0.25f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.35f),
 };
 
@@ -993,6 +1060,7 @@ static const preset_pair_t kAddMarimba[] = {
     P(ADD_PID_ENV2_SUSTAIN, 0.0f),
     P(ADD_PID_ENV1_ATTACK, 0.001f), P(ADD_PID_ENV1_DECAY, 0.55f),
     P(ADD_PID_ENV1_SUSTAIN, 0.0f), P(ADD_PID_ENV1_RELEASE, 0.35f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.25f),
 };
 
@@ -1009,6 +1077,7 @@ static const preset_pair_t kAddCeleste[] = {
     P(ADD_PID_ENV2_DECAY, 0.35f), P(ADD_PID_ENV2_SUSTAIN, 0.0f),
     P(ADD_PID_ENV1_ATTACK, 0.001f), P(ADD_PID_ENV1_DECAY, 1.4f),
     P(ADD_PID_ENV1_SUSTAIN, 0.0f), P(ADD_PID_ENV1_RELEASE, 0.9f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.4f),
 };
 
@@ -1021,6 +1090,7 @@ static const preset_pair_t kAddGong[] = {
     P(ADD_PID_ENV2_SUSTAIN, 0.0f),
     P(ADD_PID_ENV1_ATTACK, 0.008f), P(ADD_PID_ENV1_DECAY, 4.0f),
     P(ADD_PID_ENV1_SUSTAIN, 0.0f), P(ADD_PID_ENV1_RELEASE, 3.0f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.5f), P(FX_PID_REV_SIZE, 0.9f),
 };
 
@@ -1037,6 +1107,7 @@ static const preset_pair_t kAddSingingBowl[] = {
     P(ADD_PID_ENV1_ATTACK, 0.03f), P(ADD_PID_ENV1_DECAY, 6.0f),
     P(ADD_PID_ENV1_SUSTAIN, 0.15f), P(ADD_PID_ENV1_RELEASE, 4.0f),
     P(ADD_PID_LFO2_RATE, 0.15f), P(ADD_PID_LFO2_BRIGHT, 0.2f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.55f), P(FX_PID_REV_SIZE, 0.9f),
 };
 
@@ -1048,6 +1119,7 @@ static const preset_pair_t kAddHarmonium[] = {
     P(ADD_PID_ENV1_RELEASE, 0.2f),
     P(ADD_PID_FLT_ON, 1), P(ADD_PID_FLT_CUTOFF, 3500.0f),
     P(ADD_PID_FLT_RESO, 0.2f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.2f), P(FX_PID_REV_MIX, 0.3f),
 };
 
@@ -1061,6 +1133,7 @@ static const preset_pair_t kAddAccordion[] = {
     P(ADD_PID_FLT_SPREAD, 2.5f), P(ADD_PID_FLT_CUTOFF, 1400.0f),
     P(ADD_PID_FLT_RESO, 0.3f),
     P(ADD_PID_LFO1_RATE, 6.0f), P(ADD_PID_LFO1_PITCH, 0.08f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.3f), P(FX_PID_REV_MIX, 0.22f),
 };
 
@@ -1073,6 +1146,7 @@ static const preset_pair_t kAddStringStack[] = {
     P(ADD_PID_ENV1_ATTACK, 0.3f), P(ADD_PID_ENV1_SUSTAIN, 0.95f),
     P(ADD_PID_ENV1_RELEASE, 1.0f),
     P(ADD_PID_LFO1_RATE, 4.5f), P(ADD_PID_LFO1_PITCH, 0.05f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.35f), P(FX_PID_REV_MIX, 0.4f),
 };
 
@@ -1087,6 +1161,7 @@ static const preset_pair_t kAddBrassStack[] = {
     P(ADD_PID_ENV1_RELEASE, 0.2f),
     P(ADD_PID_FLT_ON, 1), P(ADD_PID_FLT_DRIVE, 0.5f),
     P(ADD_PID_FLT_CUTOFF, 4000.0f), P(ADD_PID_FLT_RESO, 0.25f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.25f),
 };
 
@@ -1105,6 +1180,7 @@ static const preset_pair_t kAddWarmLadder[] = {
     P(ADD_PID_ENV2_DECAY, 0.5f), P(ADD_PID_ENV2_SUSTAIN, 0.2f),
     P(ADD_PID_ENV1_DECAY, 1.0f), P(ADD_PID_ENV1_SUSTAIN, 0.5f),
     P(ADD_PID_ENV1_RELEASE, 0.4f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.3f),
 };
 
@@ -1118,6 +1194,7 @@ static const preset_pair_t kAddNotchDrift[] = {
     P(ADD_PID_ENV1_RELEASE, 1.5f),
     P(ADD_PID_LFO2_RATE, 0.2f),
     MOD(0, SYNTH_MOD_SRC_LFO2, ADD_PID_FLT_CUTOFF, 0.45f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.45f), P(FX_PID_REV_SIZE, 0.8f),
 };
 
@@ -1132,6 +1209,7 @@ static const preset_pair_t kAddPureTones[] = {
     P(ADD_PID_BRIGHT, 0.8f), P(ADD_PID_ENV_BRIGHT, 0.15f),
     P(ADD_PID_ENV1_ATTACK, 0.02f), P(ADD_PID_ENV1_SUSTAIN, 0.9f),
     P(ADD_PID_ENV1_RELEASE, 0.35f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.3f),
 };
 
@@ -1147,6 +1225,7 @@ static const preset_pair_t kAddSineKeys[] = {
     P(ADD_PID_VEL_BRIGHT, 0.0f),
     P(ADD_PID_ENV1_ATTACK, 0.01f), P(ADD_PID_ENV1_DECAY, 1.0f),
     P(ADD_PID_ENV1_SUSTAIN, 0.6f), P(ADD_PID_ENV1_RELEASE, 0.5f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.25f),
 };
 
@@ -1164,6 +1243,7 @@ static const preset_pair_t kAddSteelDrum[] = {
     P(ADD_PID_ENV2_SUSTAIN, 0.0f),
     P(ADD_PID_ENV1_ATTACK, 0.001f), P(ADD_PID_ENV1_DECAY, 1.1f),
     P(ADD_PID_ENV1_SUSTAIN, 0.0f), P(ADD_PID_ENV1_RELEASE, 0.7f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.3f),
 };
 
@@ -1174,7 +1254,9 @@ static const preset_pair_t kAddBellTree[] = {
     P(ADD_PID_ENV_BRIGHT, 0.2f), P(ADD_PID_VEL_BRIGHT, 0.4f),
     P(ADD_PID_ENV1_ATTACK, 0.001f), P(ADD_PID_ENV1_DECAY, 0.6f),
     P(ADD_PID_ENV1_SUSTAIN, 0.0f), P(ADD_PID_ENV1_RELEASE, 0.4f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.5f), P(FX_PID_REV_SIZE, 0.75f),
+    P(FX_PID_DLY_ON, 1),
     P(FX_PID_DLY_MIX, 0.2f), P(FX_PID_DLY_TIME, 0.18f),
 };
 
@@ -1186,6 +1268,7 @@ static const preset_pair_t kAddReverseBloom[] = {
     P(ADD_PID_ENV2_SUSTAIN, 0.0f),
     P(ADD_PID_ENV1_ATTACK, 0.6f), P(ADD_PID_ENV1_SUSTAIN, 0.85f),
     P(ADD_PID_ENV1_RELEASE, 1.8f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.5f), P(FX_PID_REV_SIZE, 0.85f),
 };
 
@@ -1199,6 +1282,7 @@ static const preset_pair_t kAddMetalDrone[] = {
     P(ADD_PID_ENV1_ATTACK, 1.5f), P(ADD_PID_ENV1_SUSTAIN, 1.0f),
     P(ADD_PID_ENV1_RELEASE, 2.5f),
     P(ADD_PID_LFO2_RATE, 0.11f), P(ADD_PID_LFO2_BRIGHT, 0.3f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.55f), P(FX_PID_REV_SIZE, 0.9f),
 };
 
@@ -1210,6 +1294,7 @@ static const preset_pair_t kAddVelReed[] = {
     P(ADD_PID_ENV1_ATTACK, 0.04f), P(ADD_PID_ENV1_SUSTAIN, 1.0f),
     P(ADD_PID_ENV1_RELEASE, 0.18f),
     MOD(0, SYNTH_MOD_SRC_VEL, ADD_PID_FLT_CUTOFF, 0.4f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.32f),
 };
 
@@ -1220,6 +1305,7 @@ static const preset_pair_t kAddWheelSweep[] = {
     P(ADD_PID_ENV1_ATTACK, 0.05f), P(ADD_PID_ENV1_SUSTAIN, 1.0f),
     P(ADD_PID_ENV1_RELEASE, 0.6f),
     MOD(0, SYNTH_MOD_SRC_WHEEL, ADD_PID_BRIGHT, 0.85f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_DLY_ON, 1),
     P(FX_PID_REV_MIX, 0.4f), P(FX_PID_DLY_MIX, 0.2f),
 };
 
@@ -1235,6 +1321,7 @@ static const preset_pair_t kAddGlassOrgan[] = {
     P(ADD_PID_ENV_BRIGHT, 0.15f),
     P(ADD_PID_ENV1_ATTACK, 0.006f), P(ADD_PID_ENV1_DECAY, 1.5f),
     P(ADD_PID_ENV1_SUSTAIN, 0.55f), P(ADD_PID_ENV1_RELEASE, 0.8f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.25f), P(FX_PID_REV_MIX, 0.4f),
 };
 
@@ -1249,6 +1336,7 @@ static const preset_pair_t kAddHollowPad[] = {
     P(ADD_PID_ENV2_SUSTAIN, 0.5f),
     P(ADD_PID_ENV1_ATTACK, 0.5f), P(ADD_PID_ENV1_SUSTAIN, 0.9f),
     P(ADD_PID_ENV1_RELEASE, 1.4f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.48f), P(FX_PID_REV_SIZE, 0.8f),
 };
 
@@ -1265,6 +1353,7 @@ static const preset_pair_t kAddSubDrone[] = {
     P(ADD_PID_ENV1_RELEASE, 2.0f),
     P(ADD_PID_FLT_ON, 1), P(ADD_PID_FLT_TYPE, 1),
     P(ADD_PID_FLT_CUTOFF, 500.0f), P(ADD_PID_FLT_RESO, 0.15f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.35f),
 };
 
@@ -1275,6 +1364,7 @@ static const preset_pair_t kFmBrightTines[] = {
     P(FM_PID_A_INDEX, 2.8f), P(FM_PID_A_LEVEL, 0.7f),
     P(FM_PID_B_LEVEL, 0.3f), P(FM_PID_B_INDEX, 1.6f),
     P(FM_PID_B_DETUNE, 5.0f), P(FM_PID_VEL_INDEX, 0.8f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.3f), P(FX_PID_REV_MIX, 0.2f),
 };
 
@@ -1304,6 +1394,7 @@ static const preset_pair_t kFmTubularBell[] = {
     P(FM_PID_B_ENV_D, 1.5f), P(FM_PID_B_ENV_S, 0.0f),
     P(FM_PID_B_ENV_R, 1.5f),
     P(FM_PID_B_MENV_D, 1.0f), P(FM_PID_B_MENV_S, 0.0f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.35f), P(FX_PID_REV_SIZE, 0.7f),
 };
 
@@ -1318,6 +1409,7 @@ static const preset_pair_t kFmWurli[] = {
     P(FM_PID_B_INDEX, 3.5f), P(FM_PID_B_LEVEL, 0.12f),
     P(FM_PID_B_ENV_D, 0.08f), P(FM_PID_B_ENV_S, 0.0f),
     P(FM_PID_VEL_INDEX, 0.75f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.2f), P(FX_PID_REV_MIX, 0.15f),
 };
 
@@ -1335,6 +1427,7 @@ static const preset_pair_t kFmBrass[] = {
     P(FM_PID_B_ENV_R, 0.2f),
     P(FM_PID_B_MENV_A, 0.09f), P(FM_PID_B_MENV_S, 0.6f),
     P(SYNTH_PID_COMMON_UNISON, 2), P(SYNTH_PID_COMMON_UNI_DETUNE, 8.0f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.2f),
 };
 
@@ -1349,6 +1442,7 @@ static const preset_pair_t kFmGlassKeys[] = {
     P(FM_PID_B_INDEX, 0.8f), P(FM_PID_B_LEVEL, 0.18f),
     P(FM_PID_B_ENV_D, 0.6f), P(FM_PID_B_ENV_S, 0.0f),
     P(FM_PID_B_DETUNE, 4.0f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.3f), P(FX_PID_REV_MIX, 0.3f),
 };
 
@@ -1376,6 +1470,7 @@ static const preset_pair_t kFmLogDrum[] = {
     P(FM_PID_B_INDEX, 1.0f), P(FM_PID_B_LEVEL, 0.1f),
     P(FM_PID_B_ENV_D, 0.06f), P(FM_PID_B_ENV_S, 0.0f),
     P(FM_PID_VEL_INDEX, 0.5f),
+    P(FX_PID_DLY_ON, 1),
     P(FX_PID_DLY_MIX, 0.18f), P(FX_PID_DLY_PP, 1),
 };
 
@@ -1394,6 +1489,7 @@ static const preset_pair_t kFmDxStrings[] = {
     P(FM_PID_B_MENV_A, 0.3f), P(FM_PID_B_MENV_S, 0.7f),
     P(SYNTH_PID_COMMON_UNISON, 2), P(SYNTH_PID_COMMON_UNI_DETUNE, 12.0f),
     P(SYNTH_PID_COMMON_UNI_SPREAD, 0.9f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.4f), P(FX_PID_REV_MIX, 0.3f),
 };
 
@@ -1421,6 +1517,7 @@ static const preset_pair_t kFmMusicBox[] = {
     P(FM_PID_B_INDEX, 0.6f), P(FM_PID_B_LEVEL, 0.3f),
     P(FM_PID_B_ENV_D, 0.8f), P(FM_PID_B_ENV_S, 0.0f),
     P(FM_PID_VEL_INDEX, 0.4f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.3f),
 };
 
@@ -1436,6 +1533,7 @@ static const preset_pair_t kFmFlute[] = {
     P(FM_PID_B_ENV_A, 0.001f), P(FM_PID_B_ENV_D, 0.05f),
     P(FM_PID_B_ENV_S, 0.0f),
     MOD(0, SYNTH_MOD_SRC_WHEEL, FM_PID_LFO_PITCH, 0.3f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.2f),
 };
 
@@ -1450,6 +1548,7 @@ static const preset_pair_t kFmSciFiSwell[] = {
     P(FM_PID_B_LEVEL, 0.3f),
     P(FM_PID_B_ENV_A, 0.5f), P(FM_PID_B_ENV_S, 1.0f),
     P(FM_PID_B_MENV_A, 2.5f), P(FM_PID_B_MENV_S, 1.0f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.4f), P(FX_PID_REV_SIZE, 0.8f),
 };
 
@@ -1464,6 +1563,7 @@ static const preset_pair_t kFmBellPad[] = {
     P(FM_PID_B_LEVEL, 0.15f),
     P(FM_PID_B_ENV_A, 0.4f), P(FM_PID_B_ENV_S, 0.6f),
     P(FM_PID_B_ENV_R, 1.5f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.35f), P(FX_PID_REV_MIX, 0.4f),
 };
 
@@ -1500,6 +1600,7 @@ static const preset_pair_t kFmRhodesMk1[] = {
     P(FM_PID_B_INDEX, 0.8f), P(FM_PID_B_LEVEL, 0.12f),
     P(FM_PID_B_ENV_D, 0.18f), P(FM_PID_B_ENV_S, 0.0f),
     P(FM_PID_VEL_INDEX, 0.75f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.25f), P(FX_PID_REV_MIX, 0.25f),
 };
 
@@ -1512,6 +1613,7 @@ static const preset_pair_t kFmHardTines[] = {
     P(FM_PID_B_INDEX, 1.4f), P(FM_PID_B_LEVEL, 0.3f),
     P(FM_PID_B_ENV_D, 0.12f), P(FM_PID_B_ENV_S, 0.0f),
     P(FM_PID_VEL_INDEX, 0.95f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.2f),
 };
 
@@ -1525,6 +1627,7 @@ static const preset_pair_t kFmSmoothKeys[] = {
     P(FM_PID_FLT_KBD, 0.7f),
     P(FM_PID_VEL_INDEX, 0.7f),
     MOD(0, SYNTH_MOD_SRC_VEL, FM_PID_FLT_CUTOFF, 0.5f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.2f), P(FX_PID_REV_MIX, 0.28f),
 };
 
@@ -1540,6 +1643,7 @@ static const preset_pair_t kFmVoiceBox[] = {
     P(FM_PID_LFO_RATE, 3.5f),
     MOD(0, SYNTH_MOD_SRC_LFO1, FM_PID_FLT_VOWEL, 0.45f),
     MOD(1, SYNTH_MOD_SRC_WHEEL, FM_PID_FLT_VOWEL, 0.5f),
+    P(FX_PID_DLY_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_DLY_MIX, 0.2f), P(FX_PID_REV_MIX, 0.25f),
 };
 
@@ -1594,6 +1698,7 @@ static const preset_pair_t kFmBuzzLead[] = {
     P(FM_PID_FLT_CUTOFF, 2200.0f), P(FM_PID_FLT_RESO, 0.35f),
     P(FM_PID_FLT_KBD, 0.8f),
     P(SYNTH_PID_COMMON_GLIDE, 0.05f),
+    P(FX_PID_DLY_ON, 1),
     P(FX_PID_DLY_MIX, 0.25f), P(FX_PID_DLY_FB, 0.4f),
 };
 
@@ -1608,6 +1713,7 @@ static const preset_pair_t kFmSingLead[] = {
     P(FM_PID_LFO_RATE, 5.0f),
     MOD(0, SYNTH_MOD_SRC_WHEEL, FM_PID_LFO_PITCH, 0.45f),
     P(SYNTH_PID_COMMON_GLIDE, 0.05f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.3f),
 };
 
@@ -1621,6 +1727,7 @@ static const preset_pair_t kFmKoto[] = {
     P(FM_PID_A_MENV_S, 0.0f),
     P(FM_PID_B_LEVEL, 0.08f),
     P(FM_PID_VEL_INDEX, 0.85f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.3f),
 };
 
@@ -1635,6 +1742,7 @@ static const preset_pair_t kFmHarp[] = {
     P(FM_PID_B_INDEX, 1.0f), P(FM_PID_B_LEVEL, 0.15f),
     P(FM_PID_B_ENV_D, 0.6f), P(FM_PID_B_ENV_S, 0.0f),
     P(FM_PID_VEL_INDEX, 0.7f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.4f), P(FX_PID_REV_SIZE, 0.7f),
 };
 
@@ -1648,6 +1756,7 @@ static const preset_pair_t kFmMarimba[] = {
     P(FM_PID_A_MENV_S, 0.0f),
     P(FM_PID_B_LEVEL, 0.06f),
     P(FM_PID_VEL_INDEX, 0.8f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.22f),
 };
 
@@ -1662,6 +1771,7 @@ static const preset_pair_t kFmVibes[] = {
     P(FM_PID_B_INDEX, 0.6f), P(FM_PID_B_LEVEL, 0.1f),
     P(FM_PID_B_ENV_D, 0.3f), P(FM_PID_B_ENV_S, 0.0f),
     P(FM_PID_LFO_RATE, 4.5f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.35f),
 };
 
@@ -1676,6 +1786,7 @@ static const preset_pair_t kFmGlocken[] = {
     P(FM_PID_B_INDEX, 0.7f), P(FM_PID_B_LEVEL, 0.18f),
     P(FM_PID_B_ENV_D, 0.25f), P(FM_PID_B_ENV_S, 0.0f),
     P(FM_PID_VEL_INDEX, 0.85f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.42f),
 };
 
@@ -1691,6 +1802,7 @@ static const preset_pair_t kFmChurchBell[] = {
     P(FM_PID_B_INDEX, 2.5f), P(FM_PID_B_LEVEL, 0.2f),
     P(FM_PID_B_ENV_D, 2.0f), P(FM_PID_B_ENV_S, 0.0f),
     P(FM_PID_B_DETUNE, 9.0f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.5f), P(FX_PID_REV_SIZE, 0.9f),
 };
 
@@ -1706,6 +1818,7 @@ static const preset_pair_t kFmGamelan[] = {
     P(FM_PID_B_ENV_D, 0.9f), P(FM_PID_B_ENV_S, 0.0f),
     P(FM_PID_B_DETUNE, 22.0f),
     P(FM_PID_VEL_INDEX, 0.8f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.38f),
 };
 
@@ -1721,6 +1834,7 @@ static const preset_pair_t kFmOrgan[] = {
     P(FM_PID_B_ENV_S, 1.0f), P(FM_PID_B_ENV_D, 0.05f),
     P(FM_PID_B_ENV_R, 0.05f), P(FM_PID_B_MENV_S, 1.0f),
     P(FM_PID_VEL_INDEX, 0.2f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.35f), P(FX_PID_REV_MIX, 0.2f),
 };
 
@@ -1735,6 +1849,7 @@ static const preset_pair_t kFmBrassSwell[] = {
     P(FM_PID_B_LEVEL, 0.15f), P(FM_PID_B_INDEX, 1.5f),
     P(FM_PID_B_ENV_A, 0.2f), P(FM_PID_B_ENV_S, 0.6f),
     P(FM_PID_VEL_INDEX, 0.5f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.35f),
 };
 
@@ -1749,6 +1864,7 @@ static const preset_pair_t kFmHorn[] = {
     P(FM_PID_FLT_ON, 1), P(FM_PID_FLT_CUTOFF, 1800.0f),
     P(FM_PID_FLT_RESO, 0.15f), P(FM_PID_FLT_KBD, 0.6f),
     P(FM_PID_VEL_INDEX, 0.6f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.4f), P(FX_PID_REV_SIZE, 0.7f),
 };
 
@@ -1762,6 +1878,7 @@ static const preset_pair_t kFmClarinet[] = {
     P(FM_PID_B_LEVEL, 0.0f),
     P(FM_PID_LFO_RATE, 4.8f),
     MOD(0, SYNTH_MOD_SRC_WHEEL, FM_PID_LFO_PITCH, 0.35f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.32f),
 };
 
@@ -1776,6 +1893,7 @@ static const preset_pair_t kFmOboe[] = {
     P(FM_PID_FLT_ON, 1), P(FM_PID_FLT_TYPE, 3),
     P(FM_PID_FLT_SPREAD, 2.0f), P(FM_PID_FLT_CUTOFF, 1500.0f),
     P(FM_PID_FLT_RESO, 0.35f), P(FM_PID_FLT_KBD, 0.5f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.35f),
 };
 
@@ -1791,6 +1909,7 @@ static const preset_pair_t kFmDetunePad[] = {
     P(FM_PID_B_ENV_A, 0.8f), P(FM_PID_B_ENV_S, 0.85f),
     P(FM_PID_B_ENV_R, 1.4f), P(FM_PID_B_MENV_S, 0.5f),
     P(FM_PID_B_DETUNE, 14.0f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.3f), P(FX_PID_REV_MIX, 0.45f),
 };
 
@@ -1806,6 +1925,7 @@ static const preset_pair_t kFmSoftPad[] = {
     P(FM_PID_B_ENV_R, 1.8f),
     P(FM_PID_FLT_ON, 1), P(FM_PID_FLT_TYPE, 1),
     P(FM_PID_FLT_CUTOFF, 1600.0f), P(FM_PID_FLT_RESO, 0.25f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.5f), P(FX_PID_REV_SIZE, 0.8f),
 };
 
@@ -1820,6 +1940,7 @@ static const preset_pair_t kFmPhasePad[] = {
     P(FM_PID_FLT_CUTOFF, 1200.0f), P(FM_PID_FLT_RESO, 0.7f),
     P(FM_PID_LFO_RATE, 0.5f),
     MOD(0, SYNTH_MOD_SRC_LFO1, FM_PID_FLT_CUTOFF, 0.4f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.42f),
 };
 
@@ -1834,6 +1955,7 @@ static const preset_pair_t kFmClangStab[] = {
     P(FM_PID_B_INDEX, 3.0f), P(FM_PID_B_LEVEL, 0.25f),
     P(FM_PID_B_ENV_D, 0.15f), P(FM_PID_B_ENV_S, 0.0f),
     P(FM_PID_VEL_INDEX, 0.9f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.3f),
 };
 
@@ -1850,6 +1972,7 @@ static const preset_pair_t kFmTimpani[] = {
     P(FM_PID_FLT_CUTOFF, 500.0f), P(FM_PID_FLT_RESO, 0.3f),
     P(FM_PID_FLT_KBD, 0.4f),
     P(FM_PID_VEL_INDEX, 0.9f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.35f), P(FX_PID_REV_SIZE, 0.75f),
 };
 
@@ -1877,6 +2000,7 @@ static const preset_pair_t kFmNoiseBurst[] = {
     P(FM_PID_FLT_ON, 1), P(FM_PID_FLT_MODE, 6),
     P(FM_PID_FLT_CUTOFF, 3000.0f), P(FM_PID_FLT_RESO, 0.4f),
     P(FM_PID_FLT_KBD, 0.0f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.3f),
 };
 
@@ -1890,6 +2014,7 @@ static const preset_pair_t kFmDropFx[] = {
     P(FM_PID_B_LEVEL, 0.15f), P(FM_PID_B_ENV_D, 1.5f),
     P(FM_PID_LFO_RATE, 0.15f), P(FM_PID_LFO_WAVE, 2),
     P(FM_PID_LFO_PITCH, 2.0f),
+    P(FX_PID_DLY_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_DLY_MIX, 0.3f), P(FX_PID_REV_MIX, 0.4f),
 };
 
@@ -1901,6 +2026,7 @@ static const preset_pair_t kFmSiren[] = {
     P(FM_PID_B_LEVEL, 0.15f),
     P(FM_PID_LFO_RATE, 7.5f), P(FM_PID_LFO_WAVE, 3),
     P(FM_PID_LFO_PITCH, 1.2f),
+    P(FX_PID_DLY_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_DLY_MIX, 0.25f), P(FX_PID_REV_MIX, 0.25f),
 };
 
@@ -1916,6 +2042,7 @@ static const preset_pair_t kFmLadderPluck[] = {
     P(FM_PID_FLT_CUTOFF, 1200.0f), P(FM_PID_FLT_RESO, 0.65f),
     P(FM_PID_FLT_DRIVE, 0.3f), P(FM_PID_FLT_KBD, 0.7f),
     MOD(0, SYNTH_MOD_SRC_VEL, FM_PID_FLT_CUTOFF, 0.55f),
+    P(FX_PID_DLY_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_DLY_MIX, 0.2f), P(FX_PID_REV_MIX, 0.25f),
 };
 
@@ -1931,6 +2058,7 @@ static const preset_pair_t kFmOctaveMallet[] = {
     P(FM_PID_B_ENV_D, 0.5f), P(FM_PID_B_ENV_S, 0.0f),
     P(FM_PID_B_ENV_R, 0.25f), P(FM_PID_B_DETUNE, 6.0f),
     P(FM_PID_VEL_INDEX, 0.8f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.35f),
 };
 
@@ -1944,6 +2072,7 @@ static const preset_pair_t kWtSyncLead[] = {
     P(WT_PID_ENV1_SUSTAIN, 0.8f),
     P(SYNTH_PID_COMMON_UNISON, 2), P(SYNTH_PID_COMMON_UNI_DETUNE, 14.0f),
     MOD(0, SYNTH_MOD_SRC_WHEEL, WT_PID_OSC1_POS, 0.6f),
+    P(FX_PID_DLY_ON, 1),
     P(FX_PID_DLY_MIX, 0.2f),
 };
 
@@ -1955,6 +2084,7 @@ static const preset_pair_t kWtVowelPad[] = {
     P(WT_PID_FLT_CUTOFF, 6000.0f),
     P(WT_PID_ENV1_ATTACK, 0.6f), P(WT_PID_ENV1_SUSTAIN, 0.9f),
     P(WT_PID_ENV1_RELEASE, 1.5f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.35f), P(FX_PID_REV_MIX, 0.4f),
 };
 
@@ -1966,6 +2096,7 @@ static const preset_pair_t kWtDigiKeys[] = {
     P(WT_PID_ENV1_DECAY, 1.0f), P(WT_PID_ENV1_SUSTAIN, 0.3f),
     P(WT_PID_ENV1_RELEASE, 0.5f),
     MOD(0, SYNTH_MOD_SRC_VEL, WT_PID_OSC1_POS, 0.3f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.25f),
 };
 
@@ -1975,6 +2106,7 @@ static const preset_pair_t kWtPwmDrift[] = {
     P(WT_PID_LFO2_RATE, 0.5f), P(WT_PID_LFO2_POS, 0.15f),
     P(WT_PID_ENV1_ATTACK, 0.25f), P(WT_PID_ENV1_SUSTAIN, 0.85f),
     P(WT_PID_ENV1_RELEASE, 0.9f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.45f), P(FX_PID_REV_MIX, 0.25f),
 };
 
@@ -1997,6 +2129,7 @@ static const preset_pair_t kWtWaveOrgan[] = {
     P(WT_PID_FLT_CUTOFF, 7000.0f),
     P(WT_PID_ENV1_ATTACK, 0.003f), P(WT_PID_ENV1_SUSTAIN, 1.0f),
     P(WT_PID_ENV1_RELEASE, 0.07f),
+    P(FX_PID_CHO_ON, 1),
     P(FX_PID_CHO_MIX, 0.2f),
 };
 
@@ -2012,6 +2145,7 @@ static const preset_pair_t kWtBigChoir[] = {
     P(WT_PID_ENV1_RELEASE, 2.0f),
     P(SYNTH_PID_COMMON_UNISON, 2), P(SYNTH_PID_COMMON_UNI_DETUNE, 10.0f),
     P(SYNTH_PID_COMMON_UNI_SPREAD, 1.0f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.3f), P(FX_PID_REV_MIX, 0.45f),
     P(FX_PID_REV_SIZE, 0.8f),
 };
@@ -2022,6 +2156,7 @@ static const preset_pair_t kWtSyncRiser[] = {
     P(WT_PID_ENV_POS, 1.0f),
     P(WT_PID_ENV2_ATTACK, 2.8f), P(WT_PID_ENV2_SUSTAIN, 1.0f),
     P(WT_PID_ENV1_ATTACK, 1.0f), P(WT_PID_ENV1_SUSTAIN, 1.0f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.35f),
 };
 
@@ -2032,7 +2167,9 @@ static const preset_pair_t kWtFmChime[] = {
     P(WT_PID_ENV2_DECAY, 1.2f), P(WT_PID_ENV2_SUSTAIN, 0.0f),
     P(WT_PID_ENV1_DECAY, 2.0f), P(WT_PID_ENV1_SUSTAIN, 0.0f),
     P(WT_PID_ENV1_RELEASE, 1.2f),
+    P(FX_PID_DLY_ON, 1),
     P(FX_PID_DLY_MIX, 0.2f), P(FX_PID_DLY_TIME, 0.4f), P(FX_PID_DLY_PP, 1),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.3f),
 };
 
@@ -2042,9 +2179,11 @@ static const preset_pair_t kWtShimmerPad[] = {
     P(WT_PID_ENV_POS, 0.0f),
     P(WT_PID_ENV1_ATTACK, 0.7f), P(WT_PID_ENV1_SUSTAIN, 0.9f),
     P(WT_PID_ENV1_RELEASE, 1.8f),
+    P(FX_PID_GRN_ON, 1),
     P(FX_PID_GRN_MIX, 0.35f), P(FX_PID_GRN_PITCH, 12.0f),
     P(FX_PID_GRN_SIZE, 0.3f), P(FX_PID_GRN_DENS, 18.0f),
     P(FX_PID_GRN_SPRAY, 0.12f), P(FX_PID_GRN_FB, 0.45f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.35f),
 };
 
@@ -2055,6 +2194,7 @@ static const preset_pair_t kWtTalkBox[] = {
     P(WT_PID_FLT_CUTOFF, 5000.0f),
     P(WT_PID_ENV1_SUSTAIN, 0.9f),
     MOD(0, SYNTH_MOD_SRC_WHEEL, WT_PID_OSC1_POS, 1.0f),
+    P(FX_PID_DLY_ON, 1),
     P(FX_PID_DLY_MIX, 0.15f),
 };
 
@@ -2065,6 +2205,7 @@ static const preset_pair_t kWtChipLead[] = {
     P(WT_PID_ENV1_ATTACK, 0.001f), P(WT_PID_ENV1_DECAY, 0.1f),
     P(WT_PID_ENV1_SUSTAIN, 0.7f), P(WT_PID_ENV1_RELEASE, 0.05f),
     P(WT_PID_LFO1_RATE, 6.0f), P(WT_PID_LFO1_PITCH, 0.15f),
+    P(FX_PID_DLY_ON, 1),
     P(FX_PID_DLY_MIX, 0.18f), P(FX_PID_DLY_TIME, 0.19f),
     P(FX_PID_DLY_FB, 0.3f),
 };
@@ -2077,6 +2218,7 @@ static const preset_pair_t kWtEvolvingDrone[] = {
     P(WT_PID_LFO2_RATE, 0.1f), P(WT_PID_LFO2_POS, 0.5f),
     P(WT_PID_ENV1_ATTACK, 1.5f), P(WT_PID_ENV1_SUSTAIN, 1.0f),
     P(WT_PID_ENV1_RELEASE, 2.5f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.5f), P(FX_PID_REV_SIZE, 0.9f),
     P(FX_PID_REV_DAMP, 0.5f),
 };
@@ -2089,6 +2231,7 @@ static const preset_pair_t kWtArpCascade[] = {
     P(WT_PID_ENV1_SUSTAIN, 0.0f), P(WT_PID_ENV1_RELEASE, 0.15f),
     P(SEQ_PID_ARP_MODE, 3), P(SEQ_PID_ARP_OCT, 2),
     P(SEQ_PID_DIV, 3), P(SEQ_PID_GATE, 0.4f),
+    P(FX_PID_DLY_ON, 1),
     P(FX_PID_DLY_MIX, 0.3f), P(FX_PID_DLY_TIME, 0.375f),
     P(FX_PID_DLY_FB, 0.4f), P(FX_PID_DLY_PP, 1),
 };
@@ -2103,6 +2246,7 @@ static const preset_pair_t kWtGlassyKeys[] = {
     P(WT_PID_ENV1_DECAY, 1.5f), P(WT_PID_ENV1_SUSTAIN, 0.2f),
     P(WT_PID_ENV1_RELEASE, 0.8f),
     MOD(0, SYNTH_MOD_SRC_VEL, WT_PID_OSC1_POS, 0.25f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.3f), P(FX_PID_REV_MIX, 0.35f),
 };
 
@@ -2126,6 +2270,7 @@ static const preset_pair_t kWtDoubleVowel[] = {
     P(WT_PID_ENV1_RELEASE, 1.2f),
     MOD(0, SYNTH_MOD_SRC_ENV2, WT_PID_FLT_VOWEL, 0.5f),
     MOD(1, SYNTH_MOD_SRC_WHEEL, WT_PID_FLT_VOWEL, 0.5f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.45f), P(FX_PID_REV_SIZE, 0.75f),
 };
 
@@ -2140,6 +2285,7 @@ static const preset_pair_t kWtRobotVoice[] = {
     P(WT_PID_ENV1_RELEASE, 0.12f),
     P(WT_PID_LFO2_RATE, 4.5f), P(WT_PID_LFO2_WAVE, 4),
     MOD(0, SYNTH_MOD_SRC_LFO2, WT_PID_FLT_VOWEL, 0.6f),
+    P(FX_PID_DLY_ON, 1),
     P(FX_PID_DLY_MIX, 0.22f),
 };
 
@@ -2154,6 +2300,7 @@ static const preset_pair_t kWtFormantSweep[] = {
     P(WT_PID_ENV2_SUSTAIN, 0.4f),
     P(WT_PID_ENV1_ATTACK, 0.25f), P(WT_PID_ENV1_SUSTAIN, 0.9f),
     P(WT_PID_ENV1_RELEASE, 1.0f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.4f),
 };
 
@@ -2168,6 +2315,7 @@ static const preset_pair_t kWtSyncScream[] = {
     P(WT_PID_ENV2_SUSTAIN, 0.3f),
     P(WT_PID_ENV1_SUSTAIN, 0.9f), P(WT_PID_ENV1_RELEASE, 0.15f),
     P(SYNTH_PID_COMMON_GLIDE, 0.04f),
+    P(FX_PID_DLY_ON, 1),
     P(FX_PID_DLY_MIX, 0.25f), P(FX_PID_DLY_FB, 0.35f),
 };
 
@@ -2206,6 +2354,7 @@ static const preset_pair_t kWtWidePad[] = {
     P(WT_PID_ENV1_ATTACK, 0.7f), P(WT_PID_ENV1_SUSTAIN, 0.95f),
     P(WT_PID_ENV1_RELEASE, 1.6f),
     P(SYNTH_PID_COMMON_UNISON, 2), P(SYNTH_PID_COMMON_UNI_DETUNE, 15.0f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.45f), P(FX_PID_REV_SIZE, 0.8f),
 };
 
@@ -2218,6 +2367,7 @@ static const preset_pair_t kWtBandMorph[] = {
     P(WT_PID_ENV2_DECAY, 1.2f), P(WT_PID_ENV2_SUSTAIN, 0.4f),
     P(WT_PID_ENV1_ATTACK, 0.1f), P(WT_PID_ENV1_SUSTAIN, 0.85f),
     P(WT_PID_ENV1_RELEASE, 0.6f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.35f),
 };
 
@@ -2233,6 +2383,7 @@ static const preset_pair_t kWtNotchMorph[] = {
     P(WT_PID_ENV1_ATTACK, 0.5f), P(WT_PID_ENV1_SUSTAIN, 0.9f),
     P(WT_PID_ENV1_RELEASE, 1.2f),
     MOD(0, SYNTH_MOD_SRC_LFO2, WT_PID_FLT_CUTOFF, 0.4f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.42f),
 };
 
@@ -2246,6 +2397,7 @@ static const preset_pair_t kWtPeakMorph[] = {
     P(WT_PID_ENV2_DECAY, 0.6f), P(WT_PID_ENV2_SUSTAIN, 0.2f),
     P(WT_PID_ENV1_DECAY, 0.9f), P(WT_PID_ENV1_SUSTAIN, 0.4f),
     P(WT_PID_ENV1_RELEASE, 0.5f),
+    P(FX_PID_DLY_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_DLY_MIX, 0.2f), P(FX_PID_REV_MIX, 0.3f),
 };
 
@@ -2260,6 +2412,7 @@ static const preset_pair_t kWtDriveLead[] = {
     P(WT_PID_FLT_KBD, 0.85f),
     P(WT_PID_ENV1_SUSTAIN, 0.9f), P(WT_PID_ENV1_RELEASE, 0.15f),
     P(SYNTH_PID_COMMON_GLIDE, 0.05f),
+    P(FX_PID_DLY_ON, 1),
     P(FX_PID_DLY_MIX, 0.28f), P(FX_PID_DLY_FB, 0.4f),
 };
 
@@ -2272,6 +2425,7 @@ static const preset_pair_t kWtSlowMorph[] = {
     P(WT_PID_LFO2_POS, 1.0f),
     P(WT_PID_ENV1_ATTACK, 1.2f), P(WT_PID_ENV1_SUSTAIN, 1.0f),
     P(WT_PID_ENV1_RELEASE, 2.0f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.5f), P(FX_PID_REV_SIZE, 0.85f),
 };
 
@@ -2284,6 +2438,7 @@ static const preset_pair_t kWtVelMorph[] = {
     P(WT_PID_ENV1_RELEASE, 0.35f),
     MOD(0, SYNTH_MOD_SRC_VEL, WT_PID_OSC1_POS, 0.75f),
     MOD(1, SYNTH_MOD_SRC_VEL, WT_PID_FLT_CUTOFF, 0.4f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.28f),
 };
 
@@ -2298,6 +2453,7 @@ static const preset_pair_t kWtBellStack[] = {
     P(WT_PID_ENV2_DECAY, 1.0f), P(WT_PID_ENV2_SUSTAIN, 0.0f),
     P(WT_PID_ENV1_ATTACK, 0.001f), P(WT_PID_ENV1_DECAY, 2.5f),
     P(WT_PID_ENV1_SUSTAIN, 0.0f), P(WT_PID_ENV1_RELEASE, 1.8f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.45f), P(FX_PID_REV_SIZE, 0.8f),
 };
 
@@ -2311,6 +2467,7 @@ static const preset_pair_t kWtBrightPluck[] = {
     P(WT_PID_ENV1_ATTACK, 0.001f), P(WT_PID_ENV1_DECAY, 0.4f),
     P(WT_PID_ENV1_SUSTAIN, 0.0f), P(WT_PID_ENV1_RELEASE, 0.2f),
     MOD(0, SYNTH_MOD_SRC_VEL, WT_PID_FLT_CUTOFF, 0.5f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.25f),
 };
 
@@ -2324,6 +2481,7 @@ static const preset_pair_t kWtDarkPluck[] = {
     P(WT_PID_ENV2_DECAY, 0.2f), P(WT_PID_ENV2_SUSTAIN, 0.0f),
     P(WT_PID_ENV1_ATTACK, 0.001f), P(WT_PID_ENV1_DECAY, 0.7f),
     P(WT_PID_ENV1_SUSTAIN, 0.0f), P(WT_PID_ENV1_RELEASE, 0.3f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.3f),
 };
 
@@ -2352,6 +2510,7 @@ static const preset_pair_t kWtVowelBass[] = {
     P(WT_PID_ENV1_ATTACK, 0.003f), P(WT_PID_ENV1_DECAY, 0.5f),
     P(WT_PID_ENV1_SUSTAIN, 0.55f), P(WT_PID_ENV1_RELEASE, 0.12f),
     MOD(0, SYNTH_MOD_SRC_VEL, WT_PID_FLT_VOWEL, -0.35f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.18f),
 };
 
@@ -2366,6 +2525,7 @@ static const preset_pair_t kWtBrass[] = {
     P(WT_PID_ENV2_SUSTAIN, 0.7f),
     P(WT_PID_ENV1_ATTACK, 0.03f), P(WT_PID_ENV1_SUSTAIN, 0.9f),
     P(WT_PID_ENV1_RELEASE, 0.2f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.3f),
 };
 
@@ -2381,6 +2541,7 @@ static const preset_pair_t kWtStrings[] = {
     P(WT_PID_ENV1_ATTACK, 0.35f), P(WT_PID_ENV1_SUSTAIN, 0.95f),
     P(WT_PID_ENV1_RELEASE, 0.9f),
     P(WT_PID_LFO1_RATE, 4.8f), P(WT_PID_LFO1_PITCH, 0.06f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.4f), P(FX_PID_REV_MIX, 0.4f),
 };
 
@@ -2392,6 +2553,7 @@ static const preset_pair_t kWtAirLayer[] = {
     P(WT_PID_FLT_RESO, 0.3f), P(WT_PID_FLT_ENV, 0.0f),
     P(WT_PID_ENV1_ATTACK, 0.6f), P(WT_PID_ENV1_SUSTAIN, 0.85f),
     P(WT_PID_ENV1_RELEASE, 1.4f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.5f), P(FX_PID_REV_SIZE, 0.85f),
 };
 
@@ -2408,6 +2570,7 @@ static const preset_pair_t kWtPhaseDrift[] = {
     MOD(0, SYNTH_MOD_SRC_LFO2, WT_PID_FLT_CUTOFF, 0.5f),
     P(WT_PID_ENV1_ATTACK, 0.3f), P(WT_PID_ENV1_SUSTAIN, 0.9f),
     P(WT_PID_ENV1_RELEASE, 1.0f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.4f),
 };
 
@@ -2434,6 +2597,7 @@ static const preset_pair_t kWtChoirStack[] = {
     P(WT_PID_ENV1_ATTACK, 0.5f), P(WT_PID_ENV1_SUSTAIN, 0.95f),
     P(WT_PID_ENV1_RELEASE, 1.5f),
     P(WT_PID_LFO1_RATE, 4.2f), P(WT_PID_LFO1_PITCH, 0.07f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.3f), P(FX_PID_REV_MIX, 0.5f),
 };
 
@@ -2444,6 +2608,7 @@ static const preset_pair_t kWtChipArp[] = {
     P(WT_PID_FLT_ON, 0),
     P(WT_PID_ENV1_ATTACK, 0.001f), P(WT_PID_ENV1_DECAY, 0.12f),
     P(WT_PID_ENV1_SUSTAIN, 0.25f), P(WT_PID_ENV1_RELEASE, 0.05f),
+    P(FX_PID_DLY_ON, 1),
     P(FX_PID_DLY_MIX, 0.3f), P(FX_PID_DLY_TIME, 0.14f),
     P(FX_PID_DLY_FB, 0.4f), P(FX_PID_DLY_PP, 1),
 };
@@ -2458,6 +2623,7 @@ static const preset_pair_t kWtStepTexture[] = {
     P(WT_PID_LFO2_POS, 0.8f),
     P(WT_PID_ENV1_ATTACK, 0.02f), P(WT_PID_ENV1_SUSTAIN, 0.8f),
     P(WT_PID_ENV1_RELEASE, 0.3f),
+    P(FX_PID_DLY_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_DLY_MIX, 0.25f), P(FX_PID_REV_MIX, 0.3f),
 };
 
@@ -2474,6 +2640,7 @@ static const preset_pair_t kWtSlowTexture[] = {
     P(WT_PID_ENV2_SUSTAIN, 0.6f),
     P(WT_PID_ENV1_ATTACK, 2.0f), P(WT_PID_ENV1_SUSTAIN, 1.0f),
     P(WT_PID_ENV1_RELEASE, 3.0f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.55f), P(FX_PID_REV_SIZE, 0.9f),
 };
 
@@ -2487,6 +2654,7 @@ static const preset_pair_t kWtWheelMorph[] = {
     P(WT_PID_ENV1_RELEASE, 0.3f),
     MOD(0, SYNTH_MOD_SRC_WHEEL, WT_PID_OSC1_POS, 0.9f),
     MOD(1, SYNTH_MOD_SRC_WHEEL, WT_PID_FLT_CUTOFF, 0.3f),
+    P(FX_PID_DLY_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_DLY_MIX, 0.2f), P(FX_PID_REV_MIX, 0.3f),
 };
 
@@ -2499,6 +2667,7 @@ static const preset_pair_t kWtDrawOrgan[] = {
     P(WT_PID_ENV_POS, 0.0f), P(WT_PID_FLT_ON, 0),
     P(WT_PID_ENV1_ATTACK, 0.004f), P(WT_PID_ENV1_DECAY, 0.05f),
     P(WT_PID_ENV1_SUSTAIN, 1.0f), P(WT_PID_ENV1_RELEASE, 0.05f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_REV_ON, 1),
     P(FX_PID_CHO_MIX, 0.3f), P(FX_PID_REV_MIX, 0.2f),
 };
 
@@ -2513,6 +2682,7 @@ static const preset_pair_t kWtSpectralRiser[] = {
     P(WT_PID_ENV1_ATTACK, 0.2f), P(WT_PID_ENV1_SUSTAIN, 1.0f),
     P(WT_PID_ENV1_RELEASE, 0.5f),
     P(WT_PID_LFO1_RATE, 6.0f), P(WT_PID_LFO1_PITCH, 0.25f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_DLY_ON, 1),
     P(FX_PID_REV_MIX, 0.45f), P(FX_PID_DLY_MIX, 0.25f),
 };
 
@@ -2524,8 +2694,10 @@ static const preset_pair_t kWtLofiKeys[] = {
     P(WT_PID_FLT_CUTOFF, 1100.0f), P(WT_PID_FLT_RESO, 0.35f),
     P(WT_PID_ENV1_ATTACK, 0.004f), P(WT_PID_ENV1_DECAY, 0.9f),
     P(WT_PID_ENV1_SUSTAIN, 0.35f), P(WT_PID_ENV1_RELEASE, 0.4f),
+    P(FX_PID_CRUSH_ON, 1),
     P(FX_PID_CRUSH_MIX, 0.45f), P(FX_PID_CRUSH_BITS, 7.0f),
     P(FX_PID_CRUSH_DOWN, 3),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.3f),
 };
 
@@ -2537,8 +2709,10 @@ static const preset_pair_t kWtGrainCloud[] = {
     P(WT_PID_ENV1_ATTACK, 0.8f), P(WT_PID_ENV1_SUSTAIN, 0.9f),
     P(WT_PID_ENV1_RELEASE, 1.5f),
     P(WT_PID_LFO2_RATE, 0.13f), P(WT_PID_LFO2_POS, 0.6f),
+    P(FX_PID_GRN_ON, 1),
     P(FX_PID_GRN_MIX, 0.45f), P(FX_PID_GRN_SIZE, 0.14f),
     P(FX_PID_GRN_DENS, 18.0f), P(FX_PID_GRN_SPRAY, 0.06f),
+    P(FX_PID_REV_ON, 1),
     P(FX_PID_REV_MIX, 0.4f),
 };
 

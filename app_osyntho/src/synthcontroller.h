@@ -112,6 +112,27 @@ class SynthController : public QObject, public DatabaseClient {
   // seconds,codec,mono,trackBytes}. `filled` is a bitmask, track 1 = bit 0.
   Q_PROPERTY(QVariantMap loopExportInfo READ loopExportInfo NOTIFY loopExportInfoChanged)
 
+  // ---- USB role (S35) ----
+  // What the OTG port is doing, straight from the synth. `usbHostSupported`
+  // is false on firmware that cannot take the host role — no USB-OTG, or a
+  // build where the USB sink is the audio clock and giving up the device role
+  // would leave the synth silent — and is what the osynth page tests before
+  // offering the control at all.
+  //
+  // `usbRestartRequired` is the synth's own comparison of the stored setting
+  // against the live role, so it survives a disconnect: the app never has to
+  // remember that a change is pending, it just asks again.
+  Q_PROPERTY(bool usbStatusKnown READ usbStatusKnown NOTIFY usbStatusChanged)
+  Q_PROPERTY(bool usbHostSupported READ usbHostSupported NOTIFY usbStatusChanged)
+  Q_PROPERTY(int usbActiveMode READ usbActiveMode NOTIFY usbStatusChanged)
+  Q_PROPERTY(int usbRequestedMode READ usbRequestedMode NOTIFY usbStatusChanged)
+  Q_PROPERTY(bool usbRestartRequired READ usbRestartRequired NOTIFY usbStatusChanged)
+  Q_PROPERTY(int usbAttachedCount READ usbAttachedCount NOTIFY usbStatusChanged)
+  Q_PROPERTY(QString usbAttachedName READ usbAttachedName NOTIFY usbStatusChanged)
+  // True from the moment a restart is asked for until the link is back and
+  // answering. Drives the page's "restarting…" state; see restartSynth().
+  Q_PROPERTY(bool restarting READ restarting NOTIFY restartingChanged)
+
  public:
   explicit SynthController(QObject* parent = nullptr);
   ~SynthController() override;
@@ -339,6 +360,27 @@ class SynthController : public QObject, public DatabaseClient {
   // starts, so a user who cancels the save picker can be offered it again.
   Q_INVOKABLE bool saveLoopExportTo(const QString& path);
 
+  // --- USB role (S35) ----------------------------------------------------
+  bool usbStatusKnown() const { return m_usb.valid; }
+  bool usbHostSupported() const { return m_usb.supported; }
+  int usbActiveMode() const { return m_usb.active; }
+  int usbRequestedMode() const { return m_usb.requested; }
+  bool usbRestartRequired() const { return m_usb.restartRequired(); }
+  int usbAttachedCount() const { return m_usb.attached; }
+  QString usbAttachedName() const { return m_usb.product; }
+  bool restarting() const { return m_restarting; }
+
+  // Re-reads the port's state. Cheap, and the only way to learn that a
+  // controller was plugged in — there is no event for it, on purpose: a
+  // notification the app would only act on while one page is visible is worth
+  // less than a poll that page can run itself.
+  Q_INVOKABLE void refreshUsbStatus();
+  // Asks the synth to restart so a pending `usb.mode` change takes effect.
+  // The firmware flushes the persisted settings first, so the value written a
+  // moment ago is not lost to the write coalescing. The link drops either way;
+  // `restarting` stays true until it is back and answering.
+  Q_INVOKABLE void restartSynth();
+
   // --- local patch library ----------------------------------------------
   Q_INVOKABLE int saveCurrentAsPatch(const QString& name);  // snapshot live params
   Q_INVOKABLE void loadPatch(int patchId);                  // push snapshot to synth
@@ -421,6 +463,14 @@ class SynthController : public QObject, public DatabaseClient {
   // platform's business (a save picker on desktop, the share sheet on Android).
   void loopExportChanged();
   void loopExportInfoChanged();
+
+  // USB role: one signal for the whole status block — it arrives as one frame
+  // and every consumer reads several fields of it.
+  void usbStatusChanged();
+  void restartingChanged();
+  // The restart did not complete inside the timeout. The page turns this into
+  // a message; the link may still come back on its own afterwards.
+  void restartTimedOut();
   void loopExportReady(const QString& suggestedName);
   void loopExportFailed(const QString& reason);
   // Emitted when switching a drum lane to "from step note": the lane's old
@@ -533,6 +583,7 @@ class SynthController : public QObject, public DatabaseClient {
   void handleParamValues(const QByteArray& payload);  // GET_PARAM + EVT_PARAMS
   void handlePresetList(const QByteArray& payload, bool more);
   void handleEngineEvent(const QByteArray& payload);
+  void handleUsbStatus(const QByteArray& payload);
 
   // Pushes m_editTrack into the firmware's seq.edit.track, which is what the
   // recorder writes to. Call after anything that moves m_editTrack, and on
@@ -833,6 +884,21 @@ class SynthController : public QObject, public DatabaseClient {
   int m_expQueueDone = 0;
   LoopWav::Accumulator m_expMixAcc;
   int m_expChannels = 2;
+
+  // --- USB role (S35) ---
+  // Everything the page shows comes from this one struct, refilled by each
+  // USB_STATUS response. It is deliberately *not* cleared on disconnect: the
+  // last known role is still the best guess while the synth reboots, and
+  // blanking the page for the seconds a restart takes only makes the wait look
+  // like a failure. `valid` is what says it was ever answered at all.
+  SynthProto::UsbStatus m_usb;
+  bool m_restarting = false;
+  // Retry pump for the reconnect after a restart. The synth is gone for a
+  // second or two on the S3 and longer on the P4, where BLE comes back through
+  // the C6 companion, so this waits rather than declaring failure at the first
+  // missed poll.
+  QTimer m_restartTimer;
+  qint64 m_restartDeadlineMs = 0;
 
   static quint32 plockKey(int track, int step) {
     return (quint32(track) << 16) | quint32(step);

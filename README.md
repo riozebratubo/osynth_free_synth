@@ -89,8 +89,17 @@ stopped.
 ### ✨ Modulation and FX
 
 - **FX bus:** drive → chorus → flanger → phaser → delay → granular delay →
-  reverb → bitcrush → filter → EQ → compressor → stereo/output. Every unit is
-  skipped outright while its mix is 0, so the ones you aren't using are free.
+  reverb → bitcrush → filter → EQ → compressor → stereo/output. Every unit has
+  its own enable switch and is skipped outright while it is off — or while its
+  mix is 0 — so the ones you aren't using are free. The switch is a real
+  bypass: it keeps every setting, so you can A/B an effect without losing the
+  sound you were comparing against.
+- **Four reverb algorithms** behind one unit, with shared pre-delay, tone and
+  width around all of them: the original **freeverb**, plus ports of three
+  open-source plugins — **WetReverb** (half-rate Schroeder bank, 80s digital
+  character), **MVerb** (Dattorro figure-of-eight plate) and **DuskVerb**
+  (Dattorro tank with a 12-deep density cascade). See *Licence* below: the
+  last two are GPL-3 and are an opt-in build flag.
 - **Compressor with a sidechain key** — glue the whole mix, or duck it off a
   drum slot's trigger for the pumping that a groovebox is bought for. It sits
   late enough in the chain to catch the reverb tail, which is what makes a
@@ -110,6 +119,11 @@ stopped.
 
 - **USB Audio (UAC2) + USB MIDI** as one composite device — record the synth
   straight into a DAW *(ESP32-S3)*
+- **USB MIDI host** — or turn the same port around and plug a USB MIDI
+  controller straight into the synth, hub and several controllers included.
+  One socket, one role: pick it in the app and the synth restarts into it.
+  Offered wherever an I2S DAC carries the audio; on a USB-only build the
+  device role *is* the audio clock, so it stays a device
 - **BLE control** for the companion app (binary GATT protocol)
 - **DIN MIDI in**, a full CC map, **NRPN reaches every parameter**, program
   change selects the engine
@@ -142,9 +156,11 @@ idf.py build flash monitor
 ```
 
 Plug the S3's native USB port into a computer and it enumerates as an audio
-interface *and* a MIDI port. Or pair with the app over BLE. Or wire a DIN
-socket and play it from hardware. The heartbeat log line is the health
-check — `underruns` should stay at 0.
+interface *and* a MIDI port. Or switch that port to host mode on the app's
+**osynth** page and plug a MIDI controller into it instead. Or pair with the
+app over BLE. Or wire a DIN socket and play it from hardware. The heartbeat
+log line is the health check — `underruns` should stay at 0, and in host mode
+it reports how many controllers the bus found.
 
 > The kit step is optional: with no image present the build still links and
 > the drum bus is simply silent.
@@ -154,6 +170,7 @@ check — `underruns` should stay at 0.
 | | ESP32-S3 | ESP32-P4 + C6 | classic ESP32 |
 | --- | --- | --- | --- |
 | USB audio + MIDI | ✅ | ✅ | — *(no USB-OTG)* |
+| USB MIDI host | ✅ *(with an I2S DAC)* | ✅ | — *(no USB-OTG)* |
 | BLE | ✅ on-die | ✅ *via companion C6* | ✅ on-die |
 | Looper | ✅ 8 tracks | ✅ 8 tracks | — *(needs PSRAM)* |
 | Sequencer | 8 trk × 8 patterns | 8 trk × 8 patterns | 4 trk × 2 patterns |
@@ -172,6 +189,35 @@ and a scaled-down build keeps **every** per-step feature — only the counts shr
 
 <sub>ESP-IDF v5.3+ · C++17 · ~16k lines of firmware · 48 kHz, 64-sample
 blocks, render path in IRAM</sub>
+
+## Licence
+
+osynth is **MIT** (see `LICENSE`), and that is what a default build produces.
+
+Two of the four reverb algorithms are not mine and are not MIT:
+
+| Algorithm   | Author                        | Licence | In the default build? |
+| ----------- | ----------------------------- | ------- | --------------------- |
+| freeverb    | Jezar at Dreampoint (public domain lineage) | —   | yes |
+| WetReverb   | Ronald Klarenbeek (Yonie), [WetReverb](https://github.com/yonie/WetReverb) | MIT | yes |
+| MVerb       | Martin Eastwood, [mverb](https://github.com/martineastwood/mverb) | GPL-3 | **no** |
+| DuskVerb    | Dusk Audio, DuskVerb          | GPL-3   | **no**                |
+
+MVerb and DuskVerb live in `components/fx_gpl`, which contributes no object
+files unless `CONFIG_OSYNTH_FX_GPL` is enabled (`idf.py menuconfig` → osynth
+Synthesizer → *Include the GPL-3 reverb algorithms*). That option is off by
+default, and it is a **licensing** switch rather than a feature switch:
+turning it on makes the resulting firmware image a GPL-3 combined work, which
+you may distribute only under GPL-3 and only together with the complete
+corresponding source of whatever you flashed. `components/fx_gpl/LICENSE`
+carries the full text.
+
+Nothing you have saved depends on the choice. The algorithm list is
+append-only and numbered the same either way; on an MIT build a patch that
+asks for one of the two GPL algorithms clamps to WetReverb.
+
+The companion app (`app_osyntho`) is MIT regardless — it is a separate program
+that talks to the instrument over BLE.
 
 ## Donations are welcome
 

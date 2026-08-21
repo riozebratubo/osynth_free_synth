@@ -221,6 +221,7 @@ qt_add_qml_module(
     QML_FILES qml/GraphScreen.qml
     QML_FILES qml/PresetsScreen.qml
     QML_FILES qml/PatchLibraryScreen.qml
+    QML_FILES qml/OsynthScreen.qml
 
     # ENABLE_TYPE_COMPILER
 

@@ -1,0 +1,249 @@
+### What this board actually is (S37c, corrected in S37h)
+
+The defaults above were written for an assumed "module on a carrier". It is a
+**Guition JC-ESP32P4-M3-DEV** — 92 x 62 mm, RJ45, three USB-C, micro-SD, MIPI
+DSI/CSI FPCs, an ESP32-C6 on the module for radio. Not, as S37c through S37g
+assumed, a Waveshare P4-NANO-class tablet board. Sources now in `schematics/`:
+`JC-ESP32P4-M3-DEV Specifications-EN.pdf`, and the Altium library whose
+`SOURCELIBRARYNAME` is `ESP32P4_KSDIY_V3.SCHLIB`. Those two files carry the
+module's pin list and the board outline but **no dev-board net list**, which is
+why the audio block had to be established from firmware written for this board
+rather than from a drawing.
+
+**That misidentification cost the whole S37 microphone investigation**, because
+the `i2s_audio:` block the mic pins came from belonged to a different board. Four
+of the six pins happened to be right, which is the worst possible outcome: the
+clocks came up, the codec answered, and the one pin that was wrong was the one
+carrying the audio.
+
+| Pin(s) | Claimed by |
+| --- | --- |
+| GPIO0 / 1 / 4 | SPI2 — MISO / MOSI / **CLK** |
+| GPIO7 / 8 | I2C — ES8311 (0x18) |
+| GPIO9 | I2S DOUT — ES8311 **DSDIN**, the speaker path |
+| GPIO10 | I2S LRCLK — ES8311 |
+| GPIO11 | **speaker amplifier enable** — *not* a data pin |
+| GPIO12 | I2S BCLK — ES8311 |
+| GPIO13 | I2S MCLK — ES8311 |
+| GPIO48 | I2S DIN — ES8311 **ASDOUT**, the on-board microphone |
+| GPIO31 / 50 / 51 / 52 | IP101 Ethernet — MDC / CLK (`CLK_EXT_IN`) / power / MDIO |
+| — | MIPI-DSI display, and an `esp_ldo` channel at 2.5 V for its PHY |
+| — | micro-SD, on a second `esp_ldo` channel at 2.7 V |
+
+**There is a DSI display port but no panel fitted.** That frees nothing: MIPI-DSI
+runs on dedicated pins rather than through the GPIO matrix, so an empty display
+port does not hand any GPIO back. The GT911 touch controller shares I2C bus A
+and is presumably absent with the panel, which likewise frees nothing.
+
+**GPIO5 is the one number that appears nowhere** in that configuration. Whether
+it is brought out to a pad is a separate question from whether it is unclaimed,
+and this board has already proved those two are not the same thing.
+
+Note that osynth's own ES8388 module sits on GPIO1/2/3/32/33 — GPIO1 collides
+with the board's SPI MOSI on paper and works in practice, which says only that
+nothing is populated on that bus, not that the collision is safe in general.
+
+**The on-board microphone was not made to work, and the reason is not settled.**
+It is an analogue element on the ES8311's preamp, so it needs that codec
+configured (`components/codec/codec_es8311.cpp`, behind
+`OSYNTH_MIC_CODEC_ES8311`). What was established, and is worth not re-deriving:
+the I2S receiver latches correctly on this port (a loopback capture of the
+synth's own output matched it bit for bit); GPIO11 is connected and held low
+rather than floating; IDF binds MCLK to the RX clock for a non-duplex RX
+channel, so GPIO13 is driven; and the codec's register file reads back identical
+to Espressif's own driver through `open()`, `set_fs()` and `start()`. Both slot
+widths, both frame slots, and both DAC-reference arrangements (`REG12`/`REG44`
+ADC-only versus the board's own DAC-enabled pairing) were tried. All silent.
+
+**S37d picked it back up, and the useful move was to stop testing the codec.**
+Everything above is about the register file; nothing had measured the two things
+either side of it. What changed:
+
+- **The port now masters on APLL, not XTAL.** From a 40 MHz XTAL, 12.288 MHz
+  needs a fractional divider, so the MCLK on GPIO13 — the only clock an ES8311
+  has, and the one its clock manager divides for the ADC — dithered between
+  75 ns and 100 ns periods. The board's other codec has been on APLL since the
+  P4 bring-up for exactly this reason. The old "never APLL" rule in
+  `source_mic.cpp` was about a *slave*, whose divided declared rate really would
+  ask for a different frequency; a master asks for the same 256 x fs the sink
+  does, and IDF refuses to retune an occupied APLL regardless.
+- **Raw-slot telemetry.** The heartbeat now prints `raw xxxxxx/xxxxxx`, the OR
+  of every raw word's magnitude bits per slot per window, taken *before* the
+  24-to-16 truncation and before any gain. This is what separates "the pin never
+  left zero" from "the signal is 60 dB down" — the two readings that both print
+  `mic 0.00/0.00`, and the ambiguity five rounds of register work were spent
+  inside. `MIC_SHIFT` also went 0 -> 3 so the ordinary meter can see a quiet mic.
+- **A GPIO matrix dump** of the four mic pads at boot, and the ES8311's chip-ID
+  registers (0xFD/0xFE, expect 83 11) beside the register dump — so "the
+  register file matches the vendor byte for byte" rests on reads of a part that
+  has identified itself.
+
+**What that round then established, from the boot log.** Recorded so none of it
+is re-derived:
+
+- `clk apll`, with IDF reporting the PLL already occupied at 24 575 996 Hz and
+  reusing it. MCLK on GPIO13 is a clean 12.288 MHz off the same PLL the DAC
+  runs on, not a dithered fractional divide of the XTAL.
+- The GPIO matrix has all four pads on the right I2S1 signals: GPIO13 → sig 32
+  (`I2S1_MCLK`), GPIO12 → 35 (`I2S1_I_BCK`), GPIO10 → 36 (`I2S1_I_WS`), all
+  three output-enabled under peripheral control; GPIO11 input-enabled on 34
+  (`I2S1_I_SD`). Nothing is misrouted at the SoC.
+- `chip id 8311 ver 01`. The part is an ES8311 and the register dump is a real
+  read of it, which every "the register file matches the vendor" claim rests on
+  and which nothing had checked.
+- `raw 000000/000000`, every window, with +18 dB of shift and someone shouting
+  at the board. Not "quiet": the data pin is at **exactly** zero. `starve 1/1`
+  and not climbing, so the DMA is filling normally the whole time.
+
+So the register table is finished as a suspect, and so is the clock source. The
+codec is real, addressed, holding the vendor's own end state, and emitting
+nothing.
+
+**S37e attacks the two candidates that leaves.**
+
+- `probe_clock_pins()` (source_mic.cpp): after the port comes up, enable each
+  pad's *input* alongside the peripheral output — `gpio_input_enable()` sets
+  only the IE bit — and poll it a few thousand times. A pad carrying MCLK, BCLK
+  or WS reads both levels; a dead one reads one. This is the 45/46/47 test done
+  in firmware, and it is the thing that separates "the codec is never clocked"
+  from everything else. DIN is probed too, as a second opinion on `raw` reached
+  without the I2S receiver in the path.
+- Masked register writes (codec_es8311.cpp): the file wrote whole registers
+  where the vendor read-modify-writes, and two of those masks are not about
+  tolerating an unknown state — they are bits the vendor deliberately does not
+  own. `es8311_config_sample()` keeps `REG07 & 0xC0`, and REG07 is the register
+  Espressif's own header calls **"tri-state, lrck divider"**; same for
+  `REG06 & 0xE0`. A tri-stated ASDOUT and a disconnected ASDOUT read identically.
+  Every masked write now carries its mask, and a `reset regs …` dump taken
+  before the table runs records the power-on defaults — diff it against the
+  `init regs …` dump and any bit that moved without appearing in kInit is a
+  finding.
+
+**S37e's answer, and a trap underneath it.**
+
+- **The pads switch.** `bclk GPIO12 50%`, `ws GPIO10 50%`, `mclk GPIO13 49%`
+  of a 4096-sample sweep. This is *not* the GPIO45/46/47 failure: the clock pins
+  are alive at the die. Whether the traces complete is still unmeasured.
+- **`din GPIO11` read STUCK at 0 — and that reading was worthless.** The probe
+  sits at the end of `audio_source_mic_start()`, which runs inside
+  `audio_io_start()`; `codec_mic_init()` runs afterwards. So DIN was sampled
+  while the ES8311 was still in its power-on state and had been told nothing.
+  S37f re-times it: `audio_io_mic_probe_pads()` takes the same reading again
+  after the codec is up, and the two lines are labelled `port up` / `codec up`.
+- **⚠ The codec does not reset when the P4 does.** The `reset regs` dump came
+  back byte-for-byte identical to `init regs` — REG09/0A at 0x10, REG16 at 0x24,
+  REG17 at 0xBF, REG44 at 0x58, which are *our written values*, not an ES8311's
+  power-on defaults. It keeps its rail across a reflash, so every warm boot
+  starts from whatever the previous boot left behind.
+
+  Two consequences, and neither has a code fix. The masked writes S37e added
+  cannot be seen to preserve anything until the board is **fully unpowered**
+  — on a warm boot REG07 already reads back the 0x00 an earlier build wrote
+  absolutely, so the mask preserves the wrong value. And every "tried it, still
+  silent" result in this history was taken on a chip carrying state from the
+  attempt before it. **Power-cycle the board before trusting any codec result.**
+
+**S37f also adds the last firmware-only test of the clock path.**
+`SYNTH_MIC_CODEC_MASTER_TEST` (synth_config.h, default 0) moves both ends at
+once: the ES8311 becomes the I2S master (REG00 bit 6) and the P4 stops driving
+BCLK and WS entirely, leaving it driving only MCLK. If the codec is receiving
+that clock it will divide it into BCLK and LRCK and drive GPIO12/GPIO10 by
+itself, which the pad probe will see with nothing on this chip driving them.
+Stuck pads mean MCLK is not reaching the part and the fault is in the trace.
+Expect `in starve` to climb throughout — with no BCLK of its own the port never
+completes a frame, which is the arrangement and not a symptom.
+
+The probe also sweeps **GPIO9**, the pin the board's config calls the ES8311's
+DSDIN. It should sit still; if it turns out to be the pad that moves, the data
+lines are the other way round from that transcription and GPIO11 is the codec's
+*input*, which would explain a pin held hard low that never changes whatever the
+ADC is told to do.
+
+**The ES8311's real power-on register file** (S37g, after a 10-second unplug —
+worth keeping, since nothing else on hand documents it):
+
+    reg  00 01 02 03 04 05 06 07
+         1f 00 00 10 10 00 03 00
+    reg  08 09 0a 0b 0c 0d 0e 0f
+         ff 00 00 00 20 fc 6a 00
+    reg  10 11 12 13 14 15 16 17
+         13 7c 02 40 10 00 04 00
+    reg  18 19 1a 1b 1c
+         00 00 00 0c 4c
+    reg  44 45
+         00 00                      chip id 8311, ver 01
+
+**That closes the register table for good.** REG07's bits 7:6 — the tri-state
+field, the last firmware-side suspect — are **zero at reset**, and so are REG06's
+bits 7:5, REG03/REG04 bit 7 and REG02's low three. The absolute writes were never
+clearing anything the vendor preserves. S37e's masked writes are correct and make
+no difference; keep them, but the driver is exonerated on every reading now.
+(REG09/0A also read 0x00 at reset, not the 0x0C assumed earlier, so the vendor's
+`iface |= 0x10` would in fact have produced a valid 32-bit width too.)
+
+**GPIO9 is stuck low as well**, at both `port up` and `codec up`. So the data
+lines are not simply reversed — that hypothesis is out too.
+
+**And `din GPIO11` is still dead after the codec is configured.** Clocks at the
+pads, codec identified, register file exactly the vendor's, ADC unmuted at 0 dB
+with 24 dB of PGA in front — and `raw 000000/000000` every window. A ΣΔ
+converter that is clocked does not emit bit-exact zeros; it emits a noise floor.
+So the ADC is not converting, which means either its clock never arrives or the
+chip on the other end of these pads is not the one answering at 0x18.
+
+S37g sharpens the last ambiguous instrument: the pad probe now reads each pad
+under a pull-up *and* a pull-down and classifies the result — `toggles`,
+`FLOATS` (follows both pulls, nothing driving), or `held LOW/HIGH` (something
+drives it, statically). On ASDOUT those point opposite ways: a codec converting
+silence holds its data pin low legitimately, while a codec whose output stage is
+off, or a pad that reaches no codec, floats.
+
+### S37h: it was the pin
+
+`CONFIG_OSYNTH_MIC_DIN_GPIO` was **11**. On this board GPIO11 is the speaker
+amplifier's **enable line**, and the codec's ASDOUT is on **GPIO48**.
+
+Every measurement in this file falls out of that one fact:
+
+- GPIO11 read a hard zero through a 45k pull-up at every stage of boot. A PA
+  enable is held down by a pull-down so the amplifier stays off until firmware
+  asks for it. It was never going to be anything else.
+- It never switched, before or after `codec_mic_init()`, because nothing drives
+  it — not the codec, not us.
+- `raw 000000/000000` was exactly right, and so was the deduction from it that a
+  clocked sigma-delta ADC does not emit bit-exact zeros. The ADC was almost
+  certainly converting the entire time, onto a pin nothing was reading.
+- The register file matched Espressif's driver byte for byte on every attempt
+  from S37c onwards **because it was correct**. Five rounds of register work
+  found nothing wrong because there was nothing wrong.
+
+What the detour was worth keeping: APLL on a master mic port (a clean 256 x fs
+MCLK, and a capture sample-locked to the output), the masked register writes,
+the raw-slot telemetry, the pad probe, the reset-state dump, and the discovery
+that **this codec does not reset when the P4 does** — which quietly
+contaminated every warm-boot experiment before S37f.
+
+The lesson is the one PINMAP.md already had in bold for GPIO45/46/47, one level
+up: *before trusting any pin on an unfamiliar board, establish what board it is.*
+The pin list was measured against a config file, and the config file was never
+checked against the hardware in hand.
+
+**Still worth having, and now nearly free: the speaker.** GPIO9 is the ES8311's
+DSDIN and GPIO11 enables the amplifier. The mic port already masters BCLK, WS
+and MCLK for this codec and its DAC is already powered as the ADC's reference,
+so a TX channel on that port plus one GPIO high would give the board audio out
+of its own speaker.
+
+**And the schematic exists.** `private_docs/datasheets/2_EXPAND_IO&BAT.png` is
+sheet 2 of this board's own drawing (it is where the JP1 header list came from,
+and it confirms GPIO9–13 are not brought out). The audio sheet from the same
+document would settle in seconds what has cost several rounds: whether GPIO9–13
+reach the ES8311 at all, and what is on its MIC pins.
+
+**An external MEMS mic costs one GPIO, not three.** With
+`OSYNTH_MIC_SHARE_CLOCKS=y` the mic port is a slave on the BCLK and WS lines
+already running to the ES8388, so only its data pin is new — solder SCK and WS
+to the same points that feed the codec module. That is also the arrangement
+proven working on this board, and it avoids the entire master-mode clock-source
+problem described in `sdkconfig.defaults.esp32p4`.
+

@@ -18,6 +18,8 @@
  */
 #include "codec.h"
 
+#include "codec_priv.h"
+
 #if SYNTH_ENABLE_CODEC_ES8388
 
 #include <stdint.h>
@@ -103,6 +105,13 @@ constexpr uint8_t kAdcControl3 = 0x02;
  * differentially, and a single-ended selection there recovers exactly half the
  * amplitude on that channel — the 6 dB imbalance that S31d spent a long time
  * mistaking for a summing node and trying to trim. */
+/* The two ADC channels come back with *opposite polarity* in this mode
+ * (L = +d, R = -d). Nothing here needs to care, but anything that sums the
+ * capture to mono does: it cancels to silence. audio_io's capture un-inverts
+ * the right leg under SYNTH_LINE_IN_INVERT_R — see that macro in
+ * synth_config.h, which carries the full story. Found the hard way: the looper
+ * records folded by default, so a differential input was inaudible in every
+ * take while monitoring perfectly. */
 constexpr uint8_t kAdcInput = 0xf0;
 constexpr uint8_t kAdcControl3 = 0x02;
 #else
@@ -741,6 +750,17 @@ esp_err_t ensure_bus(void) {
 }
 
 } // namespace
+
+/* The bus, for codec_es8311.cpp — see codec_priv.h for why it is borrowed
+ * rather than opened twice. Outside the anonymous namespace so the other file
+ * can link to it; ensure_bus() stays inside it, because opening the bus is
+ * still this file's job and nobody else's. */
+esp_err_t codec_i2c_bus(i2c_master_bus_handle_t* out) {
+    const esp_err_t err = ensure_bus();
+    if (err != ESP_OK) return err;
+    *out = s_bus;
+    return ESP_OK;
+}
 
 esp_err_t codec_early_mute(void) {
     const esp_err_t err = ensure_bus();
