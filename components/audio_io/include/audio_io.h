@@ -184,6 +184,39 @@ void audio_io_line_in_mon(float* l, float* r, size_t frames);
  * `in.route` at off, which is also how you would set it up. */
 const int16_t* audio_io_line_in_block(void);
 
+/* The current block as mono float in [-1, 1], summing every device `in.source`
+ * selects, each at its own trim. Returns false and leaves `dst` untouched when
+ * this build has no input or the RX half never came up; `dst` must hold at
+ * least `frames` floats, and `frames` may not exceed SYNTH_BLOCK_SIZE. Audio
+ * task only, valid for the current block.
+ *
+ * The difference from audio_io_line_in_block() above is the whole reason this
+ * exists, and it is a difference in what the caller is asking for:
+ *
+ *   ..._line_in_block()  "the line input", one device, one wire. A modular
+ *                        patch stores a node index, so following a selector
+ *                        would make a saved patch sound different depending on
+ *                        what someone later plugged into a jack it never
+ *                        mentions.
+ *   ..._in_mono()        "the audio input", whichever device the player has
+ *                        told the synth to listen to. `in.source` is the one
+ *                        global answer to that question, and a caller that
+ *                        ignores it makes the unselected device unreachable —
+ *                        which on a build with both is a microphone that
+ *                        cannot be heard no matter what the player sets.
+ *
+ * Deliberately independent of `in.route` and `in.gain`, exactly as the graph
+ * node is: those name the *monitor* path, and a caller here is a destination
+ * of its own. Granulating the input while monitoring it dry, or while
+ * monitoring nothing at all, both have to work. The per-device trim
+ * (`in.micgain`) *is* applied, because without it `both` sums two devices that
+ * arrive nowhere near each other in level.
+ *
+ * A MEMS mic at conversational distance sits far below full scale even after
+ * that trim, so a caller that wants a usable signal from one should offer a
+ * gain of its own rather than assume this arrives near unity. */
+bool audio_io_in_mono(float* dst, size_t frames);
+
 /* Picks and starts the output sink, then starts the audio task.
  * `render` may be NULL (silence). Falls back to the null sink (no output,
  * timer pacing) if the hardware sink fails to start. */

@@ -4,10 +4,15 @@ file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/gen")
 
 idf_component_register(
     SRCS "engines.cpp" "engine_subtractive.cpp" "engine_additive.cpp"
-         "engine_fm.cpp" "engine_wavetable.cpp"
+         "engine_fm.cpp" "engine_wavetable.cpp" "engine_granular.cpp"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "${CMAKE_CURRENT_BINARY_DIR}/gen"
     REQUIRES synth_core graph
+    # audio_io: the granular engine's capture ring reads the captured input
+    # block (S38), the same dependency and for the same reason as the modular
+    # graph's LineIn node. Private — it appears in engine_granular.cpp only,
+    # never in a public header.
+    PRIV_REQUIRES audio_io
 )
 
 # factory_wavetables.h is generated at build time by the host-side script

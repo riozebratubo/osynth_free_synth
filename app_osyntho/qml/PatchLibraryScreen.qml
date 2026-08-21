@@ -10,7 +10,12 @@ Item {
     id: screen
 
     property var patchList: []
-    readonly property var engineNames: ["Subtractive", "Additive", "FM", "Wavetable", "Modular"]
+    // Indexed by the engine id stored on a saved patch, so this list is not
+    // the picker's: it has to name every engine that could have written a row
+    // in the DB, including ones the connected synth does not have. Positional
+    // and append-only for the same reason the firmware's enum is.
+    readonly property var engineNames: ["Subtractive", "Additive", "FM", "Wavetable",
+                                        "Modular", "Granular"]
 
     function refresh() { patchList = Synth.patches(-1) }
     Component.onCompleted: refresh()

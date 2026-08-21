@@ -182,7 +182,7 @@ Translator::Translator() {
   // ── Home (HomeScreen.qml) ──────────────────────────────────────────────
   pt["%1 engine"] = "Motor %1";
   pt["Discovering…"] = "Descobrindo…";
-  pt["Subtractive"] = "Subtrativo";  // engine name; FM / Wavetable / Modular read the same
+  pt["Subtractive"] = "Subtrativo";  // engine name; FM / Wavetable / Modular / Granular read the same
   pt["Additive"] = "Aditivo";
   pt["Voice"] = "Voz";
   pt["factory"] = "fábrica";  // also reused for the "(factory)" preset tag
@@ -200,6 +200,9 @@ Translator::Translator() {
   pt["FM velocity"] = "Velocidade FM";
   pt["Table motion"] = "Movimento da tabela";
   pt["Brightness env"] = "Env. de brilho";
+  pt["Grain cloud"] = "Nuvem de grãos";
+  pt["Capture buffer"] = "Buffer de captura";
+  pt["Formant env"] = "Env. de formante";
   pt["Filter"] = "Filtro";
   pt["Vibrato LFO"] = "LFO de vibrato";
   pt["Granular delay"] = "Delay granular";

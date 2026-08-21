@@ -425,11 +425,47 @@ QString SynthController::engineNameFor(int engine) {
     case ENG_FM:          return QStringLiteral("FM");
     case ENG_WAVETABLE:   return QStringLiteral("Wavetable");
     case ENG_MODULAR:     return QStringLiteral("Modular");
+    case ENG_GRANULAR:    return QStringLiteral("Granular");
     default:              return QStringLiteral("?");
   }
 }
 
 QString SynthController::engineName() const { return engineNameFor(m_engine); }
+
+QVariantList SynthController::engineList() const {
+  // How many engines the connected firmware declares. engine.type is an Enum
+  // and PARAM_INFO carries its labels, so the count is authoritative: an app
+  // newer than the firmware it is talking to simply does not draw a button for
+  // an engine that build has never heard of. Before discovery answers, the
+  // four fixed engines are the safe assumption — every firmware has had them
+  // since S8.
+  //
+  // The labels themselves are not used for display. engineNameFor() is, so
+  // capitalisation and the translator's lookup keys stay in one place rather
+  // than following whatever the firmware happened to name a parameter value.
+  int count = 4;
+  const int pid = paramIdForName(QStringLiteral("engine.type"));
+  if (pid > 0) {
+    const Param& p = m_params.value(quint16(pid));
+    if (p.infoKnown && !p.info.enumNames.isEmpty()) count = p.info.enumNames.size();
+  }
+
+  // The one index the count cannot answer for. Since S38 the firmware
+  // reserves the modular engine's slot whether or not the graph is compiled
+  // in — that is what keeps every later engine's index stable — so "it is in
+  // the enum" no longer means "it can be bound". GRAPH_INFO is what says so.
+  const int modular = m_graphEngineIndex >= 0 ? m_graphEngineIndex : ENG_MODULAR;
+
+  QVariantList out;
+  for (int e = 0; e < count; ++e) {
+    if (e == modular && !m_graphAvailable) continue;
+    QVariantMap row;
+    row.insert("n", engineNameFor(e));
+    row.insert("e", e);
+    out.append(row);
+  }
+  return out;
+}
 
 /* ------------------------------------------------------------ connection */
 
@@ -570,6 +606,9 @@ void SynthController::resetState() {
   emit readyChanged();
   emit presetChanged();
   emit paramsDiscovered();
+  // m_params is cleared above, so the picker falls back to the four fixed
+  // engines until the next connection's discovery answers.
+  emit engineListChanged();
 }
 
 void SynthController::onInfoRead(const QByteArray& info) {
@@ -1262,6 +1301,10 @@ void SynthController::handleParamInfoSingle(const QByteArray& payload) {
   m_infoInflight.remove(pi.id);  // free its flow-control slot
   // Progressive fill: refresh the page groups as newly-known metadata arrives.
   if (wasUnknown) scheduleParamsDiscovered();
+  // engine.type's enum labels are what engineList() counts, so the picker has
+  // to be told the moment they land — it is drawn from the four-engine
+  // fallback until then.
+  if (wasUnknown && pi.name == QLatin1String("engine.type")) emit engineListChanged();
   if (m_discovering && !m_awaitingInfoList) {
     if (m_pendingInfoIds.isEmpty()) {
       finishDiscovery();
@@ -2561,7 +2604,7 @@ QVariantMap SynthController::importPatchesToLibrary(const QString& text) {
     // Unlike a push, which is gone once it lands, a row stays — and Load sends
     // its engine number straight to the synth. A number this build has no
     // engine for is refused rather than stored.
-    if (engine < ENG_SUBTRACTIVE || engine > ENG_MODULAR) {
+    if (engine < ENG_SUBTRACTIVE || engine > ENG_GRANULAR) {
       ++skipped;
       continue;
     }
@@ -3265,6 +3308,7 @@ void SynthController::handleGraphInfo(const QByteArray& payload) {
   m_graphCost = g.liveCost;
   emit graphInfoChanged();
   emit graphCostChanged();
+  emit engineListChanged();  // GRAPH_INFO decides whether Modular is offered
 
   // The kind table is build-constant, so fetch it once per connection. Doing
   // it on every refresh would put kindCount round trips in front of every

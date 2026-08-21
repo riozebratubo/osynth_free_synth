@@ -606,6 +606,42 @@ void SYNTH_RENDER_IRAM audio_io_line_in_mon(float* l, float* r, size_t frames) {
     mix_in(kInMon, l, r, frames);
 }
 
+bool SYNTH_RENDER_IRAM audio_io_in_mono(float* dst, size_t frames) {
+    if (!s_in_ok || dst == nullptr) return false;
+    if (frames > SYNTH_BLOCK_SIZE) frames = SYNTH_BLOCK_SIZE;
+
+    /* One pass per selected device, same shape and same gate as mix_in(): an
+     * unselected device's trim sits at 0 and its pass is skipped, so a
+     * single-source build costs exactly one pass. The first writer assigns and
+     * the rest accumulate, which saves clearing the buffer in the common case
+     * of exactly one device.
+     *
+     * The 0.5 folds L+R to mono at unity: a mono source arriving on both
+     * channels comes back at its own level rather than 6 dB up, and the
+     * ES8311 path is exactly that case (one mic, duplicated across the pair). */
+    bool any = false;
+    for (int d = 0; d < kDevCount; ++d) {
+        const float dg = s_dev_g[d];
+        if (dg <= kInSilent) continue;
+        const int16_t* __restrict__ c = s_cap[d];
+        const float k = dg * kInScale * 0.5f;
+        if (!any) {
+            for (size_t i = 0; i < frames; ++i) {
+                dst[i] = ((float)c[2 * i] + (float)c[2 * i + 1]) * k;
+            }
+            any = true;
+        } else {
+            for (size_t i = 0; i < frames; ++i) {
+                dst[i] += ((float)c[2 * i] + (float)c[2 * i + 1]) * k;
+            }
+        }
+    }
+    /* `in.source` selecting nothing is not the same as having no input: the
+     * caller still wants a block, and silence is the honest one. */
+    if (!any) memset(dst, 0, frames * sizeof(float));
+    return true;
+}
+
 const int16_t* SYNTH_RENDER_IRAM audio_io_line_in_block(void) {
     /* NULL rather than a buffer of stale samples when the capture is not
      * running: s_cap is only refilled by audio_in_capture(), which returns
@@ -636,6 +672,7 @@ void audio_io_line_in_fx(float*, float*, size_t) {}
 void audio_io_line_in_dry(float*, float*, size_t) {}
 void audio_io_line_in_mon(float*, float*, size_t) {}
 const int16_t* audio_io_line_in_block(void) { return nullptr; }
+bool audio_io_in_mono(float*, size_t) { return false; }
 
 #endif /* SYNTH_ENABLE_AUDIO_IN */
 

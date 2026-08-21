@@ -67,15 +67,17 @@ static const char* TAG = "osynth";
 using namespace osynth;
 
 static void register_global_params() {
-    /* Order and count must track synth_engine_type_t — the modular engine
-     * (S28) is Kconfig-gated, so on a build without it the enum stops at
-     * wavetable and the app never offers a slot that cannot be bound. */
+    /* Order and count must track synth_engine_type_t, which since S38 is
+     * unconditional — "modular" is named here even on a build without it,
+     * because its index is reserved either way (engines.h explains why). An
+     * app that offers it on such a build gets the switch task's revert and
+     * an EVT_ENGINE saying the engine did not change; the app's own engine
+     * list gates it on GRAPH_INFO and does not offer it at all. */
     static const char* kEngineNames[] = {"subtractive", "additive", "fm",
-                                         "wavetable",
-#if SYNTH_ENABLE_MODULAR
-                                         "modular",
-#endif
-    };
+                                         "wavetable", "modular", "granular"};
+    static_assert(sizeof(kEngineNames) / sizeof(kEngineNames[0]) ==
+                      SYNTH_ENGINE_COUNT,
+                  "engine.type names must track synth_engine_type_t");
 #if SYNTH_ENABLE_AUDIO_IN
     /* Where the input joins the render chain, and therefore what it records:
      * `mon` is mixed after the looper's record tap, so it is heard but never

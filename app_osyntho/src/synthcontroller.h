@@ -46,6 +46,12 @@ class SynthController : public QObject, public DatabaseClient {
   Q_PROPERTY(QString engineName READ engineName NOTIFY engineChanged)
   Q_PROPERTY(int caps READ caps NOTIFY engineChanged)
 
+  // [{n, e}] for the engine picker: which engines the *connected* firmware
+  // actually has, so the app never offers a slot that cannot be bound. Derived
+  // from engine.type's enum labels rather than from a list here, which is what
+  // lets one app build talk to firmware older than itself.
+  Q_PROPERTY(QVariantList engineList READ engineList NOTIFY engineListChanged)
+
   Q_PROPERTY(int presetSlot READ presetSlot NOTIFY presetChanged)
   Q_PROPERTY(QString presetName READ presetName NOTIFY presetChanged)
   Q_PROPERTY(bool presetIsFactory READ presetIsFactory NOTIFY presetChanged)
@@ -166,6 +172,7 @@ class SynthController : public QObject, public DatabaseClient {
   Q_INVOKABLE bool paramValueKnown(int id) const;
   Q_INVOKABLE QVariantMap paramMeta(int id) const;  // exists,name,type,curve,min,max,def,enumNames
   Q_INVOKABLE QVariantList paramIds() const;
+  QVariantList engineList() const;
   // UI helpers: resolve by name, or gather every registered id whose name starts
   // with `prefix` (registration order). paramPickerList returns [{id,name}] for
   // the mod-matrix destination picker.
@@ -426,6 +433,7 @@ class SynthController : public QObject, public DatabaseClient {
   void connectedChanged();
   void readyChanged();
   void engineChanged();
+  void engineListChanged();
   void presetChanged();
   void infoChanged();
   void isUpdatingFirmwareChanged();

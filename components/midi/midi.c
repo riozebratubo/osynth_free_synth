@@ -28,6 +28,7 @@
 
 #include "engine_additive.h"
 #include "engine_fm.h"
+#include "engine_granular.h"
 #include "engine_subtractive.h"
 #include "engine_wavetable.h"
 #include "drums.h"
@@ -147,6 +148,24 @@ static const cc_entry_t k_cc_wavetable[] = {
     {76, WT_PID_MIX_OSC2},            /* bring in wt2 (sync saw, +4 ct) */
 };
 
+/* 70/75/76/77 are the "sound variation / sound controller" block, undefined
+ * by default and used here as they are for the wavetable engine: the cloud's
+ * own shape controls have no other live handle. 74 is brightness and lands on
+ * the filter cutoff as everywhere else — deliberately *not* on grn.form,
+ * which sounds like a brightness control and is not one: it moves the formant
+ * in ratio to the key, so a sweep of it is a vowel, not a tone control, and
+ * one CC has to mean one thing across the engines. */
+static const cc_entry_t k_cc_granular[] = {
+    {70, GRAN_PID_FORM},              /* "sound variation" -> formant ratio */
+    {71, GRAN_PID_FLT_RESO},          /* "harmonic content" */
+    {72, GRAN_PID_ENV1_RELEASE},
+    {73, GRAN_PID_ENV1_ATTACK},
+    {74, GRAN_PID_FLT_CUTOFF},        /* "brightness" */
+    {75, GRAN_PID_SIZE},              /* grain length */
+    {76, GRAN_PID_SCAT},              /* pitch scatter: cloud vs train */
+    {77, GRAN_PID_BUF_POS},           /* scrub the capture ring (src = in) */
+};
+
 #define CC_TABLE(t) t, (sizeof(t) / sizeof((t)[0]))
 
 static bool cc_apply(const cc_entry_t* map, size_t len, uint8_t cc,
@@ -181,6 +200,8 @@ static bool cc_route(uint8_t cc, uint8_t value) {
             return cc_apply(CC_TABLE(k_cc_fm), cc, value);
         case SYNTH_ENGINE_WAVETABLE:
             return cc_apply(CC_TABLE(k_cc_wavetable), cc, value);
+        case SYNTH_ENGINE_GRANULAR:
+            return cc_apply(CC_TABLE(k_cc_granular), cc, value);
         default:
             /* The modular engine (S28) deliberately has no CC table: its
              * parameter ids are positional, so "CC 74 is the cutoff" has no

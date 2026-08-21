@@ -32,6 +32,13 @@ Item {
             ParamGroup { title: "Wavetable 2"; prefix: "wt2" }
             ParamGroup { title: "Table motion"; prefix: "env.pos" }
             ParamGroup { title: "Brightness env"; prefix: "env.bright" }
+            // Granular (S38). Two cards because the two halves are not always
+            // both live: buf.* only does anything at grn.src = in, and giving
+            // it its own panel is the honest way to say which controls the
+            // current source ignores.
+            ParamGroup { title: "Grain cloud"; prefix: "grn." }
+            ParamGroup { title: "Capture buffer"; prefix: "buf" }
+            ParamGroup { title: "Formant env"; prefix: "env.form" }
         }
     }
 

@@ -30,17 +30,13 @@ Item {
                 width: panels.contentWidth
                 spacing: 8
                 Repeater {
-                    // The four fixed engines are always there. The modular one
-                    // is Kconfig-gated in firmware, so it is appended only when
-                    // GRAPH_INFO answered — and at the index that answer gave,
-                    // rather than a hardcoded 4.
-                    model: {
-                        var list = [{ n: "Subtractive", e: 0 }, { n: "Additive", e: 1 },
-                                    { n: "FM", e: 2 }, { n: "Wavetable", e: 3 }]
-                        if (Synth.graphAvailable && Synth.graphEngineIndex >= 0)
-                            list.push({ n: "Modular", e: Synth.graphEngineIndex })
-                        return list
-                    }
+                    // Which engines the connected firmware actually has —
+                    // engine.type's enum decides the count and GRAPH_INFO
+                    // decides whether Modular is among them. Built in
+                    // SynthController::engineList() rather than here, because
+                    // an app that hardcodes the list offers buttons that older
+                    // firmware answers with ST_BAD_ARG (S38).
+                    model: Synth.engineList
                     delegate: Button {
                         required property var modelData
                         text: t.t(modelData.n)

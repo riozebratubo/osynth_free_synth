@@ -131,11 +131,13 @@ enum Engine : quint8 {
   ENG_ADDITIVE    = 1,
   ENG_FM          = 2,
   ENG_WAVETABLE   = 3,
-  // Kconfig-gated in firmware and therefore last, so a build without it just
-  // has a shorter enum. Never assume it exists from this constant alone —
+  // Kconfig-gated in firmware, but its *index* is reserved either way (S38),
+  // so this constant is stable and everything after it keeps its number.
+  // Never assume the engine exists from the constant alone —
   // SynthController::graphEngineIndex (GRAPH_INFO) is what says whether the
   // connected firmware actually has it, and is the index to select.
   ENG_MODULAR     = 4,
+  ENG_GRANULAR    = 5,
 };
 
 // PARAM_INFO caps mask — which optional modules the active engine exposes, so

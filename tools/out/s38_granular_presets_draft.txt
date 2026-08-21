@@ -1,0 +1,532 @@
+/* --- slots 17-47: the rest of the bank -------------------------------- */
+
+/* Formants that are not vowels. The vowel filter is one way to a voice;
+ * a bare high formant ratio on a sine is another, and it is the one that
+ * sounds like a struck bar rather than a throat. */
+static const preset_pair_t kGranFormantBell[] = {
+    P(GRAN_PID_FORM, 6.5f), P(GRAN_PID_SIZE, 14.0f),
+    P(GRAN_PID_SHAPE, 0.14f), P(GRAN_PID_SPREAD, 0.5f),
+    P(GRAN_PID_ENV_FORM, -1.4f), /* the strike is bright, the tail is not */
+    P(GRAN_PID_ENV2_ATTACK, 0.001f), P(GRAN_PID_ENV2_DECAY, 0.5f),
+    P(GRAN_PID_ENV2_SUSTAIN, 0.0f),
+    P(GRAN_PID_FLT_CUTOFF, 8000.0f),
+    P(GRAN_PID_ENV1_ATTACK, 0.001f), P(GRAN_PID_ENV1_DECAY, 1.4f),
+    P(GRAN_PID_ENV1_SUSTAIN, 0.0f), P(GRAN_PID_ENV1_RELEASE, 1.0f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.42f), P(FX_PID_REV_SIZE, 0.8f),
+};
+
+/* env2 walks the vowel filter instead of the formant, so the patch says a
+ * word over the length of a note */
+static const preset_pair_t kGranVowelMorph[] = {
+    P(GRAN_PID_WAVE, 2), P(GRAN_PID_FORM, 1.0f),
+    P(GRAN_PID_SIZE, 24.0f), P(GRAN_PID_SHAPE, 0.45f),
+    P(GRAN_PID_FLT_TYPE, 4), P(GRAN_PID_FLT_VOWEL, 0.1f),
+    P(GRAN_PID_FLT_CUTOFF, 1000.0f), P(GRAN_PID_FLT_RESO, 0.3f),
+    P(GRAN_PID_ENV2_ATTACK, 0.6f), P(GRAN_PID_ENV2_DECAY, 1.4f),
+    P(GRAN_PID_ENV2_SUSTAIN, 0.5f),
+    P(GRAN_PID_ENV1_ATTACK, 0.25f), P(GRAN_PID_ENV1_SUSTAIN, 0.9f),
+    P(GRAN_PID_ENV1_RELEASE, 0.9f),
+    MOD(0, SYNTH_MOD_SRC_ENV2, GRAN_PID_FLT_VOWEL, 0.8f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.32f),
+};
+
+/* formant locked to the fundamental, driven hard: a reed rather than a
+ * cloud — the ladder is what makes it honk instead of buzz */
+static const preset_pair_t kGranBuzzReed[] = {
+    P(GRAN_PID_WAVE, 2), P(GRAN_PID_FORM, 1.0f),
+    P(GRAN_PID_SIZE, 16.0f), P(GRAN_PID_SHAPE, 0.3f),
+    P(GRAN_PID_SPREAD, 0.15f),
+    P(GRAN_PID_FLT_TYPE, 2), P(GRAN_PID_FLT_CUTOFF, 1600.0f),
+    P(GRAN_PID_FLT_RESO, 0.45f), P(GRAN_PID_FLT_DRIVE, 0.55f),
+    P(GRAN_PID_FLT_ENV, 1.4f), P(GRAN_PID_FLT_KBD, 0.6f),
+    P(GRAN_PID_ENV2_DECAY, 0.25f), P(GRAN_PID_ENV2_SUSTAIN, 0.3f),
+    P(GRAN_PID_ENV1_ATTACK, 0.03f), P(GRAN_PID_ENV1_SUSTAIN, 0.85f),
+    P(GRAN_PID_ENV1_RELEASE, 0.25f),
+    MOD(0, SYNTH_MOD_SRC_WHEEL, GRAN_PID_FLT_DRIVE, 0.4f),
+};
+
+/* very high formant, tiny scatter, everything below it filtered away */
+static const preset_pair_t kGranAiryWhistle[] = {
+    P(GRAN_PID_FORM, 8.0f), P(GRAN_PID_SIZE, 40.0f),
+    P(GRAN_PID_SCAT, 0.6f), P(GRAN_PID_JIT, 0.2f),
+    P(GRAN_PID_SPREAD, 0.55f),
+    P(GRAN_PID_FLT_MODE, 2), /* hp */
+    P(GRAN_PID_FLT_CUTOFF, 2000.0f), P(GRAN_PID_FLT_KBD, 1.0f),
+    P(GRAN_PID_LFO1_RATE, 5.5f),
+    P(GRAN_PID_ENV1_ATTACK, 0.15f), P(GRAN_PID_ENV1_SUSTAIN, 0.8f),
+    P(GRAN_PID_ENV1_RELEASE, 0.5f),
+    MOD(0, SYNTH_MOD_SRC_WHEEL, GRAN_PID_LFO1_PITCH, 0.4f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.4f), P(FX_PID_REV_SIZE, 0.75f),
+};
+
+/* the window peak past centre plus a low formant reads as breath before
+ * tone — a flute's attack without a noise source */
+static const preset_pair_t kGranGrainFlute[] = {
+    P(GRAN_PID_WAVE, 1), P(GRAN_PID_FORM, 1.0f),
+    P(GRAN_PID_SIZE, 34.0f), P(GRAN_PID_SHAPE, 0.62f),
+    P(GRAN_PID_JIT, 0.18f), P(GRAN_PID_SPREAD, 0.4f),
+    P(GRAN_PID_FLT_CUTOFF, 3200.0f), P(GRAN_PID_FLT_ENV, -0.8f),
+    P(GRAN_PID_ENV2_ATTACK, 0.001f), P(GRAN_PID_ENV2_DECAY, 0.12f),
+    P(GRAN_PID_ENV2_SUSTAIN, 0.0f),
+    P(GRAN_PID_ENV1_ATTACK, 0.08f), P(GRAN_PID_ENV1_SUSTAIN, 0.85f),
+    P(GRAN_PID_ENV1_RELEASE, 0.3f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.28f),
+};
+
+/* square grains locked at 2x with nothing scattered: the train is periodic
+ * enough to read as an organ stop rather than as grains */
+static const preset_pair_t kGranPulseOrgan[] = {
+    P(GRAN_PID_WAVE, 3), P(GRAN_PID_PW, 0.5f),
+    P(GRAN_PID_FORM, 2.0f), P(GRAN_PID_SIZE, 20.0f),
+    P(GRAN_PID_SHAPE, 0.5f), P(GRAN_PID_SPREAD, 0.2f),
+    P(GRAN_PID_FLT_CUTOFF, 4500.0f), P(GRAN_PID_FLT_KBD, 0.8f),
+    P(GRAN_PID_ENV1_ATTACK, 0.006f), P(GRAN_PID_ENV1_SUSTAIN, 1.0f),
+    P(GRAN_PID_ENV1_RELEASE, 0.06f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_CHO_MIX, 0.25f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.22f),
+};
+
+/* noise grains on the *sync* grid — the one combination that gives noise a
+ * pitch, because the train is periodic even though its contents are not */
+static const preset_pair_t kGranRattle[] = {
+    P(GRAN_PID_WAVE, 4), P(GRAN_PID_SIZE, 6.0f),
+    P(GRAN_PID_SHAPE, 0.25f), P(GRAN_PID_SPREAD, 0.45f),
+    P(GRAN_PID_FLT_MODE, 1), P(GRAN_PID_FLT_CUTOFF, 2500.0f),
+    P(GRAN_PID_FLT_RESO, 0.55f), P(GRAN_PID_FLT_KBD, 1.0f),
+    P(GRAN_PID_ENV1_ATTACK, 0.002f), P(GRAN_PID_ENV1_DECAY, 0.5f),
+    P(GRAN_PID_ENV1_SUSTAIN, 0.5f), P(GRAN_PID_ENV1_RELEASE, 0.2f),
+    P(FX_PID_DLY_ON, 1), P(FX_PID_DLY_MIX, 0.24f), P(FX_PID_DLY_TIME, 0.1875f),
+    P(FX_PID_DLY_FB, 0.42f), P(FX_PID_DLY_PP, 1),
+};
+
+/* jitter plus unison: three detuned trains whose onsets never line up, which
+ * is the granular route to an ensemble */
+static const preset_pair_t kGranStrings[] = {
+    P(GRAN_PID_WAVE, 2), P(GRAN_PID_FORM, 2.0f),
+    P(GRAN_PID_SIZE, 45.0f), P(GRAN_PID_JIT, 0.3f),
+    P(GRAN_PID_SCAT, 0.5f), P(GRAN_PID_SPREAD, 0.85f),
+    P(GRAN_PID_FLT_CUTOFF, 3000.0f), P(GRAN_PID_FLT_ENV, 1.0f),
+    P(GRAN_PID_ENV2_ATTACK, 0.5f), P(GRAN_PID_ENV2_SUSTAIN, 0.8f),
+    P(GRAN_PID_ENV1_ATTACK, 0.32f), P(GRAN_PID_ENV1_SUSTAIN, 0.9f),
+    P(GRAN_PID_ENV1_RELEASE, 1.1f),
+    P(SYNTH_PID_COMMON_UNISON, 3), P(SYNTH_PID_COMMON_UNI_DETUNE, 12.0f),
+    P(SYNTH_PID_COMMON_UNI_SPREAD, 1.0f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_CHO_MIX, 0.35f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.4f), P(FX_PID_REV_SIZE, 0.8f),
+};
+
+/* formant a quarter of the key and grains long enough to overlap heavily:
+ * the bottom of what the engine can do */
+static const preset_pair_t kGranDeepDrone[] = {
+    P(GRAN_PID_FORM, 0.25f), P(GRAN_PID_SIZE, 120.0f),
+    P(GRAN_PID_SHAPE, 0.5f), P(GRAN_PID_JIT, 0.1f),
+    P(GRAN_PID_SPREAD, 0.3f),
+    P(GRAN_PID_FLT_TYPE, 2), P(GRAN_PID_FLT_CUTOFF, 500.0f),
+    P(GRAN_PID_FLT_DRIVE, 0.25f),
+    P(GRAN_PID_LFO2_RATE, 0.12f), P(GRAN_PID_LFO2_FORM, 0.25f),
+    P(GRAN_PID_ENV1_ATTACK, 1.2f), P(GRAN_PID_ENV1_SUSTAIN, 1.0f),
+    P(GRAN_PID_ENV1_RELEASE, 2.5f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.35f), P(FX_PID_REV_SIZE, 0.9f),
+};
+
+/* the density ceiling, high and wide: individual grains stop being audible
+ * and the cloud becomes a texture with no grain rate in it */
+static const preset_pair_t kGranShimmerHigh[] = {
+    P(GRAN_PID_MODE, 1), P(GRAN_PID_DENS, 240.0f),
+    P(GRAN_PID_SIZE, 22.0f), P(GRAN_PID_FORM, 8.0f),
+    P(GRAN_PID_SCAT, 5.0f), P(GRAN_PID_SPREAD, 1.0f),
+    P(GRAN_PID_JIT, 0.8f),
+    P(GRAN_PID_FLT_MODE, 2), P(GRAN_PID_FLT_CUTOFF, 3000.0f),
+    P(GRAN_PID_ENV1_ATTACK, 0.6f), P(GRAN_PID_ENV1_SUSTAIN, 0.9f),
+    P(GRAN_PID_ENV1_RELEASE, 2.2f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.55f), P(FX_PID_REV_SIZE, 0.92f),
+    P(FX_PID_REV_COMP, 1),
+};
+
+/* the sparse end: a few big grains a second, so the cloud is heard one grain
+ * at a time and s&h moves the formant between them */
+static const preset_pair_t kGranStutter[] = {
+    P(GRAN_PID_MODE, 1), P(GRAN_PID_DENS, 7.0f),
+    P(GRAN_PID_SIZE, 110.0f), P(GRAN_PID_FORM, 3.0f),
+    P(GRAN_PID_SHAPE, 0.35f), P(GRAN_PID_SPREAD, 1.0f),
+    P(GRAN_PID_LFO2_RATE, 6.0f), P(GRAN_PID_LFO2_WAVE, 4), /* s&h */
+    P(GRAN_PID_LFO2_FORM, 1.4f),
+    P(GRAN_PID_FLT_CUTOFF, 5000.0f),
+    P(GRAN_PID_ENV1_ATTACK, 0.02f), P(GRAN_PID_ENV1_SUSTAIN, 1.0f),
+    P(GRAN_PID_ENV1_RELEASE, 0.8f),
+    P(FX_PID_DLY_ON, 1), P(FX_PID_DLY_MIX, 0.3f), P(FX_PID_DLY_TIME, 0.5f),
+    P(FX_PID_DLY_FB, 0.5f), P(FX_PID_DLY_PP, 1),
+};
+
+/* Three fixed points of the vowel filter, saved as their own patches. The
+ * morph is one control, but "ah" and "ee" are destinations a player reaches
+ * for by name, and hunting for them on a knob mid-take is not playing. */
+static const preset_pair_t kGranVowelAh[] = {
+    P(GRAN_PID_WAVE, 2), P(GRAN_PID_FORM, 1.0f),
+    P(GRAN_PID_SIZE, 22.0f), P(GRAN_PID_SHAPE, 0.4f),
+    P(GRAN_PID_FLT_TYPE, 4), P(GRAN_PID_FLT_VOWEL, 0.0f),
+    P(GRAN_PID_FLT_CUTOFF, 900.0f), P(GRAN_PID_FLT_RESO, 0.3f),
+    P(GRAN_PID_ENV1_ATTACK, 0.1f), P(GRAN_PID_ENV1_SUSTAIN, 0.9f),
+    P(GRAN_PID_ENV1_RELEASE, 0.45f),
+    MOD(0, SYNTH_MOD_SRC_WHEEL, GRAN_PID_FLT_VOWEL, 1.0f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.3f),
+};
+
+static const preset_pair_t kGranVowelEe[] = {
+    P(GRAN_PID_WAVE, 2), P(GRAN_PID_FORM, 1.0f),
+    P(GRAN_PID_SIZE, 20.0f), P(GRAN_PID_SHAPE, 0.4f),
+    P(GRAN_PID_FLT_TYPE, 4), P(GRAN_PID_FLT_VOWEL, 0.45f),
+    P(GRAN_PID_FLT_CUTOFF, 1300.0f), P(GRAN_PID_FLT_RESO, 0.4f),
+    P(GRAN_PID_ENV1_ATTACK, 0.09f), P(GRAN_PID_ENV1_SUSTAIN, 0.9f),
+    P(GRAN_PID_ENV1_RELEASE, 0.4f),
+    MOD(0, SYNTH_MOD_SRC_WHEEL, GRAN_PID_FLT_VOWEL, 1.0f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.3f),
+};
+
+static const preset_pair_t kGranVowelOo[] = {
+    P(GRAN_PID_WAVE, 0), P(GRAN_PID_FORM, 1.5f),
+    P(GRAN_PID_SIZE, 30.0f), P(GRAN_PID_SHAPE, 0.55f),
+    P(GRAN_PID_FLT_TYPE, 4), P(GRAN_PID_FLT_VOWEL, 0.95f),
+    P(GRAN_PID_FLT_CUTOFF, 700.0f), P(GRAN_PID_FLT_RESO, 0.35f),
+    P(GRAN_PID_ENV1_ATTACK, 0.2f), P(GRAN_PID_ENV1_SUSTAIN, 0.9f),
+    P(GRAN_PID_ENV1_RELEASE, 0.7f),
+    MOD(0, SYNTH_MOD_SRC_WHEEL, GRAN_PID_FLT_VOWEL, -1.0f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.35f), P(FX_PID_REV_SIZE, 0.7f),
+};
+
+/* tiny grains, huge scatter, high density: not a note, a swarm */
+static const preset_pair_t kGranInsects[] = {
+    P(GRAN_PID_WAVE, 3), P(GRAN_PID_PW, 0.25f),
+    P(GRAN_PID_MODE, 1), P(GRAN_PID_DENS, 180.0f),
+    P(GRAN_PID_SIZE, 3.0f), P(GRAN_PID_FORM, 5.0f),
+    P(GRAN_PID_SHAPE, 0.4f), P(GRAN_PID_SCAT, 18.0f),
+    P(GRAN_PID_SPREAD, 1.0f), P(GRAN_PID_JIT, 1.0f),
+    P(GRAN_PID_FLT_MODE, 1), P(GRAN_PID_FLT_CUTOFF, 3500.0f),
+    P(GRAN_PID_FLT_RESO, 0.4f),
+    P(GRAN_PID_ENV1_ATTACK, 0.1f), P(GRAN_PID_ENV1_SUSTAIN, 0.9f),
+    P(GRAN_PID_ENV1_RELEASE, 0.6f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.4f),
+};
+
+/* long noise grains at low density overlap into something continuous, and
+ * the lowpass sweep is the only thing that moves */
+static const preset_pair_t kGranWindTunnel[] = {
+    P(GRAN_PID_WAVE, 4), P(GRAN_PID_MODE, 1),
+    P(GRAN_PID_DENS, 30.0f), P(GRAN_PID_SIZE, 180.0f),
+    P(GRAN_PID_SHAPE, 0.5f), P(GRAN_PID_SPREAD, 1.0f),
+    P(GRAN_PID_JIT, 1.0f),
+    P(GRAN_PID_FLT_CUTOFF, 800.0f), P(GRAN_PID_FLT_RESO, 0.35f),
+    P(GRAN_PID_FLT_KBD, 0.0f),
+    P(GRAN_PID_LFO2_RATE, 0.1f),
+    P(GRAN_PID_ENV1_ATTACK, 1.5f), P(GRAN_PID_ENV1_SUSTAIN, 1.0f),
+    P(GRAN_PID_ENV1_RELEASE, 3.0f),
+    MOD(0, SYNTH_MOD_SRC_LFO2, GRAN_PID_FLT_CUTOFF, 0.45f),
+    MOD(1, SYNTH_MOD_SRC_WHEEL, GRAN_PID_FLT_CUTOFF, 0.5f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.5f), P(FX_PID_REV_SIZE, 0.9f),
+};
+
+/* narrow pulse grains through the bitcrusher: the grain rate and the
+ * sample-rate reduction beat against each other */
+static const preset_pair_t kGranBitChoir[] = {
+    P(GRAN_PID_WAVE, 3), P(GRAN_PID_PW, 0.12f),
+    P(GRAN_PID_FORM, 3.0f), P(GRAN_PID_SIZE, 28.0f),
+    P(GRAN_PID_SPREAD, 0.6f), P(GRAN_PID_JIT, 0.15f),
+    P(GRAN_PID_FLT_CUTOFF, 6000.0f),
+    P(GRAN_PID_ENV1_ATTACK, 0.05f), P(GRAN_PID_ENV1_SUSTAIN, 0.9f),
+    P(GRAN_PID_ENV1_RELEASE, 0.6f),
+    P(FX_PID_CRUSH_ON, 1), P(FX_PID_CRUSH_MIX, 0.5f),
+    P(FX_PID_CRUSH_BITS, 7.0f), P(FX_PID_CRUSH_DOWN, 4.0f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.3f),
+};
+
+/* the ladder near self-oscillation, tracking the key, with the formant
+ * feeding it harmonics to grab */
+static const preset_pair_t kGranHarmLadder[] = {
+    P(GRAN_PID_WAVE, 2), P(GRAN_PID_FORM, 4.0f),
+    P(GRAN_PID_SIZE, 18.0f), P(GRAN_PID_SHAPE, 0.28f),
+    P(GRAN_PID_FLT_TYPE, 2), P(GRAN_PID_FLT_CUTOFF, 1200.0f),
+    P(GRAN_PID_FLT_RESO, 0.8f), P(GRAN_PID_FLT_KBD, 1.0f),
+    P(GRAN_PID_FLT_ENV, 2.0f),
+    P(GRAN_PID_ENV2_DECAY, 0.3f), P(GRAN_PID_ENV2_SUSTAIN, 0.15f),
+    P(GRAN_PID_ENV1_DECAY, 0.5f), P(GRAN_PID_ENV1_SUSTAIN, 0.6f),
+    P(GRAN_PID_ENV1_RELEASE, 0.3f),
+    MOD(0, SYNTH_MOD_SRC_WHEEL, GRAN_PID_FLT_RESO, 0.2f),
+};
+
+/* an asymmetric window through the phaser: the grain's own swell and the
+ * phaser's notches move at unrelated rates */
+static const preset_pair_t kGranPhaseTrain[] = {
+    P(GRAN_PID_WAVE, 2), P(GRAN_PID_FORM, 1.0f),
+    P(GRAN_PID_SIZE, 50.0f), P(GRAN_PID_SHAPE, 0.8f),
+    P(GRAN_PID_JIT, 0.22f), P(GRAN_PID_SPREAD, 0.7f),
+    P(GRAN_PID_FLT_CUTOFF, 4000.0f),
+    P(GRAN_PID_ENV1_ATTACK, 0.4f), P(GRAN_PID_ENV1_SUSTAIN, 0.9f),
+    P(GRAN_PID_ENV1_RELEASE, 1.2f),
+    P(FX_PID_PHS_ON, 1), P(FX_PID_PHS_MIX, 0.5f),
+    P(FX_PID_PHS_RATE, 0.3f), P(FX_PID_PHS_FB, 0.5f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.35f),
+};
+
+/* formant under the fundamental with drive on top: weight without depth,
+ * for a bass that has to sit under something */
+static const preset_pair_t kGranDarkPulsar[] = {
+    P(GRAN_PID_WAVE, 1), P(GRAN_PID_FORM, 0.75f),
+    P(GRAN_PID_SIZE, 25.0f), P(GRAN_PID_SHAPE, 0.22f),
+    P(GRAN_PID_SPREAD, 0.0f),
+    P(GRAN_PID_FLT_CUTOFF, 900.0f), P(GRAN_PID_FLT_RESO, 0.2f),
+    P(GRAN_PID_FLT_DRIVE, 0.45f), P(GRAN_PID_FLT_ENV, 1.0f),
+    P(GRAN_PID_FLT_KBD, 0.4f),
+    P(GRAN_PID_ENV2_DECAY, 0.18f), P(GRAN_PID_ENV2_SUSTAIN, 0.0f),
+    P(GRAN_PID_ENV1_ATTACK, 0.004f), P(GRAN_PID_ENV1_DECAY, 0.35f),
+    P(GRAN_PID_ENV1_SUSTAIN, 0.65f), P(GRAN_PID_ENV1_RELEASE, 0.15f),
+    P(FX_PID_DRV_ON, 1), P(FX_PID_DRV_MIX, 0.35f),
+};
+
+/* the top of the formant range on a very short grain: a ping with a pitch
+ * that has almost nothing below it */
+static const preset_pair_t kGranCrystalPing[] = {
+    P(GRAN_PID_FORM, 12.0f), P(GRAN_PID_SIZE, 5.0f),
+    P(GRAN_PID_SHAPE, 0.1f), P(GRAN_PID_SCAT, 2.0f),
+    P(GRAN_PID_SPREAD, 0.75f),
+    P(GRAN_PID_FLT_MODE, 2), P(GRAN_PID_FLT_CUTOFF, 1500.0f),
+    P(GRAN_PID_ENV1_ATTACK, 0.001f), P(GRAN_PID_ENV1_DECAY, 0.8f),
+    P(GRAN_PID_ENV1_SUSTAIN, 0.0f), P(GRAN_PID_ENV1_RELEASE, 0.7f),
+    P(FX_PID_DLY_ON, 1), P(FX_PID_DLY_MIX, 0.35f), P(FX_PID_DLY_TIME, 0.375f),
+    P(FX_PID_DLY_FB, 0.55f), P(FX_PID_DLY_PP, 1),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.45f), P(FX_PID_REV_SIZE, 0.88f),
+};
+
+/* a falling formant is a mouth closing; the same envelope opening the filter
+ * is the tongue. Together they are the closest this engine gets to a word. */
+static const preset_pair_t kGranBrass[] = {
+    P(GRAN_PID_WAVE, 2), P(GRAN_PID_FORM, 2.5f),
+    P(GRAN_PID_SIZE, 20.0f), P(GRAN_PID_SHAPE, 0.35f),
+    P(GRAN_PID_ENV_FORM, -1.2f),
+    P(GRAN_PID_FLT_CUTOFF, 1400.0f), P(GRAN_PID_FLT_ENV, 2.2f),
+    P(GRAN_PID_FLT_RESO, 0.25f), P(GRAN_PID_FLT_DRIVE, 0.3f),
+    P(GRAN_PID_ENV2_ATTACK, 0.05f), P(GRAN_PID_ENV2_DECAY, 0.45f),
+    P(GRAN_PID_ENV2_SUSTAIN, 0.35f),
+    P(GRAN_PID_ENV1_ATTACK, 0.04f), P(GRAN_PID_ENV1_SUSTAIN, 0.9f),
+    P(GRAN_PID_ENV1_RELEASE, 0.3f),
+    MOD(0, SYNTH_MOD_SRC_VEL, GRAN_PID_FLT_ENV, 0.3f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.25f),
+};
+
+/* an octave of scatter over a long release: struck once, the cloud keeps
+ * finding new pitches as it decays */
+static const preset_pair_t kGranScatterBells[] = {
+    P(GRAN_PID_MODE, 1), P(GRAN_PID_DENS, 35.0f),
+    P(GRAN_PID_SIZE, 60.0f), P(GRAN_PID_FORM, 7.0f),
+    P(GRAN_PID_SHAPE, 0.15f), P(GRAN_PID_SCAT, 12.0f),
+    P(GRAN_PID_SPREAD, 0.95f), P(GRAN_PID_JIT, 0.7f),
+    P(GRAN_PID_FLT_CUTOFF, 7000.0f),
+    P(GRAN_PID_ENV1_ATTACK, 0.002f), P(GRAN_PID_ENV1_DECAY, 2.5f),
+    P(GRAN_PID_ENV1_SUSTAIN, 0.0f), P(GRAN_PID_ENV1_RELEASE, 2.0f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.5f), P(FX_PID_REV_SIZE, 0.9f),
+};
+
+/* lfo1 on the cutoff rather than the pitch — the grains hold still and the
+ * window they are heard through pulses */
+static const preset_pair_t kGranTremoloGrains[] = {
+    P(GRAN_PID_FORM, 2.0f), P(GRAN_PID_SIZE, 30.0f),
+    P(GRAN_PID_SPREAD, 0.5f),
+    P(GRAN_PID_FLT_MODE, 1), P(GRAN_PID_FLT_CUTOFF, 1800.0f),
+    P(GRAN_PID_FLT_RESO, 0.5f), P(GRAN_PID_FLT_KBD, 0.7f),
+    P(GRAN_PID_LFO1_RATE, 6.5f), P(GRAN_PID_LFO1_WAVE, 1),
+    P(GRAN_PID_ENV1_ATTACK, 0.03f), P(GRAN_PID_ENV1_SUSTAIN, 0.9f),
+    P(GRAN_PID_ENV1_RELEASE, 0.4f),
+    MOD(0, SYNTH_MOD_SRC_LFO1, GRAN_PID_FLT_CUTOFF, 0.4f),
+    MOD(1, SYNTH_MOD_SRC_WHEEL, GRAN_PID_FLT_RESO, 0.3f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.28f),
+};
+
+/* the shortest window and the lowest formant the engine has: a body hit with
+ * a pitch, and no tail at all */
+static const preset_pair_t kGranSubThump[] = {
+    P(GRAN_PID_FORM, 0.5f), P(GRAN_PID_SIZE, 45.0f),
+    P(GRAN_PID_SHAPE, 0.06f), P(GRAN_PID_SPREAD, 0.0f),
+    P(GRAN_PID_FLT_TYPE, 2), P(GRAN_PID_FLT_CUTOFF, 400.0f),
+    P(GRAN_PID_FLT_DRIVE, 0.4f), P(GRAN_PID_FLT_KBD, 0.2f),
+    P(GRAN_PID_ENV1_ATTACK, 0.001f), P(GRAN_PID_ENV1_DECAY, 0.18f),
+    P(GRAN_PID_ENV1_SUSTAIN, 0.0f), P(GRAN_PID_ENV1_RELEASE, 0.1f),
+};
+
+/* sparse, tiny, scattered across two octaves and the whole field: the
+ * granular equivalent of rain on a roof */
+static const preset_pair_t kGranGlitchRain[] = {
+    P(GRAN_PID_MODE, 1), P(GRAN_PID_DENS, 14.0f),
+    P(GRAN_PID_SIZE, 8.0f), P(GRAN_PID_FORM, 6.0f),
+    P(GRAN_PID_SHAPE, 0.2f), P(GRAN_PID_SCAT, 24.0f),
+    P(GRAN_PID_SPREAD, 1.0f), P(GRAN_PID_JIT, 1.0f),
+    P(GRAN_PID_FLT_MODE, 2), P(GRAN_PID_FLT_CUTOFF, 1200.0f),
+    P(GRAN_PID_ENV1_ATTACK, 0.01f), P(GRAN_PID_ENV1_SUSTAIN, 1.0f),
+    P(GRAN_PID_ENV1_RELEASE, 1.0f),
+    P(FX_PID_DLY_ON, 1), P(FX_PID_DLY_MIX, 0.32f), P(FX_PID_DLY_TIME, 0.25f),
+    P(FX_PID_DLY_FB, 0.55f), P(FX_PID_DLY_PP, 1),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.42f),
+};
+
+/* the default patch softened into something that holds a chord — sine
+ * grains, gentle jitter, nothing sharp anywhere */
+static const preset_pair_t kGranWarmPad[] = {
+    P(GRAN_PID_FORM, 2.0f), P(GRAN_PID_SIZE, 65.0f),
+    P(GRAN_PID_SHAPE, 0.55f), P(GRAN_PID_JIT, 0.2f),
+    P(GRAN_PID_SCAT, 0.8f), P(GRAN_PID_SPREAD, 0.8f),
+    P(GRAN_PID_FLT_CUTOFF, 2600.0f), P(GRAN_PID_FLT_ENV, 1.0f),
+    P(GRAN_PID_ENV2_ATTACK, 1.0f), P(GRAN_PID_ENV2_SUSTAIN, 0.7f),
+    P(GRAN_PID_LFO2_RATE, 0.22f), P(GRAN_PID_LFO2_FORM, 0.15f),
+    P(GRAN_PID_ENV1_ATTACK, 0.8f), P(GRAN_PID_ENV1_DECAY, 1.5f),
+    P(GRAN_PID_ENV1_SUSTAIN, 0.95f), P(GRAN_PID_ENV1_RELEASE, 2.0f),
+    P(FX_PID_CHO_ON, 1), P(FX_PID_CHO_MIX, 0.3f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.45f), P(FX_PID_REV_SIZE, 0.85f),
+};
+
+/* velocity onto grain size and formant: the same key played harder is a
+ * shorter, brighter grain — the acoustic relationship, not a volume change */
+static const preset_pair_t kGranVelSize[] = {
+    P(GRAN_PID_FORM, 2.5f), P(GRAN_PID_SIZE, 60.0f),
+    P(GRAN_PID_SHAPE, 0.5f), P(GRAN_PID_SPREAD, 0.5f),
+    P(GRAN_PID_FLT_CUTOFF, 3000.0f),
+    P(GRAN_PID_ENV1_ATTACK, 0.02f), P(GRAN_PID_ENV1_SUSTAIN, 0.85f),
+    P(GRAN_PID_ENV1_RELEASE, 0.5f),
+    MOD(0, SYNTH_MOD_SRC_VEL, GRAN_PID_SIZE, -0.35f),
+    MOD(1, SYNTH_MOD_SRC_VEL, GRAN_PID_FORM, 0.25f),
+    MOD(2, SYNTH_MOD_SRC_VEL, GRAN_PID_SHAPE, -0.3f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.32f),
+};
+
+/* the keyboard drives the window shape: low notes swell, high notes strike,
+ * which is what a struck string does across its range */
+static const preset_pair_t kGranKeyShape[] = {
+    P(GRAN_PID_WAVE, 1), P(GRAN_PID_FORM, 3.0f),
+    P(GRAN_PID_SIZE, 40.0f), P(GRAN_PID_SHAPE, 0.7f),
+    P(GRAN_PID_SPREAD, 0.6f),
+    P(GRAN_PID_FLT_CUTOFF, 4000.0f), P(GRAN_PID_FLT_KBD, 0.9f),
+    P(GRAN_PID_ENV1_ATTACK, 0.01f), P(GRAN_PID_ENV1_DECAY, 1.2f),
+    P(GRAN_PID_ENV1_SUSTAIN, 0.4f), P(GRAN_PID_ENV1_RELEASE, 0.6f),
+    MOD(0, SYNTH_MOD_SRC_NOTE, GRAN_PID_SHAPE, -0.5f),
+    MOD(1, SYNTH_MOD_SRC_NOTE, GRAN_PID_SIZE, -0.3f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.35f),
+};
+
+/* the wheel takes the patch from a clean train to a wide cloud in one
+ * gesture — three destinations, one hand */
+static const preset_pair_t kGranWheelCloud[] = {
+    P(GRAN_PID_FORM, 3.0f), P(GRAN_PID_SIZE, 35.0f),
+    P(GRAN_PID_SPREAD, 0.3f),
+    P(GRAN_PID_FLT_CUTOFF, 5000.0f),
+    P(GRAN_PID_ENV1_ATTACK, 0.06f), P(GRAN_PID_ENV1_SUSTAIN, 0.9f),
+    P(GRAN_PID_ENV1_RELEASE, 0.8f),
+    MOD(0, SYNTH_MOD_SRC_WHEEL, GRAN_PID_SCAT, 0.5f),
+    MOD(1, SYNTH_MOD_SRC_WHEEL, GRAN_PID_JIT, 0.8f),
+    MOD(2, SYNTH_MOD_SRC_WHEEL, GRAN_PID_SPREAD, 0.7f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.38f), P(FX_PID_REV_SIZE, 0.8f),
+};
+
+/* glide plus a sync train: the formant stays put while the grain rate
+ * slides, which is a portamento no other engine here can make */
+static const preset_pair_t kGranGlideFormant[] = {
+    P(GRAN_PID_WAVE, 2), P(GRAN_PID_FORM, 4.0f),
+    P(GRAN_PID_SIZE, 22.0f), P(GRAN_PID_SHAPE, 0.4f),
+    P(GRAN_PID_SPREAD, 0.4f),
+    P(GRAN_PID_FLT_CUTOFF, 3000.0f), P(GRAN_PID_FLT_KBD, 0.0f),
+    P(GRAN_PID_ENV1_ATTACK, 0.02f), P(GRAN_PID_ENV1_SUSTAIN, 0.9f),
+    P(GRAN_PID_ENV1_RELEASE, 0.4f),
+    P(SYNTH_PID_COMMON_GLIDE, 0.12f),
+    P(FX_PID_DLY_ON, 1), P(FX_PID_DLY_MIX, 0.25f), P(FX_PID_DLY_TIME, 0.375f),
+    P(FX_PID_DLY_FB, 0.4f), P(FX_PID_DLY_PP, 1),
+};
+
+/* the dual filter's two passbands six octaves apart, fed a wide cloud:
+ * bottom and top with a hole where the note is */
+static const preset_pair_t kGranHollowDual[] = {
+    P(GRAN_PID_MODE, 1), P(GRAN_PID_DENS, 100.0f),
+    P(GRAN_PID_SIZE, 38.0f), P(GRAN_PID_FORM, 4.0f),
+    P(GRAN_PID_SCAT, 6.0f), P(GRAN_PID_SPREAD, 0.9f),
+    P(GRAN_PID_JIT, 0.6f),
+    P(GRAN_PID_FLT_TYPE, 3), P(GRAN_PID_FLT_CUTOFF, 1000.0f),
+    P(GRAN_PID_FLT_SPREAD, 5.0f), P(GRAN_PID_FLT_RESO, 0.45f),
+    P(GRAN_PID_ENV1_ATTACK, 0.4f), P(GRAN_PID_ENV1_SUSTAIN, 0.9f),
+    P(GRAN_PID_ENV1_RELEASE, 1.4f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.45f), P(FX_PID_REV_SIZE, 0.85f),
+};
+
+/* --- five more input patches (silent with nothing plugged in) --- */
+
+/* the ring transposed up two octaves by the keyboard, tiny spray: a
+ * playable instrument made out of whatever went in */
+static const preset_pair_t kGranInKeyed[] = {
+    P(GRAN_PID_SRC, 1), P(GRAN_PID_BUF_FREEZE, 1),
+    P(GRAN_PID_MODE, 1), P(GRAN_PID_DENS, 60.0f),
+    P(GRAN_PID_SIZE, 90.0f), P(GRAN_PID_SHAPE, 0.5f),
+    P(GRAN_PID_BUF_POS, 0.35f), P(GRAN_PID_BUF_SPRAY, 0.04f),
+    P(GRAN_PID_BUF_ROOT, 48.0f), /* low root: the keyboard sits above it */
+    P(GRAN_PID_SPREAD, 0.5f), P(GRAN_PID_JIT, 0.25f),
+    P(GRAN_PID_FLT_CUTOFF, 10000.0f),
+    P(GRAN_PID_ENV1_ATTACK, 0.02f), P(GRAN_PID_ENV1_SUSTAIN, 1.0f),
+    P(GRAN_PID_ENV1_RELEASE, 0.35f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.3f),
+};
+
+/* the density ceiling over a live ring: individual grains disappear and the
+ * input becomes a continuous smear of itself */
+static const preset_pair_t kGranInDenseWash[] = {
+    P(GRAN_PID_SRC, 1),
+    P(GRAN_PID_MODE, 1), P(GRAN_PID_DENS, 220.0f),
+    P(GRAN_PID_SIZE, 70.0f), P(GRAN_PID_SHAPE, 0.5f),
+    P(GRAN_PID_BUF_POS, 0.3f), P(GRAN_PID_BUF_SPRAY, 0.25f),
+    P(GRAN_PID_SPREAD, 1.0f), P(GRAN_PID_JIT, 0.9f),
+    P(GRAN_PID_FLT_CUTOFF, 9000.0f),
+    P(GRAN_PID_ENV1_ATTACK, 0.3f), P(GRAN_PID_ENV1_SUSTAIN, 1.0f),
+    P(GRAN_PID_ENV1_RELEASE, 1.2f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.45f), P(FX_PID_REV_SIZE, 0.85f),
+};
+
+/* buf.pos parked at the newest audio with almost no spray, so grains follow
+ * the input a few milliseconds behind it — a granular delay you play */
+static const preset_pair_t kGranInShadow[] = {
+    P(GRAN_PID_SRC, 1),
+    P(GRAN_PID_MODE, 1), P(GRAN_PID_DENS, 80.0f),
+    P(GRAN_PID_SIZE, 50.0f), P(GRAN_PID_SHAPE, 0.5f),
+    P(GRAN_PID_BUF_POS, 0.03f), P(GRAN_PID_BUF_SPRAY, 0.02f),
+    P(GRAN_PID_SPREAD, 0.6f), P(GRAN_PID_JIT, 0.3f),
+    P(GRAN_PID_FLT_CUTOFF, 12000.0f),
+    P(GRAN_PID_ENV1_ATTACK, 0.01f), P(GRAN_PID_ENV1_SUSTAIN, 1.0f),
+    P(GRAN_PID_ENV1_RELEASE, 0.25f),
+    MOD(0, SYNTH_MOD_SRC_WHEEL, GRAN_PID_BUF_POS, 0.6f),
+    P(FX_PID_DLY_ON, 1), P(FX_PID_DLY_MIX, 0.25f), P(FX_PID_DLY_TIME, 0.375f),
+    P(FX_PID_DLY_FB, 0.4f), P(FX_PID_DLY_PP, 1),
+};
+
+/* half the grains backwards over a frozen ring, with an octave of scatter:
+ * the input stops being recognisable and becomes material */
+static const preset_pair_t kGranInShards[] = {
+    P(GRAN_PID_SRC, 1), P(GRAN_PID_BUF_FREEZE, 1),
+    P(GRAN_PID_BUF_REV, 0.5f),
+    P(GRAN_PID_MODE, 1), P(GRAN_PID_DENS, 40.0f),
+    P(GRAN_PID_SIZE, 45.0f), P(GRAN_PID_SHAPE, 0.3f),
+    P(GRAN_PID_BUF_POS, 0.5f), P(GRAN_PID_BUF_SPRAY, 0.8f),
+    P(GRAN_PID_SCAT, 12.0f), P(GRAN_PID_SPREAD, 1.0f),
+    P(GRAN_PID_JIT, 0.9f),
+    P(GRAN_PID_FLT_CUTOFF, 8000.0f),
+    P(GRAN_PID_ENV1_ATTACK, 0.05f), P(GRAN_PID_ENV1_SUSTAIN, 1.0f),
+    P(GRAN_PID_ENV1_RELEASE, 1.5f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.5f), P(FX_PID_REV_SIZE, 0.9f),
+};
+
+/* env2 sweeps the read position across the frozen ring on every note, so a
+ * key press plays *through* the capture rather than sitting in one spot */
+static const preset_pair_t kGranInScrub[] = {
+    P(GRAN_PID_SRC, 1), P(GRAN_PID_BUF_FREEZE, 1),
+    P(GRAN_PID_MODE, 1), P(GRAN_PID_DENS, 70.0f),
+    P(GRAN_PID_SIZE, 60.0f), P(GRAN_PID_SHAPE, 0.5f),
+    P(GRAN_PID_BUF_POS, 0.05f), P(GRAN_PID_BUF_SPRAY, 0.05f),
+    P(GRAN_PID_SPREAD, 0.7f), P(GRAN_PID_JIT, 0.4f),
+    P(GRAN_PID_ENV2_ATTACK, 2.0f), P(GRAN_PID_ENV2_DECAY, 3.0f),
+    P(GRAN_PID_ENV2_SUSTAIN, 1.0f),
+    P(GRAN_PID_FLT_CUTOFF, 11000.0f),
+    P(GRAN_PID_ENV1_ATTACK, 0.03f), P(GRAN_PID_ENV1_SUSTAIN, 1.0f),
+    P(GRAN_PID_ENV1_RELEASE, 0.8f),
+    MOD(0, SYNTH_MOD_SRC_ENV2, GRAN_PID_BUF_POS, 0.9f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.4f),
+};

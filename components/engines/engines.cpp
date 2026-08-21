@@ -12,9 +12,11 @@
  *   set) -> voice_manager_set_engine(new) -> unmute.
  *
  * Failure at any step rolls back to the old engine and reverts the
- * parameter. Requests for unknown engine ids warn and revert (all four
- * engines are built as of S8). The listener itself only stores the request
- * and notifies — it may run on the TinyUSB task.
+ * parameter. Requests for an engine id this build does not have warn and
+ * revert — since S38 that is a live path rather than a defensive one, since
+ * the enum reserves the modular engine's index whether or not it is compiled
+ * in (engines.h). The listener itself only stores the request and notifies —
+ * it may run on the TinyUSB task.
  */
 #include "engines.h"
 
@@ -26,6 +28,7 @@
 
 #include "engine_additive.h"
 #include "engine_fm.h"
+#include "engine_granular.h"
 #include "engine_subtractive.h"
 #include "engine_wavetable.h"
 #include "synth_config.h"
@@ -44,6 +47,10 @@ using osynth::PID_ENGINE_TYPE;
 
 namespace {
 
+/* Positional, and the null is the point: since S38 the enum reserves index 4
+ * for the modular engine whether or not this build has one, so the slot has
+ * to be occupied by something. engines_get() hands the null straight back,
+ * which is the "engine %d not available" path below. */
 const synth_engine_t* const s_engines[SYNTH_ENGINE_COUNT] = {
     &g_engine_subtractive, /* SYNTH_ENGINE_SUBTRACTIVE */
     &g_engine_additive,    /* SYNTH_ENGINE_ADDITIVE */
@@ -51,7 +58,10 @@ const synth_engine_t* const s_engines[SYNTH_ENGINE_COUNT] = {
     &g_engine_wavetable,   /* SYNTH_ENGINE_WAVETABLE */
 #if SYNTH_ENABLE_MODULAR
     &g_engine_modular,     /* SYNTH_ENGINE_MODULAR (S28) */
+#else
+    nullptr,               /* SYNTH_ENGINE_MODULAR, not built */
 #endif
+    &g_engine_granular,    /* SYNTH_ENGINE_GRANULAR (S38) */
 };
 
 std::atomic<int> s_active_type{-1};

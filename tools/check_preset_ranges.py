@@ -27,6 +27,7 @@ RANGE_SOURCES = [
     "components/engines/engine_wavetable.cpp",
     "components/engines/engine_fm.cpp",
     "components/engines/engine_additive.cpp",
+    "components/engines/engine_granular.cpp",
     "components/fx/fx.cpp",
     "components/synth_core/synth_voice.cpp",
     "components/seqarp/seqarp.cpp",

@@ -21,6 +21,7 @@ TARGETS = [
     ("wavetable", "components/engines/engine_wavetable.cpp", "WT_PID_"),
     ("fm", "components/engines/engine_fm.cpp", "FM_PID_"),
     ("additive", "components/engines/engine_additive.cpp", "ADD_PID_"),
+    ("granular", "components/engines/engine_granular.cpp", "GRAN_PID_"),
     ("fx", "components/fx/fx.cpp", "FX_PID_"),
 ]
 
