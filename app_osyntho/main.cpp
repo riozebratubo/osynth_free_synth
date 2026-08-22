@@ -126,10 +126,6 @@ int main(int argc, char* argv[]) {
 
   // metatypes
 
-  // qml types. SynthController is also exposed as the `Synth` context property
-  // below; the registration lets QML import its enums if needed.
-  qmlRegisterType<SynthController>("org.osynth.main", 1, 0, "SynthController");
-
   // // only constructs singleton
   // Database::instance();
   // BluetoothManager::instance();
@@ -175,11 +171,10 @@ int main(int argc, char* argv[]) {
   // turns on binding removal logging
   // QLoggingCategory::setFilterRules(QStringLiteral("qt.qml.binding.removal.info=true"));
 
-  // qml inserted instances
-  engine.rootContext()->setContextProperty("App", &App::instance());
-  engine.rootContext()->setContextProperty("t", &Translator::instance());
-  engine.rootContext()->setContextProperty("BluetoothManager", &BluetoothManager::instance());
-  engine.rootContext()->setContextProperty("Synth", &App::instance().getSynth());
+  // App, Synth, Tr and BluetoothManager are declared QML singletons of the
+  // org.osynth.osyntho module now. They used to be context properties, which
+  // no compiler can see through: every binding that touched one fell back to
+  // interpreted byte code. See tools/qml_aot_score.py for the coverage.
 
   engine.loadFromModule("org.osynth.osyntho", "Main");
 

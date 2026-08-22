@@ -42,24 +42,24 @@ Item {
                 width: panels.contentWidth  // transport keeps its own line
                 spacing: 8
                 Button {
-                    text: t.t("Stop")
+                    text: Tr.t("Stop")
                     enabled: Synth.connected
                     onClicked: Synth.transport(0)
                 }
                 Button {
-                    text: t.t("Play")
+                    text: Tr.t("Play")
                     highlighted: true
                     enabled: Synth.connected
                     onClicked: Synth.transport(1)
                 }
                 Button {
-                    text: t.t("Rec")
+                    text: Tr.t("Rec")
                     enabled: Synth.connected
                     onClicked: Synth.transport(2)
                 }
                 RowLayout {
                     spacing: 4
-                    Label { text: t.t("Tempo"); color: Material.foreground; Layout.alignment: Qt.AlignVCenter }
+                    Label { text: Tr.t("Tempo"); color: Material.foreground; Layout.alignment: Qt.AlignVCenter }
                     SpinBox {
                         id: tempoField
                         from: 20
@@ -91,7 +91,7 @@ Item {
     Label {
         anchors.centerIn: parent
         visible: !Synth.ready
-        text: Synth.connected ? t.t("Discovering parameters…") : t.t("Not connected")
+        text: Synth.connected ? Tr.t("Discovering parameters…") : Tr.t("Not connected")
         opacity: 0.5
         color: Material.foreground
     }

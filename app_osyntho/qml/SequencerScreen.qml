@@ -41,7 +41,7 @@ Item {
         for (var i = 0; i < slots.length; ++i) m[slots[i].note] = slots[i].name
         return m
     }
-    function drumNameFor(note) {
+    function drumNameFor(note: int): string {
         const n = kitNoteMap[note]
         return n !== undefined ? n : ""
     }
@@ -83,7 +83,7 @@ Item {
         // Switching a drum lane to "from step note" makes the note meaningful;
         // the controller suggests the lane's outgoing drum so placement keeps
         // going with it instead of the melodic default, which maps to nothing.
-        function onPaintNoteSuggested(note) { UI.paintDrumNote = note }
+        function onPaintNoteSuggested(note: int): void { UI.paintDrumNote = note }
     }
     Component.onCompleted: {
         refreshIds()
@@ -150,7 +150,7 @@ Item {
             Row {
                 spacing: 4
                 Label {
-                    text: t.t("BPM")
+                    text: Tr.t("BPM")
                     color: Material.foreground
                     anchors.verticalCenter: parent.verticalCenter
                 }
@@ -175,7 +175,7 @@ Item {
             Row {
                 spacing: 4
                 Label {
-                    text: t.t("Pattern")
+                    text: Tr.t("Pattern")
                     color: Material.foreground
                     anchors.verticalCenter: parent.verticalCenter
                 }
@@ -207,14 +207,14 @@ Item {
             // changed". The firmware does the copy in place (OP_SEQ_EDIT), so
             // no pattern data travels over the link for it.
             Button {
-                text: t.t("Copy…")
+                text: Tr.t("Copy…")
                 flat: true
                 enabled: Synth.seqPatterns > 1
                 onClicked: copyPatternDialog.open()
             }
 
             Button {
-                text: t.t("Fill")
+                text: Tr.t("Fill")
                 // Momentary: fill is a gesture, not a mode — so setParamNow,
                 // not setParam. The batched write keeps only the last value an
                 // id was given inside its ~40 ms window, and a press and its
@@ -227,12 +227,12 @@ Item {
             // seq.song and seq.countin — so they follow the parameter rather
             // than the last press. See SyncedButton.qml.
             SyncedButton {
-                text: t.t("Song")
+                text: Tr.t("Song")
                 modelChecked: songVal.on
                 onToggled: if (root.pidSong > 0) Synth.setParam(root.pidSong, checked ? 1 : 0)
             }
             Button {
-                text: t.t("Track…")
+                text: Tr.t("Track…")
                 flat: true
                 onClicked: trackSheet.open()
             }
@@ -241,7 +241,7 @@ Item {
             // one file on the synth. Behind a button because it is a
             // between-takes action, and the grid needs the vertical space.
             Button {
-                text: t.t("Set…")
+                text: Tr.t("Set…")
                 flat: true
                 visible: seqSetDialog.available
                 onClicked: seqSetDialog.open()
@@ -252,7 +252,7 @@ Item {
             // that runs the sequencer, which the app could not do accurately
             // over BLE.
             SyncedButton {
-                text: t.t("Count-in")
+                text: Tr.t("Count-in")
                 visible: root.pidCountIn > 0
                 modelChecked: countInVal.on
                 onToggled: Synth.setParam(root.pidCountIn, checked ? 1 : 0)
@@ -265,7 +265,7 @@ Item {
                 spacing: 4
                 visible: !root.isDrumTrack || root.cfg.noteToSlot === true
                 Label {
-                    text: t.t("Paint")
+                    text: Tr.t("Paint")
                     color: Material.foreground
                     opacity: 0.7
                     anchors.verticalCenter: parent.verticalCenter
@@ -277,14 +277,14 @@ Item {
                     readonly property string drum: root.drumNameFor(root.paintNote)
                     text: !root.noteToSlotLane ? Synth.noteName(root.paintNote)
                           : drum !== "" ? drum
-                          : Synth.noteName(root.paintNote) + " — " + t.t("no drum")
+                          : Synth.noteName(root.paintNote) + " — " + Tr.t("no drum")
                     color: (root.noteToSlotLane && drum === "") ? "#FF5252"
                                                                 : Material.accent
                     font.bold: true
                     anchors.verticalCenter: parent.verticalCenter
                 }
                 Label {
-                    text: t.t("(right-click or hold a key)")
+                    text: Tr.t("(right-click or hold a key)")
                     color: Material.foreground
                     opacity: 0.45
                     font.pointSize: UI.fontSize * 0.7
@@ -378,7 +378,7 @@ Item {
                 spacing: 6
 
                 Label {
-                    text: t.t("Level")
+                    text: Tr.t("Level")
                     color: Material.foreground
                     opacity: 0.7
                     anchors.verticalCenter: parent.verticalCenter
@@ -442,7 +442,7 @@ Item {
             // and Level rows above.
             Row {
                 Label {
-                    text: t.t("Steps")
+                    text: Tr.t("Steps")
                     color: Material.foreground
                     opacity: 0.7
                     anchors.verticalCenter: parent.verticalCenter
@@ -639,8 +639,8 @@ Item {
             font.pointSize: UI.fontSize * 0.75
             color: Material.foreground
             text: UI.desktopLayout
-                  ? t.t("Click a step to place it · right-click one to edit it")
-                  : t.t("Tap a step to place it · hold one to edit it")
+                  ? Tr.t("Click a step to place it · right-click one to edit it")
+                  : Tr.t("Tap a step to place it · hold one to edit it")
         }
 
         // ---- step inspector -------------------------------------------------
@@ -656,14 +656,14 @@ Item {
                 RowLayout {
                     Layout.fillWidth: true
                     Label {
-                        text: t.t("Step") + " " + (root.selectedStep + 1)
-                             + (root.sel.filled ? "" : "  " + t.t("(empty)"))
+                        text: Tr.t("Step") + " " + (root.selectedStep + 1)
+                             + (root.sel.filled ? "" : "  " + Tr.t("(empty)"))
                         font.bold: true
                         color: Material.foreground
                         Layout.fillWidth: true
                     }
                     Button {
-                        text: t.t("Lock…")
+                        text: Tr.t("Lock…")
                         flat: true
                         enabled: root.sel.filled === true
                         onClicked: plockDialog.openFor(root.selectedStep)
@@ -687,10 +687,10 @@ Item {
                     // the note is simply inert, which the suffix says rather
                     // than the control disappearing.
                     StepField {
-                        label: t.t("Note")
+                        label: Tr.t("Note")
                         from: 0; to: 127
                         suffix: (root.isDrumTrack && root.cfg.noteToSlot !== true)
-                                ? t.t("(lane plays a fixed slot)")
+                                ? Tr.t("(lane plays a fixed slot)")
                                 : Synth.noteName(root.sel.note !== undefined ? root.sel.note : 60)
                         value: root.sel.note !== undefined ? root.sel.note : 60
                         onEdited: (v) => {
@@ -700,13 +700,13 @@ Item {
                         }
                     }
                     StepField {
-                        label: t.t("Velocity")
+                        label: Tr.t("Velocity")
                         from: 1; to: 127
                         value: root.sel.vel !== undefined ? root.sel.vel : 100
                         onEdited: (v) => Synth.setStepField(root.selectedStep, "vel", v)
                     }
                     StepField {
-                        label: t.t("Gate")
+                        label: Tr.t("Gate")
                         from: 1; to: 255
                         // 16 = exactly one step; show it in step-lengths.
                         suffix: "(" + ((root.sel.gate !== undefined ? root.sel.gate : 16) / 16.0).toFixed(2) + "x)"
@@ -714,21 +714,21 @@ Item {
                         onEdited: (v) => Synth.setStepField(root.selectedStep, "gate", v)
                     }
                     StepField {
-                        label: t.t("Probability")
+                        label: Tr.t("Probability")
                         from: 0; to: 100
                         suffix: "%"
                         value: root.sel.prob !== undefined ? root.sel.prob : 100
                         onEdited: (v) => Synth.setStepField(root.selectedStep, "prob", v)
                     }
                     StepField {
-                        label: t.t("Micro-timing")
+                        label: Tr.t("Micro-timing")
                         from: -50; to: 50
                         suffix: "%"
                         value: root.sel.micro !== undefined ? root.sel.micro : 0
                         onEdited: (v) => Synth.setStepField(root.selectedStep, "micro", v)
                     }
                     StepField {
-                        label: t.t("Ratchet")
+                        label: Tr.t("Ratchet")
                         from: 1; to: 8
                         value: root.sel.ratchet !== undefined ? root.sel.ratchet : 1
                         onEdited: (v) => Synth.setStepField(root.selectedStep, "ratchet", v)
@@ -737,7 +737,7 @@ Item {
                     ColumnLayout {
                         spacing: 0
                         Label {
-                            text: t.t("Condition")
+                            text: Tr.t("Condition")
                             font.pointSize: UI.fontSize * 0.7
                             opacity: 0.7
                             color: Material.foreground
@@ -762,18 +762,18 @@ Item {
                     // the next press then wrote the inverse of that stale value
                     // to the newly selected step. See SyncedButton.qml.
                     SyncedButton {
-                        text: t.t("Accent")
+                        text: Tr.t("Accent")
                         modelChecked: root.sel.accent === true
                         onToggled: Synth.setStepField(root.selectedStep, "accent", checked ? 1 : 0)
                     }
                     SyncedButton {
-                        text: t.t("Slide")
+                        text: Tr.t("Slide")
                         visible: !root.isDrumTrack
                         modelChecked: root.sel.slide === true
                         onToggled: Synth.setStepField(root.selectedStep, "slide", checked ? 1 : 0)
                     }
                     SyncedButton {
-                        text: t.t("Mute step")
+                        text: Tr.t("Mute step")
                         modelChecked: root.sel.muted === true
                         onToggled: Synth.setStepField(root.selectedStep, "mute", checked ? 1 : 0)
                     }
@@ -813,9 +813,9 @@ Item {
         wrapMode: Text.WordWrap
         opacity: 0.6
         color: Material.foreground
-        text: !Synth.connected ? t.t("Not connected")
-              : !Synth.ready ? t.t("Discovering parameters…")
-              : t.t("This firmware has no sequencer, or its pattern store could not be allocated.")
+        text: !Synth.connected ? Tr.t("Not connected")
+              : !Synth.ready ? Tr.t("Discovering parameters…")
+              : Tr.t("This firmware has no sequencer, or its pattern store could not be allocated.")
     }
 
     TrackSheet { id: trackSheet }
@@ -838,7 +838,7 @@ Item {
             return here > 0 ? here - 1 : Math.min(1, last)
         }
 
-        title: t.t("Copy pattern")
+        title: Tr.t("Copy pattern")
         modal: true
         anchors.centerIn: Overlay.overlay
         width: Math.min(parent ? parent.width - 32 : 380, 420)
@@ -860,7 +860,7 @@ Item {
                 Layout.fillWidth: true
                 spacing: 8
                 Label {
-                    text: t.t("Copy from pattern")
+                    text: Tr.t("Copy from pattern")
                     color: Material.foreground
                 }
                 SpinBox {
@@ -875,7 +875,7 @@ Item {
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
                 color: Material.foreground
-                text: t.ts("Everything in pattern %1 — every track's steps, "
+                text: Tr.ts("Everything in pattern %1 — every track's steps, "
                            + "configuration and parameter locks — is replaced "
                            + "by pattern %2. This cannot be undone.",
                            Synth.editPattern + 1, srcBox.value)
@@ -888,7 +888,7 @@ Item {
                 wrapMode: Text.WordWrap
                 visible: srcBox.value - 1 === Synth.editPattern
                 color: "#FF5252"
-                text: t.t("That is the pattern being edited — pick another one.")
+                text: Tr.t("That is the pattern being edited — pick another one.")
             }
         }
     }

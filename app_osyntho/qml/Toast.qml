@@ -1,4 +1,5 @@
 import QtQuick // 2.0
+import org.osynth.osyntho
 
 /**
 * @brief An Android-like timed message text in a box that selfdestroys when finished if desired
@@ -66,13 +67,13 @@ Rectangle{
 
     Row {
         id: content
-        x: margin
-        y: margin
+        x: root.margin
+        y: root.margin
         spacing: 8
 
         Text {
             id: theIcon
-            color: desiredForegroundColor
+            color: root.desiredForegroundColor
             text: ""
             visible: text.length > 0
             font.family: App.fontAwesomeName
@@ -82,7 +83,7 @@ Rectangle{
 
         Text{
             id: theText
-            color: desiredForegroundColor
+            color: root.desiredForegroundColor
             text: ""
 
             wrapMode: Text.Wrap
@@ -101,18 +102,18 @@ Rectangle{
 
         NumberAnimation{
             to: 0.9
-            duration: fadeTime
+            duration: root.fadeTime
         }
         PauseAnimation{
-            duration: time - 2*fadeTime
+            duration: root.time - 2*root.fadeTime
         }
         NumberAnimation{
             to: 0
-            duration: fadeTime
+            duration: root.fadeTime
         }
 
         onRunningChanged:{
-            if(!running && selfDestroying)
+            if(!running && root.selfDestroying)
                 root.destroy();
         }
     }

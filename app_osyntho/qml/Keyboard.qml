@@ -79,7 +79,7 @@ Rectangle {
         // keyboard_height is written on every frame of a divider drag and is
         // owned by this component anyway, so it is skipped rather than
         // re-reading all eight settings per mouse move.
-        function onSettingChanged(name) {
+        function onSettingChanged(name: string): void {
             if (name.startsWith("keyboard_") && name !== "keyboard_height")
                 root.reloadSettings()
         }
@@ -103,7 +103,7 @@ Rectangle {
     }
     readonly property int minKeyHeight: 70
     readonly property int maxKeyHeight: 340
-    function setKeyHeight(h) {
+    function setKeyHeight(h: real): void {
         keyHeight = Math.round(Math.max(minKeyHeight, Math.min(maxKeyHeight, h)))
         App.saveSetting("keyboard_height", keyHeight)
     }
@@ -113,47 +113,47 @@ Rectangle {
     // Latched notes (hold mode), reassigned for bindings.
     property var held: ({})
 
-    readonly property var whiteSemis: [0, 2, 4, 5, 7, 9, 11]
+    readonly property list<int> whiteSemis: [0, 2, 4, 5, 7, 9, 11]
     // Black keys within an octave: [white index it sits after, semitone].
     readonly property var blackDefs: [[0, 1], [1, 3], [3, 6], [4, 8], [5, 10]]
 
-    function whiteMidi(i) {
+    function whiteMidi(i: int): int {
         var oct = Math.floor(i / 7)
         return 12 * (baseOctave + 1) + 12 * oct + whiteSemis[i % 7]
     }
-    readonly property var semiNames: ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+    readonly property list<string> semiNames: ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
     // White keys get name + octave ("C4"); black keys just the sharp ("C#"),
     // since they are too narrow for the octave number too.
-    function noteName(midi, withOctave) {
+    function noteName(midi: int, withOctave: bool): string {
         var name = semiNames[midi % 12]
         return withOctave ? name + (Math.floor(midi / 12) - 1) : name
     }
-    function isActive(n) { return activeNotes[n] === true || held[n] === true }
+    function isActive(n: int): bool { return activeNotes[n] === true || held[n] === true }
 
-    function noteOn(n) { Synth.noteOn(n, velocity) }
-    function noteOff(n) { Synth.noteOff(n) }
+    function noteOn(n: int): void { Synth.noteOn(n, velocity) }
+    function noteOff(n: int): void { Synth.noteOff(n) }
 
     // Right-click (desktop) / long-press (touch): choose the note the
     // sequencer grid writes into an empty step. Deliberately does not sound
     // the key on the right-click path — picking is not playing.
-    function pickNote(n) {
+    function pickNote(n: int): void {
         if (n < 0 || n > 127) return
         UI.paintNote = n
     }
 
-    function setHeld(n, on) {
+    function setHeld(n: int, on: bool): void {
         var h = {}
         for (var k in held) h[k] = held[k]
         if (on) h[n] = true; else delete h[n]
         held = h
     }
-    function setActive(n, on) {
+    function setActive(n: int, on: bool): void {
         var a = {}
         for (var k in activeNotes) a[k] = activeNotes[k]
         if (on) a[n] = true; else delete a[n]
         activeNotes = a
     }
-    function toggleLatch(n) {
+    function toggleLatch(n: int): void {
         if (held[n]) { setHeld(n, false); noteOff(n) }
         else { setHeld(n, true); noteOn(n) }
     }
@@ -192,7 +192,7 @@ Rectangle {
     // ever has work to do for the computer keys and the latch.)
     onBaseOctaveChanged: { releaseSounding(); releaseLatched() }
 
-    function setComputerKeys(on) {
+    function setComputerKeys(on: bool): void {
         if (computerKeys === on) return
         releaseSounding()
         computerKeys = on
@@ -200,7 +200,7 @@ Rectangle {
     }
 
     // Read back by App's key filter on every keystroke, so the switch is live.
-    function setTopRowDrums(on) {
+    function setTopRowDrums(on: bool): void {
         if (topRowDrums === on) return
         releaseSounding()
         topRowDrums = on
@@ -220,7 +220,7 @@ Rectangle {
     Connections {
         target: App
         enabled: root.visible
-        function onComputerKeyPressed(semitone) {
+        function onComputerKeyPressed(semitone: int): void {
             var n = 12 * (root.baseOctave + 1) + semitone
             if (root.hold) {
                 root.toggleLatch(n)
@@ -229,7 +229,7 @@ Rectangle {
                 root.setActive(n, true)
             }
         }
-        function onComputerKeyReleased(semitone) {
+        function onComputerKeyReleased(semitone: int): void {
             if (root.hold) return
             var n = 12 * (root.baseOctave + 1) + semitone
             root.noteOff(n)
@@ -254,7 +254,7 @@ Rectangle {
     }
 
     // Which note is under a point in the key area's local coords.
-    function noteForPos(x, y) {
+    function noteForPos(x: real, y: real): int {
         var wkW = keyArea.width / 14
         if (y < keyArea.height * 0.62) {
             for (var i = 0; i < 10; i++) {
@@ -418,8 +418,8 @@ Rectangle {
                 onClicked: root.setComputerKeys(!root.computerKeys)
                 ToolTip.visible: hovered
                 ToolTip.text: root.computerKeys
-                              ? t.t("Computer keys play the synth. Click to release them to the app.")
-                              : t.t("Computer keys are off. Click to play the synth from them.")
+                              ? Tr.t("Computer keys play the synth. Click to release them to the app.")
+                              : Tr.t("Computer keys are off. Click to play the synth from them.")
             }
             ToolButton {
                 visible: App.isDesktop()
@@ -435,12 +435,12 @@ Rectangle {
                 onClicked: root.setTopRowDrums(!root.topRowDrums)
                 ToolTip.visible: hovered
                 ToolTip.text: root.topRowDrums
-                              ? t.t("Q…I and 1…8 fire the drum pads. Click to play a second octave instead.")
-                              : t.t("Q…I and 1…8 play a second octave. Click to fire the drum pads instead.")
+                              ? Tr.t("Q…I and 1…8 fire the drum pads. Click to play a second octave instead.")
+                              : Tr.t("Q…I and 1…8 play a second octave. Click to fire the drum pads instead.")
             }
 
             Label {
-                text: root.hold ? "· " + t.t("hold") : ""
+                text: root.hold ? "· " + Tr.t("hold") : ""
                 anchors.verticalCenter: parent.verticalCenter
                 color: Material.accent
                 font.pointSize: UI.fontSize * 0.75
@@ -455,7 +455,7 @@ Rectangle {
             spacing: 4
 
             Label {
-                text: t.t("size")
+                text: Tr.t("size")
                 anchors.verticalCenter: parent.verticalCenter
                 color: Material.foreground
                 opacity: 0.7

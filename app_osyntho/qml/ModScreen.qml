@@ -36,7 +36,7 @@ Item {
                     spacing: 6
 
                     Label {
-                        text: t.t("Mod matrix")
+                        text: Tr.t("Mod matrix")
                         font.bold: true
                         font.pointSize: UI.fontSize * 0.95
                         color: Material.foreground
@@ -57,7 +57,7 @@ Item {
     Label {
         anchors.centerIn: parent
         visible: !Synth.ready
-        text: Synth.connected ? t.t("Discovering parameters…") : t.t("Not connected")
+        text: Synth.connected ? Tr.t("Discovering parameters…") : Tr.t("Not connected")
         opacity: 0.5
         color: Material.foreground
     }

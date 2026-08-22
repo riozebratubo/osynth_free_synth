@@ -21,7 +21,7 @@ Rectangle {
     property string title: ""
     property string prefix: ""
     property int capBit: 0
-    property var ids: []
+    property list<int> ids
 
     // Width the container can give us. A PanelFlow parent publishes it as
     // contentWidth (its own width minus padding); in any other container we
@@ -107,7 +107,7 @@ Rectangle {
 
         Label {
             id: titleLabel
-            text: grp.title !== "" ? t.t(grp.title) : grp.prefix
+            text: grp.title !== "" ? Tr.t(grp.title) : grp.prefix
             font.bold: true
             font.pointSize: UI.fontSize * 0.95
             color: Material.foreground

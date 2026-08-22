@@ -13,7 +13,7 @@ Item {
     id: root
 
     property int paramId: -1
-    readonly property var meta: paramId >= 0 ? Synth.paramMeta(paramId) : ({ exists: false })
+    readonly property paramMeta meta: Synth.paramMeta(root.paramId)
 
     visible: meta.exists
     implicitWidth: 128
@@ -45,7 +45,7 @@ Item {
         ComboBox {
             id: combo
             width: parent.width
-            model: root.meta.exists ? (root.meta.enumNames || []) : []
+            model: root.meta.enumNames
             property bool syncing: false
             onActivated: if (!syncing) Synth.setParam(root.paramId, currentIndex)
 
@@ -55,7 +55,7 @@ Item {
             // metadata was read, or a parameter lock carrying an older value,
             // would otherwise park the box on an index that does not exist,
             // where it shows no text at all and reports one on the next write.
-            function syncFrom(value) {
+            function syncFrom(value: real): void {
                 const n = combo.count
                 if (n <= 0) return
                 combo.syncing = true
@@ -77,7 +77,7 @@ Item {
 
             Connections {
                 target: Synth
-                function onParamChanged(id, value) {
+                function onParamChanged(id: int, value: real): void {
                     if (id === root.paramId) combo.syncFrom(value)
                 }
             }

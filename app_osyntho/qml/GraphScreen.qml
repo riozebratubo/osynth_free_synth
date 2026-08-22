@@ -55,16 +55,16 @@ Item {
 
     // --- geometry helpers, shared by the delegates and the cable painter ---
 
-    function nodeAt(slot) {
+    function nodeAt(slot: int): var {
         var list = Synth.graphNodes
         return (slot >= 0 && slot < list.length) ? list[slot] : null
     }
-    function outJackPos(slot) {
+    function outJackPos(slot: int): var {
         var n = nodeAt(slot)
         if (!n) return null
         return { x: n.x + nodeW, y: n.y + nodeH / 2 }
     }
-    function inJackPos(slot, port) {
+    function inJackPos(slot: int, port: int): var {
         var n = nodeAt(slot)
         if (!n) return null
         var k = Synth.graphKind(n.kind)
@@ -75,20 +75,20 @@ Item {
         return { x: n.x, y: n.y + step * (port + 1) }
     }
 
-    function kindName(kind) {
+    function kindName(kind: int): string {
         var k = Synth.graphKind(kind)
         return k && k.name ? k.name : "—"
     }
-    function isAudio(kind) {
+    function isAudio(kind: int): bool {
         var k = Synth.graphKind(kind)
         return k && k.rate === 1
     }
 
-    function tapOutput(slot) {
+    function tapOutput(slot: int): void {
         pendingSource = (pendingSource === slot) ? -1 : slot
         cables.requestPaint()
     }
-    function tapInput(slot, port) {
+    function tapInput(slot: int, port: int): void {
         var n = nodeAt(slot)
         if (!n) return
         if (pendingSource < 0) {
@@ -142,15 +142,15 @@ Item {
             horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.WordWrap
             font.pointSize: UI.fontSize
-            text: !Synth.connected ? t.t("Not connected")
+            text: !Synth.connected ? Tr.t("Not connected")
                 : !Synth.graphAvailable
-                    ? t.t("This firmware was built without the modular engine.")
-                    : t.t("The modular engine is not the active engine.")
+                    ? Tr.t("This firmware was built without the modular engine.")
+                    : Tr.t("The modular engine is not the active engine.")
         }
         Button {
             Layout.alignment: Qt.AlignHCenter
             visible: screen.ready && !screen.onModular
-            text: t.t("Switch to modular")
+            text: Tr.t("Switch to modular")
             onClicked: Synth.selectEngine(Synth.graphEngineIndex)
         }
     }
@@ -171,13 +171,13 @@ Item {
             spacing: 8
 
             Button {
-                text: t.t("Add node")
+                text: Tr.t("Add node")
                 enabled: screen.freeSlot >= 0
                 onClicked: kindPicker.open()
             }
             Item { Layout.fillWidth: true }
             Label {
-                text: t.t("CPU")
+                text: Tr.t("CPU")
                 font.pointSize: UI.fontSize * 0.8
                 opacity: 0.7
             }
@@ -207,7 +207,7 @@ Item {
             Layout.leftMargin: 6
             Layout.rightMargin: 6
             Layout.bottomMargin: 4
-            text: t.t("Master FX (reverb, delay, chorus) run after Out, on the mix — they are shared with every engine and set on the FX page.")
+            text: Tr.t("Master FX (reverb, delay, chorus) run after Out, on the mix — they are shared with every engine and set on the FX page.")
             wrapMode: Text.WordWrap
             font.pointSize: UI.fontSize * 0.75
             opacity: 0.6
@@ -439,7 +439,7 @@ Item {
                 }
                 Item { Layout.fillWidth: true }
                 Button {
-                    text: t.t("Remove")
+                    text: Tr.t("Remove")
                     flat: true
                     // Slot 0 is pinned to the output node: a graph with no sink
                     // renders nothing, so the firmware refuses to clear it.
@@ -490,7 +490,7 @@ Item {
         id: kindPicker
         anchors.centerIn: parent
         width: Math.min(screen.width * 0.9, Math.round(320 * UI.fontSize / 10))
-        title: t.t("Add node")
+        title: Tr.t("Add node")
         modal: true
         standardButtons: Dialog.Cancel
 
@@ -508,7 +508,7 @@ Item {
                 visible: index > 0 && modelData.name !== "out"
                 height: visible ? implicitHeight : 0
                 text: (modelData.name ? modelData.name : "?")
-                      + "   ·   " + (modelData.rate === 1 ? t.t("audio") : t.t("control"))
+                      + "   ·   " + (modelData.rate === 1 ? Tr.t("audio") : Tr.t("control"))
                       + "   ·   " + modelData.cost
                 onClicked: {
                     // Read at click time, not from screen.freeSlot: the picker

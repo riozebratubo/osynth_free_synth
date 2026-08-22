@@ -178,8 +178,9 @@ qt_add_qml_module(
     QML_FILES qml/SettingsScreen.qml
     QML_FILES qml/BluetoothDeviceSelectorScreen.qml
     SOURCES src/ibluetoothmanager.h
-    QML_FILES qml/SettingsItemToggable.qml
-    QML_FILES qml/SettingsItemNumber.qml
+    # Registers IBluetoothManager as the BluetoothManager QML singleton;
+    # the interface itself must not name a backend. See src/qmlforeign.h.
+    SOURCES src/qmlforeign.h src/qmlforeign.cpp
     QML_FILES qml/SettingsSwitch.qml
     SOURCES src/translator.cpp
     SOURCES src/translator.h
@@ -189,6 +190,8 @@ qt_add_qml_module(
     QML_FILES qml/WindowStateSaver.qml
     QML_FILES qml/SpinBoxDouble.qml
     SOURCES src/ble/synthprotocol.h
+    # QML value types for the parameter API (see src/paramtypes.h).
+    SOURCES src/paramtypes.h
     SOURCES src/loopwav.h src/loopwav.cpp
 
     # Phase 3 — synth control UI

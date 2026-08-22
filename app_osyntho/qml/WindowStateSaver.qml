@@ -8,13 +8,15 @@ import QtQuick.Controls.Material
 import QtCore
 
 Item {
+    id: root
+
     property Window window
     property string windowName: ""
     property bool isEnabled: false
 
     Settings {
         id: s
-        category: windowName
+        category: root.windowName
         property int x
         property int y
         property int width
@@ -23,46 +25,46 @@ Item {
     }
 
     Component.onCompleted: {
-        if (isEnabled && s.width && s.height) {
-            window.x = s.x;
-            window.y = s.y;
-            window.width = s.width;
-            window.height = s.height;
-            window.visibility = s.visibility;
+        if (root.isEnabled && s.width && s.height) {
+            root.window.x = s.x;
+            root.window.y = s.y;
+            root.window.width = s.width;
+            root.window.height = s.height;
+            root.window.visibility = s.visibility;
         }
     }
 
     Connections {
-        target: window
-        function onXChanged() { if (isEnabled) saveSettingsTimer.restart() }
-        function onYChanged() { if (isEnabled) saveSettingsTimer.restart() }
-        function onWidthChanged() { if (isEnabled) saveSettingsTimer.restart() }
-        function onHeightChanged() { if (isEnabled) saveSettingsTimer.restart() }
-        function onVisibilityChanged() { if (isEnabled) saveSettingsTimer.restart() }
+        target: root.window
+        function onXChanged() { if (root.isEnabled) saveSettingsTimer.restart() }
+        function onYChanged() { if (root.isEnabled) saveSettingsTimer.restart() }
+        function onWidthChanged() { if (root.isEnabled) saveSettingsTimer.restart() }
+        function onHeightChanged() { if (root.isEnabled) saveSettingsTimer.restart() }
+        function onVisibilityChanged() { if (root.isEnabled) saveSettingsTimer.restart() }
     }
 
     Timer {
         id: saveSettingsTimer
         interval: 500
         repeat: false
-        onTriggered: saveSettings()
+        onTriggered: root.saveSettings()
     }
 
     function saveSettings() {
-        if (!isEnabled) return
-        switch(window.visibility) {
+        if (!root.isEnabled) return
+        switch(root.window.visibility) {
             case ApplicationWindow.Windowed:
-                s.x = window.x;
-                s.y = window.y;
-                s.width = window.width;
-                s.height = window.height;
-                s.visibility = window.visibility;
+                s.x = root.window.x;
+                s.y = root.window.y;
+                s.width = root.window.width;
+                s.height = root.window.height;
+                s.visibility = root.window.visibility;
                 break;
             case ApplicationWindow.FullScreen:
-                s.visibility = window.visibility;
+                s.visibility = root.window.visibility;
                 break;
             case ApplicationWindow.Maximized:
-                s.visibility = window.visibility;
+                s.visibility = root.window.visibility;
                 break;
         }
     }

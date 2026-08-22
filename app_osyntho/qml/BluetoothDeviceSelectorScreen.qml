@@ -40,7 +40,7 @@ Pane {
                 Layout.leftMargin: 8
                 Layout.alignment: Qt.AlignVCenter
                 Text {
-                    text: t.t("Select Bluetooth Device")
+                    text: Tr.t("Select Bluetooth Device")
                     font.bold: true
                     color: Material.foreground
                 }
@@ -71,18 +71,18 @@ Pane {
             Layout.rightMargin: 10
             spacing: 4
 
-            Text { font.bold: true; color: Material.foreground; text: t.t("Saved device") }
+            Text { font.bold: true; color: Material.foreground; text: Tr.t("Saved device") }
             Text {
                 width: parent.width
                 wrapMode: Text.WordWrap
                 color: Material.foreground
                 text: App.bluetoothSelectedDeviceName !== ""
                     ? (App.bluetoothSelectedDeviceName + " (" + App.bluetoothSelectedDeviceAddress + ")")
-                    : t.t("None")
+                    : Tr.t("None")
             }
             Button {
                 visible: App.bluetoothSelectedDeviceAddress !== ""
-                text: t.t("Clear selection")
+                text: Tr.t("Clear selection")
                 onClicked: App.setBluetoothSelectedDevice("", "")
             }
         }
@@ -104,10 +104,10 @@ Pane {
                 anchors.verticalCenter: parent.verticalCenter
                 color: Material.foreground
                 text: BluetoothManager.scanning
-                    ? t.t("Scanning for devices...")
+                    ? Tr.t("Scanning for devices...")
                     : (App.bluetoothEnabled
-                        ? t.t("Not scanning. Scan will start automatically.")
-                        : t.t("Enable Bluetooth to discover devices."))
+                        ? Tr.t("Not scanning. Scan will start automatically.")
+                        : Tr.t("Enable Bluetooth to discover devices."))
             }
         }
 
@@ -117,7 +117,7 @@ Pane {
             Layout.leftMargin: 10
             font.bold: true
             color: Material.foreground
-            text: t.t("Discovered devices")
+            text: Tr.t("Discovered devices")
         }
 
         Item { Layout.fillWidth: true; Layout.preferredHeight: 4 }
@@ -142,7 +142,7 @@ Pane {
                         Layout.fillWidth: true
                         spacing: 2
                         Text {
-                            text: modelData.name !== "" ? modelData.name : t.t("(unknown)")
+                            text: modelData.name !== "" ? modelData.name : Tr.t("(unknown)")
                             font.bold: true
                             color: Material.foreground
                         }
@@ -154,7 +154,7 @@ Pane {
                     }
 
                     Button {
-                        text: t.t("Select")
+                        text: Tr.t("Select")
                         onClicked: {
                             App.setBluetoothSelectedDevice(modelData.name, modelData.address)
                             App.saveSetting("bluetooth_use_selected", "true")
@@ -169,7 +169,7 @@ Pane {
                 anchors.centerIn: parent
                 visible: deviceList.count === 0 && !BluetoothManager.scanning
                 color: Material.theme === Material.Dark ? "#FFAAAAAA" : "#FF888888"
-                text: t.t("No devices discovered yet")
+                text: Tr.t("No devices discovered yet")
             }
         }
     }

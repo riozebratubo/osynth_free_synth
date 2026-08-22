@@ -38,7 +38,7 @@ Rectangle {
 
     Connections {
         target: App
-        function onSettingChanged(name) {
+        function onSettingChanged(name: string): void {
             if (name === "keyboard_velocity")
                 root.baseVelocity = Math.max(1, Math.min(127,
                     parseInt(App.setting("keyboard_velocity")) || 100))
@@ -49,11 +49,11 @@ Rectangle {
 
     // Slot for a pad position. Row 0 is the *top* row visually, so the bottom
     // row (rows-1) must map to the lowest slots.
-    function slotFor(row, col) {
+    function slotFor(row: int, col: int): int {
         return (root.rows - 1 - row) * root.columns + col
     }
 
-    function slotName(slot) {
+    function slotName(slot: int): string {
         const slots = Synth.kitSlots
         for (let i = 0; i < slots.length; ++i) {
             if (slots[i].slot === slot) return slots[i].name
@@ -63,7 +63,7 @@ Rectangle {
 
     // Vertical position within a pad -> velocity. Top edge = 127, bottom edge
     // scales down to a quarter of the base, centre = the base velocity.
-    function velocityAt(yFraction) {
+    function velocityAt(yFraction: real): int {
         const f = Math.max(0, Math.min(1, 1 - yFraction))  // 0 bottom, 1 top
         const v = f < 0.5 ? root.baseVelocity * (0.25 + 1.5 * f)
                           : root.baseVelocity + (127 - root.baseVelocity) * (2 * f - 1)
@@ -74,7 +74,7 @@ Rectangle {
     // rather than mutated so the delegates' bindings re-evaluate.
     property var litPads: ({})
 
-    function setLit(slot, on) {
+    function setLit(slot: int, on: bool): void {
         var m = {}
         for (var k in root.litPads) m[k] = root.litPads[k]
         if (on) m[slot] = true
@@ -203,14 +203,14 @@ Rectangle {
             }
         }
 
-        function padAt(x, y) {
+        function padAt(x: real, y: real): int {
             const col = Math.floor(x / (grid.cellW + grid.spacing))
             const row = Math.floor(y / (grid.cellH + grid.spacing))
             if (col < 0 || col >= root.columns || row < 0 || row >= root.rows) return -1
             return root.slotFor(row, col)
         }
 
-        function fractionInPad(y) {
+        function fractionInPad(y: real): real {
             const pitch = grid.cellH + grid.spacing
             const row = Math.floor(y / pitch)
             return Math.max(0, Math.min(1, (y - row * pitch) / grid.cellH))
@@ -250,7 +250,7 @@ Rectangle {
     signal padHit(int slot, int velocity)
 
     // MIDI note a slot answers to, from the kit's note map, or -1.
-    function slotNote(slot) {
+    function slotNote(slot: int): int {
         const slots = Synth.kitSlots
         for (let i = 0; i < slots.length; ++i) {
             if (slots[i].slot === slot) return slots[i].note
@@ -263,12 +263,12 @@ Rectangle {
     // bound to a fixed slot the note is ignored, but on a lane set to "the
     // step's note picks the slot" this is exactly how you choose which drum a
     // step plays.
-    function pickPad(slot) {
+    function pickPad(slot: int): void {
         const n = root.slotNote(slot)
         if (n >= 0) UI.paintDrumNote = n
     }
 
-    function hit(slot, velocity) {
+    function hit(slot: int, velocity: int): void {
         // A pad the current kit leaves empty makes no sound and does not
         // flash. But an *unknown* kit — the slot list has not arrived yet —
         // must still play: silence with no explanation is worse than a hit on
@@ -293,7 +293,7 @@ Rectangle {
     // are hidden, which is the point of having them on the keys.
     Connections {
         target: App
-        function onComputerDrumPadPressed(pad) {
+        function onComputerDrumPadPressed(pad: int): void {
             root.hit(pad, root.baseVelocity)
         }
     }

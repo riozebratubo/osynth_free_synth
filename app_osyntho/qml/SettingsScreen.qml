@@ -28,12 +28,12 @@ Pane {
                 Layout.leftMargin: 8
                 Layout.alignment: Qt.AlignVCenter
                 Text {
-                    text: t.t("Osyntho — Settings")
+                    text: Tr.t("Osyntho — Settings")
                     font.bold: true
                     color: Material.foreground
                 }
                 Text {
-                    text: t.t("Version:") + " " + App.getVersionFull()
+                    text: Tr.t("Version:") + " " + App.getVersionFull()
                     color: Material.foreground
                     opacity: 0.7
                 }
@@ -43,9 +43,9 @@ Pane {
         TabBar {
             id: settingsTabBar
             Layout.fillWidth: true
-            TabButton { text: t.t("General") }
-            TabButton { text: t.t("Keyboard") }
-            TabButton { text: t.t("Bluetooth") }
+            TabButton { text: Tr.t("General") }
+            TabButton { text: Tr.t("Keyboard") }
+            TabButton { text: Tr.t("Bluetooth") }
         }
 
         StackLayout {
@@ -67,10 +67,10 @@ Pane {
                         spacing: 10
                         padding: 10
 
-                        Text { text: t.t("App theme"); font.bold: true; color: Material.foreground }
+                        Text { text: Tr.t("App theme"); font.bold: true; color: Material.foreground }
 
                         SettingsSwitch {
-                            text: t.t("Use dark theme")
+                            text: Tr.t("Use dark theme")
                             checked: App.theme.type === "dark"
                             onToggled: App.setThemeType(checked ? "dark" : "light")
                         }
@@ -82,7 +82,7 @@ Pane {
                                 delegate: AbstractButton {
                                     id: swatchButton
                                     required property int index
-                                    readonly property var swatchColors: [
+                                    readonly property list<color> swatchColors: [
                                         "#FF607D8B", "#FF673AB7", "#FF009688", "#FFFF5722",
                                         "#FFE91E63", "#FFFF8F00", "#FF795548", "#FF388E3C"
                                     ]
@@ -102,7 +102,7 @@ Pane {
                             }
                         }
 
-                        Text { text: t.t("App font size"); font.bold: true; color: Material.foreground }
+                        Text { text: Tr.t("App font size"); font.bold: true; color: Material.foreground }
                         Row {
                             spacing: 12
                             SpinBox {
@@ -117,18 +117,18 @@ Pane {
                             }
                             Text {
                                 anchors.verticalCenter: fontSizeSpinBox.verticalCenter
-                                text: t.t("Sample text")
+                                text: Tr.t("Sample text")
                                 font.pointSize: fontSizeSpinBox.value
                                 color: Material.foreground
                             }
                         }
 
-                        Text { text: t.t("Panel layout"); font.bold: true; color: Material.foreground }
+                        Text { text: Tr.t("Panel layout"); font.bold: true; color: Material.foreground }
                         ComboBox {
                             width: Math.min(parent.width - 20, 300)
                             model: [
-                                { text: t.t("Tiled"), value: "tiled" },
-                                { text: t.t("One per line"), value: "rows" }
+                                { text: Tr.t("Tiled"), value: "tiled" },
+                                { text: Tr.t("One per line"), value: "rows" }
                             ]
                             textRole: "text"
                             valueRole: "value"
@@ -141,21 +141,21 @@ Pane {
                         Text {
                             width: parent.width - 20
                             wrapMode: Text.WordWrap
-                            text: t.t("How the parameter panels (oscillator, filter, FX…) are arranged: packed left to right at the width each one needs, or each one alone on a full-width line.")
+                            text: Tr.t("How the parameter panels (oscillator, filter, FX…) are arranged: packed left to right at the width each one needs, or each one alone on a full-width line.")
                             color: Material.foreground
                             opacity: 0.6
                             font.pointSize: Math.max(8, UI.fontSize * 0.7)
                         }
 
-                        Text { text: t.t("Startup screen"); font.bold: true; color: Material.foreground }
+                        Text { text: Tr.t("Startup screen"); font.bold: true; color: Material.foreground }
                         ComboBox {
                             width: Math.min(parent.width - 20, 300)
                             // "last" first, then one entry per page in SwipeView
                             // order — the value is the page index as a string.
                             model: {
-                                var entries = [{ text: t.t("Last used"), value: "last" }]
+                                var entries = [{ text: Tr.t("Last used"), value: "last" }]
                                 for (var i = 0; i < UI.screens.length; i++)
-                                    entries.push({ text: t.t(UI.screens[i].name), value: String(i) })
+                                    entries.push({ text: Tr.t(UI.screens[i].name), value: String(i) })
                                 return entries
                             }
                             textRole: "text"
@@ -166,15 +166,15 @@ Pane {
                         Text {
                             width: parent.width - 20
                             wrapMode: Text.WordWrap
-                            text: t.t("Which page the app opens on. \"Last used\" reopens whichever page you were on when you closed it.")
+                            text: Tr.t("Which page the app opens on. \"Last used\" reopens whichever page you were on when you closed it.")
                             color: Material.foreground
                             opacity: 0.6
                             font.pointSize: Math.max(8, UI.fontSize * 0.7)
                         }
 
-                        Text { text: t.t("Navigation"); font.bold: true; color: Material.foreground }
+                        Text { text: Tr.t("Navigation"); font.bold: true; color: Material.foreground }
                         SettingsSwitch {
-                            text: t.t("Swipe to change screens")
+                            text: Tr.t("Swipe to change screens")
                             checked: App.settingIsTrue("swipe_change_screens")
                             onToggled: {
                                 App.saveSetting("swipe_change_screens", checked ? "true" : "false")
@@ -186,25 +186,25 @@ Pane {
                         Text {
                             width: parent.width - 20
                             wrapMode: Text.WordWrap
-                            text: t.t("Drag left or right anywhere on a page to move to the next one. Off by default: most pages are covered in knobs, grids and cables, and a drag meant for one of those changes the page instead. The bar at the top and the arrows in the toolbar always work.")
+                            text: Tr.t("Drag left or right anywhere on a page to move to the next one. Off by default: most pages are covered in knobs, grids and cables, and a drag meant for one of those changes the page instead. The bar at the top and the arrows in the toolbar always work.")
                             color: Material.foreground
                             opacity: 0.6
                             font.pointSize: Math.max(8, UI.fontSize * 0.7)
                         }
 
-                        Text { text: t.t("App language (restart to apply)"); font.bold: true; color: Material.foreground }
+                        Text { text: Tr.t("App language (restart to apply)"); font.bold: true; color: Material.foreground }
                         ComboBox {
                             width: Math.min(parent.width - 20, 300)
                             model: [
-                                { text: t.t("English"), value: "en" },
-                                { text: t.t("Portuguese"), value: "pt_BR" }
+                                { text: Tr.t("English"), value: "en" },
+                                { text: Tr.t("Portuguese"), value: "pt_BR" }
                             ]
                             textRole: "text"
                             valueRole: "value"
                             Component.onCompleted: currentIndex = Math.max(0, indexOfValue(App.setting("force_app_language")))
                             onActivated: {
                                 App.saveSetting("force_app_language", currentValue)
-                                t.setActiveLanguage(currentValue)
+                                Tr.setActiveLanguage(currentValue)
                             }
                         }
 
@@ -213,13 +213,13 @@ Pane {
                         // over the app (see the keyboard chord note).
                         Text {
                             visible: App.isAndroid()
-                            text: t.t("Display")
+                            text: Tr.t("Display")
                             font.bold: true
                             color: Material.foreground
                         }
                         SettingsSwitch {
                             visible: App.isAndroid()
-                            text: t.t("Fullscreen (immersive)")
+                            text: Tr.t("Fullscreen (immersive)")
                             checked: App.settingIsTrue("android_immersive")
                             onToggled: {
                                 // Saves the setting and moves the window; a
@@ -232,7 +232,7 @@ Pane {
                             visible: App.isAndroid()
                             width: parent.width - 20
                             wrapMode: Text.WordWrap
-                            text: t.t("Hides the status and navigation bars. Recommended: it also stops some phones (e.g. Xiaomi) from stealing multi-finger touches for system gestures.")
+                            text: Tr.t("Hides the status and navigation bars. Recommended: it also stops some phones (e.g. Xiaomi) from stealing multi-finger touches for system gestures.")
                             color: Material.foreground
                             opacity: 0.6
                             font.pointSize: Math.max(8, UI.fontSize * 0.7)
@@ -256,9 +256,9 @@ Pane {
                         spacing: 10
                         padding: 10
 
-                        Text { text: t.t("On-screen keyboard"); font.bold: true; color: Material.foreground }
+                        Text { text: Tr.t("On-screen keyboard"); font.bold: true; color: Material.foreground }
 
-                        Text { text: t.t("Base octave"); color: Material.foreground }
+                        Text { text: Tr.t("Base octave"); color: Material.foreground }
                         SpinBox {
                             from: 0
                             // The keyboard draws two octaves from this, so 7 is
@@ -269,7 +269,7 @@ Pane {
                             onValueModified: App.saveSetting("keyboard_octave", value)
                         }
 
-                        Text { text: t.t("Velocity"); color: Material.foreground }
+                        Text { text: Tr.t("Velocity"); color: Material.foreground }
                         Row {
                             spacing: 12
                             width: parent.width - 20
@@ -290,13 +290,13 @@ Pane {
                         }
 
                         SettingsSwitch {
-                            text: t.t("Latch notes (hold)")
+                            text: Tr.t("Latch notes (hold)")
                             checked: App.settingIsTrue("keyboard_hold")
                             onToggled: App.saveSetting("keyboard_hold", checked ? "true" : "false")
                         }
 
                         SettingsSwitch {
-                            text: t.t("Show note names on keys")
+                            text: Tr.t("Show note names on keys")
                             checked: App.settingIsTrue("keyboard_show_note_names")
                             onToggled: App.saveSetting("keyboard_show_note_names", checked ? "true" : "false")
                         }
@@ -306,7 +306,7 @@ Pane {
                         // rewired mid-take.
                         SettingsSwitch {
                             id: computerKeysSwitch
-                            text: t.t("Computer keys play the synth")
+                            text: Tr.t("Computer keys play the synth")
                             checked: App.settingIsTrue("keyboard_computer_keys")
                             onToggled: App.saveSetting("keyboard_computer_keys", checked ? "true" : "false")
                         }
@@ -315,7 +315,7 @@ Pane {
                             // Nothing reaches the drum mapping with the keys
                             // released to the app; follows the switch above
                             // rather than the setting, which is not reactive.
-                            text: t.t("Top rows play drum pads")
+                            text: Tr.t("Top rows play drum pads")
                             enabled: computerKeysSwitch.checked
                             checked: App.settingIsTrue("keyboard_top_row_drums")
                             onToggled: App.saveSetting("keyboard_top_row_drums", checked ? "true" : "false")
@@ -326,19 +326,19 @@ Pane {
                             font.pointSize: UI.fontSize * 0.8
                             opacity: 0.65
                             color: Material.foreground
-                            text: t.t("Computer keyboard: Q…I fire the lower eight pads and "
+                            text: Tr.t("Computer keyboard: Q…I fire the lower eight pads and "
                                       + "1…8 the upper eight. Off, those keys play a second "
                                       + "octave instead. The Z…M row plays notes either way. "
                                       + "Both switches are also in the keyboard's own toolbar.")
                         }
 
-                        Text { text: t.t("Resize control"); font.bold: true; color: Material.foreground }
+                        Text { text: Tr.t("Resize control"); font.bold: true; color: Material.foreground }
                         ComboBox {
                             id: resizeModeCombo
                             width: Math.min(parent.width - 20, 300)
                             model: [
-                                { text: t.t("Divider (drag handle)"), value: "divider" },
-                                { text: t.t("Slider"), value: "slider" }
+                                { text: Tr.t("Divider (drag handle)"), value: "divider" },
+                                { text: Tr.t("Slider"), value: "slider" }
                             ]
                             textRole: "text"
                             valueRole: "value"
@@ -348,14 +348,14 @@ Pane {
                         Text {
                             width: parent.width - 20
                             wrapMode: Text.WordWrap
-                            text: t.t("How to resize the on-screen keyboard: drag its top edge, or use a slider in its toolbar.")
+                            text: Tr.t("How to resize the on-screen keyboard: drag its top edge, or use a slider in its toolbar.")
                             color: Material.foreground
                             opacity: 0.6
                             font.pointSize: Math.max(8, UI.fontSize * 0.7)
                         }
 
                         Text {
-                            text: t.t("Divider thickness (px)")
+                            text: Tr.t("Divider thickness (px)")
                             visible: resizeModeCombo.currentValue === "divider"
                             color: Material.foreground
                         }
@@ -388,22 +388,22 @@ Pane {
                         Text {
                             width: parent.width - 20
                             wrapMode: Text.WordWrap
-                            text: t.t("Bluetooth changes take effect on the next scan; a restart is safest.")
+                            text: Tr.t("Bluetooth changes take effect on the next scan; a restart is safest.")
                             color: Material.foreground
                             opacity: 0.7
                         }
 
-                        Text { text: t.t("Bluetooth"); font.bold: true; color: Material.foreground }
+                        Text { text: Tr.t("Bluetooth"); font.bold: true; color: Material.foreground }
                         SettingsSwitch {
-                            text: t.t("Enable Bluetooth")
+                            text: Tr.t("Enable Bluetooth")
                             checked: App.bluetoothEnabled
                             onToggled: App.bluetoothEnabled = checked
                         }
 
-                        Text { text: t.t("Specific device"); font.bold: true; color: Material.foreground }
+                        Text { text: Tr.t("Specific device"); font.bold: true; color: Material.foreground }
                         SettingsSwitch {
                             id: useSelectedSwitch
-                            text: t.t("Lock to a specific device")
+                            text: Tr.t("Lock to a specific device")
                             Component.onCompleted: checked = App.settingIsTrue("bluetooth_use_selected")
                             onToggled: {
                                 App.saveSetting("bluetooth_use_selected", checked ? "true" : "false")
@@ -416,7 +416,7 @@ Pane {
                             // switch reading "off" over a setting that was on.
                             Connections {
                                 target: App
-                                function onSettingChanged(name) {
+                                function onSettingChanged(name: string): void {
                                     if (name === "bluetooth_use_selected")
                                         useSelectedSwitch.checked =
                                             App.settingIsTrue("bluetooth_use_selected")
@@ -428,14 +428,14 @@ Pane {
                             wrapMode: Text.WordWrap
                             color: Material.foreground
                             text: App.bluetoothSelectedDeviceName !== ""
-                                ? (t.t("Saved device") + ": " + App.bluetoothSelectedDeviceName + " (" + App.bluetoothSelectedDeviceAddress + ")")
-                                : t.t("No device saved")
+                                ? (Tr.t("Saved device") + ": " + App.bluetoothSelectedDeviceName + " (" + App.bluetoothSelectedDeviceAddress + ")")
+                                : Tr.t("No device saved")
                         }
                         Row {
                             spacing: 8
                             Button {
                                 visible: useSelectedSwitch.checked
-                                text: t.t("Select device...")
+                                text: Tr.t("Select device...")
                                 // The selector scans; with Bluetooth off there
                                 // is nothing for it to find, and letting it
                                 // start one would restart the radio behind the
@@ -445,12 +445,12 @@ Pane {
                             }
                             Button {
                                 visible: App.bluetoothSelectedDeviceAddress !== ""
-                                text: t.t("Clear")
+                                text: Tr.t("Clear")
                                 onClicked: App.setBluetoothSelectedDevice("", "")
                             }
                         }
 
-                        Text { text: t.t("Scan time (s)"); font.bold: true; color: Material.foreground }
+                        Text { text: Tr.t("Scan time (s)"); font.bold: true; color: Material.foreground }
                         SpinBox {
                             from: 4
                             to: 120
@@ -458,7 +458,7 @@ Pane {
                             onValueModified: App.saveSetting("bluetooth_scan_time", value)
                         }
 
-                        Text { text: t.t("Device name prefix"); font.bold: true; color: Material.foreground }
+                        Text { text: Tr.t("Device name prefix"); font.bold: true; color: Material.foreground }
                         TextField {
                             width: Math.min(parent.width - 20, 300)
                             text: App.setting("bluetooth_prefix")

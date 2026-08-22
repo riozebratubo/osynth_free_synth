@@ -18,31 +18,31 @@ Dialog {
     property int step: -1
     property var choices: []
     property int pid: -1
-    property var meta: ({})
+    // Derived rather than assigned: `pid` is the only thing that moves it,
+    // and binding to it drops the two hand-written resets this used to need.
+    readonly property paramMeta meta: Synth.paramMeta(root.pid)
 
-    function openFor(stepIndex) {
+    function openFor(stepIndex: int): void {
         step = stepIndex
         choices = Synth.paramPickerList()
         picker.currentIndex = -1
         picker.editText = ""
         pid = -1
-        meta = ({})
         open()
     }
 
     // Adopt the parameter at `index` in the picker list. Shared by the two ways
     // of choosing one — clicking the popup and typing the name — so they cannot
     // drift apart.
-    function choose(index) {
+    function choose(index: int): void {
         if (index < 0 || index >= choices.length) return
         pid = choices[index].id
-        meta = Synth.paramMeta(pid)
         // Seed with the parameter's live value: a lock almost always starts as
         // "what it sounds like now, but only on this step".
         valueSlider.value = Synth.paramValue(pid)
     }
 
-    title: t.t("Lock a parameter on step") + " " + (step + 1)
+    title: Tr.t("Lock a parameter on step") + " " + (step + 1)
     modal: true
     anchors.centerIn: Overlay.overlay
     width: Math.min(parent ? parent.width - 32 : 400, 480)
@@ -84,13 +84,13 @@ Dialog {
             // >= 0, not > 0: master.volume is PID 0x0000, so a `> 0` gate left
             // it selectable in the picker but unlockable — no slider, and the
             // Add button dead. -1 is the "nothing picked yet" sentinel.
-            visible: root.pid >= 0 && root.meta.exists === true
+            visible: root.pid >= 0 && root.meta.exists
             spacing: 2
 
             RowLayout {
                 Layout.fillWidth: true
                 Label {
-                    text: root.meta.name !== undefined ? root.meta.name : ""
+                    text: root.meta.name
                     color: Material.foreground
                     Layout.fillWidth: true
                 }
@@ -104,18 +104,17 @@ Dialog {
             Slider {
                 id: valueSlider
                 Layout.fillWidth: true
-                from: root.meta.min !== undefined ? root.meta.min : 0
-                to: root.meta.max !== undefined ? root.meta.max : 1
+                from: root.meta.min
+                to: root.meta.max
                 // Int/Enum/Bool params snap; floats stay continuous.
-                stepSize: (root.meta.type !== undefined && root.meta.type !== 0) ? 1 : 0
+                stepSize: root.meta.type !== 0 ? 1 : 0
                 snapMode: stepSize > 0 ? Slider.SnapAlways : Slider.NoSnap
             }
 
             Label {
-                visible: root.meta.enumNames !== undefined && root.meta.enumNames.length > 0
+                visible: root.meta.enumNames.length > 0
                 text: {
-                    if (!root.meta.enumNames) return ""
-                    var i = Math.round(valueSlider.value)
+                    const i = Math.round(valueSlider.value)
                     return (i >= 0 && i < root.meta.enumNames.length) ? root.meta.enumNames[i] : ""
                 }
                 opacity: 0.7
@@ -125,7 +124,7 @@ Dialog {
 
         Button {
             Layout.fillWidth: true
-            text: t.t("Add lock")
+            text: Tr.t("Add lock")
             enabled: root.pid >= 0  // see the note above: PID 0 is master.volume
             highlighted: true
             onClicked: {
@@ -140,7 +139,7 @@ Dialog {
             opacity: 0.6
             font.pointSize: UI.fontSize * 0.75
             color: Material.foreground
-            text: t.t("A locked parameter is forced while this step plays and "
+            text: Tr.t("A locked parameter is forced while this step plays and "
                       + "restored when the track next plays a step without that "
                       + "lock.")
         }
@@ -151,7 +150,7 @@ Dialog {
             visible: Synth.seqPlockUsed >= Synth.seqPlockCapacity
             color: Material.accent
             font.pointSize: UI.fontSize * 0.75
-            text: t.t("The lock pool is full — remove a lock before adding another.")
+            text: Tr.t("The lock pool is full — remove a lock before adding another.")
         }
     }
 }

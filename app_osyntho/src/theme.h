@@ -3,6 +3,7 @@
 
 #include <QMetaType>
 #include <QString>
+#include <QtQml/qqmlregistration.h>
 
 #include <array>
 
@@ -10,12 +11,13 @@
 // QObject) so it can be returned by value from App's `theme` property; QML reads
 // its sub-properties directly. App drives it from the stored theme_type +
 // theme_preset settings (see App::applyThemePreset / App::setThemeType).
-class Theme {
+class Theme final {
   Q_GADGET
-  Q_PROPERTY(QString type READ type)
-  Q_PROPERTY(QString primaryColor READ primaryColor)
-  Q_PROPERTY(QString primaryBgColor READ primaryBgColor)
-  Q_PROPERTY(QString materialAccent READ materialAccent)
+  QML_ANONYMOUS
+  Q_PROPERTY(QString type READ type FINAL)
+  Q_PROPERTY(QString primaryColor READ primaryColor FINAL)
+  Q_PROPERTY(QString primaryBgColor READ primaryBgColor FINAL)
+  Q_PROPERTY(QString materialAccent READ materialAccent FINAL)
 
  public:
   struct Preset {

@@ -52,7 +52,7 @@ QtObject {
     // child element to.
     property Connections _conn: Connections {
         target: Synth
-        function onParamChanged(id, v) {
+        function onParamChanged(id: int, v: real): void {
             if (id === root.paramId) {
                 root.value = v
                 root.valueKnown = true

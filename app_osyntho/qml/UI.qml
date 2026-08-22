@@ -1,6 +1,7 @@
 pragma Singleton
 
 import QtQuick
+import org.osynth.osyntho
 
 // Session-state singleton shared by every screen/component. Main.qml assigns
 // `window` once on startup; components depend on this explicit object instead of

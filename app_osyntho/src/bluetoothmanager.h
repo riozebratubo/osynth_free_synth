@@ -35,12 +35,12 @@ class BluetoothManager : public IBluetoothManager {
   QVariantList getDiscoveredDevices() const override;
   int mtu() const override;
 
-  Q_INVOKABLE void connectToSelectedDevice();
+  Q_INVOKABLE void connectToSelectedDevice() override;
   // Device-selector screen entry/exit. startDeviceScan() disconnects any
   // connected synth and enters scan-to-list mode (list nearby devices, never
   // auto-connect). stopDeviceScan() leaves that mode.
-  Q_INVOKABLE void startDeviceScan();
-  Q_INVOKABLE void stopDeviceScan();
+  Q_INVOKABLE void startDeviceScan() override;
+  Q_INVOKABLE void stopDeviceScan() override;
 
  public slots:
   void write(const QByteArray& data, bool withResponse) override;

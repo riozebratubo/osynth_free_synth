@@ -26,8 +26,8 @@ Dialog {
         function onTrackConfigChanged() { if (root.visible) root.reload() }
     }
 
-    title: t.t("Track") + " " + (Synth.editTrack + 1) + " — "
-           + t.t("Pattern") + " " + (Synth.editPattern + 1)
+    title: Tr.t("Track") + " " + (Synth.editTrack + 1) + " — "
+           + Tr.t("Pattern") + " " + (Synth.editPattern + 1)
     modal: true
     anchors.centerIn: Overlay.overlay
     width: Math.min(parent ? parent.width - 32 : 420, 560)
@@ -45,7 +45,7 @@ Dialog {
 
             // ---- what this track plays -----------------------------------
             Label {
-                text: t.t("Output")
+                text: Tr.t("Output")
                 font.bold: true
                 color: Material.foreground
             }
@@ -56,7 +56,7 @@ Dialog {
                 ColumnLayout {
                     spacing: 0
                     Label {
-                        text: t.t("Target")
+                        text: Tr.t("Target")
                         font.pointSize: UI.fontSize * 0.7
                         opacity: 0.7
                         color: Material.foreground
@@ -74,7 +74,7 @@ Dialog {
                     spacing: 0
                     visible: root.cfg.target === 1
                     Label {
-                        text: t.t("Drum slot")
+                        text: Tr.t("Drum slot")
                         font.pointSize: UI.fontSize * 0.7
                         opacity: 0.7
                         color: Material.foreground
@@ -96,7 +96,7 @@ Dialog {
                             return out
                         }
                         model: {
-                            var out = [t.t("from step note")]
+                            var out = [Tr.t("from step note")]
                             for (var i = 0; i < slotBox.slotList.length; ++i)
                                 out.push((slotBox.slotList[i].slot + 1) + "  "
                                          + slotBox.slotList[i].name)
@@ -131,7 +131,7 @@ Dialog {
 
             // ---- time ------------------------------------------------------
             Label {
-                text: t.t("Time")
+                text: Tr.t("Time")
                 font.bold: true
                 color: Material.foreground
             }
@@ -140,10 +140,10 @@ Dialog {
                 spacing: 10
 
                 StepField {
-                    label: t.t("Length")
+                    label: Tr.t("Length")
                     from: 1
                     to: Math.max(1, Synth.seqMaxSteps)
-                    suffix: t.t("steps")
+                    suffix: Tr.t("steps")
                     value: root.cfg.length !== undefined ? root.cfg.length : 64
                     onEdited: (v) => Synth.setTrackField("length", v)
                 }
@@ -151,7 +151,7 @@ Dialog {
                 ColumnLayout {
                     spacing: 0
                     Label {
-                        text: t.t("Division")
+                        text: Tr.t("Division")
                         font.pointSize: UI.fontSize * 0.7
                         opacity: 0.7
                         color: Material.foreground
@@ -166,7 +166,7 @@ Dialog {
                 ColumnLayout {
                     spacing: 0
                     Label {
-                        text: t.t("Direction")
+                        text: Tr.t("Direction")
                         font.pointSize: UI.fontSize * 0.7
                         opacity: 0.7
                         color: Material.foreground
@@ -179,11 +179,11 @@ Dialog {
                 }
 
                 StepField {
-                    label: t.t("Swing")
+                    label: Tr.t("Swing")
                     // 0 means "follow the pattern" in this control; the wire
                     // encoding for that is 0xFF, mapped by the controller.
                     from: 0; to: 75
-                    suffix: root.cfg.followsPatternSwing ? t.t("(pattern)") : "%"
+                    suffix: root.cfg.followsPatternSwing ? Tr.t("(pattern)") : "%"
                     value: root.cfg.followsPatternSwing ? 0
                            : (root.cfg.swing !== undefined ? root.cfg.swing : 50)
                     onEdited: (v) => Synth.setTrackField("swing", v === 0 ? -1 : v)
@@ -192,7 +192,7 @@ Dialog {
 
             // ---- feel ------------------------------------------------------
             Label {
-                text: t.t("Feel")
+                text: Tr.t("Feel")
                 font.bold: true
                 color: Material.foreground
             }
@@ -201,14 +201,14 @@ Dialog {
                 spacing: 10
 
                 StepField {
-                    label: t.t("Transpose")
+                    label: Tr.t("Transpose")
                     from: -24; to: 24
-                    suffix: t.t("semitones")
+                    suffix: Tr.t("semitones")
                     value: root.cfg.transpose !== undefined ? root.cfg.transpose : 0
                     onEdited: (v) => Synth.setTrackField("transpose", v)
                 }
                 StepField {
-                    label: t.t("Gate scale")
+                    label: Tr.t("Gate scale")
                     from: 0; to: 200
                     suffix: "%"
                     value: root.cfg.gateScale !== undefined ? root.cfg.gateScale : 100
@@ -218,24 +218,24 @@ Dialog {
                 // named for what it does rather than what it is for, since
                 // this page is where you set the exact number.
                 StepField {
-                    label: t.t("Track level (velocity)")
+                    label: Tr.t("Track level (velocity)")
                     from: 0; to: 200
                     // Above 100 % the boost runs out early: step velocities
                     // are capped at 127, so a track already played hard has
                     // little headroom left to gain.
-                    suffix: root.cfg.velScale > 100 ? "% " + t.t("(caps at 127)") : "%"
+                    suffix: root.cfg.velScale > 100 ? "% " + Tr.t("(caps at 127)") : "%"
                     value: root.cfg.velScale !== undefined ? root.cfg.velScale : 100
                     onEdited: (v) => Synth.setTrackField("velScale", v)
                 }
                 StepField {
-                    label: t.t("Probability scale")
+                    label: Tr.t("Probability scale")
                     from: 0; to: 100
                     suffix: "%"
                     value: root.cfg.probScale !== undefined ? root.cfg.probScale : 100
                     onEdited: (v) => Synth.setTrackField("probScale", v)
                 }
                 StepField {
-                    label: t.t("Humanize")
+                    label: Tr.t("Humanize")
                     from: 0; to: 100
                     suffix: "%"
                     value: root.cfg.humanize !== undefined ? root.cfg.humanize : 0
@@ -245,7 +245,7 @@ Dialog {
 
             // ---- pattern (shared by every track) ---------------------------
             Label {
-                text: t.t("Pattern")
+                text: Tr.t("Pattern")
                 font.bold: true
                 color: Material.foreground
             }
@@ -256,7 +256,7 @@ Dialog {
                 ColumnLayout {
                     spacing: 0
                     Label {
-                        text: t.t("Scale")
+                        text: Tr.t("Scale")
                         font.pointSize: UI.fontSize * 0.7
                         opacity: 0.7
                         color: Material.foreground
@@ -270,7 +270,7 @@ Dialog {
                 ColumnLayout {
                     spacing: 0
                     Label {
-                        text: t.t("Root")
+                        text: Tr.t("Root")
                         font.pointSize: UI.fontSize * 0.7
                         opacity: 0.7
                         color: Material.foreground
@@ -282,7 +282,7 @@ Dialog {
                     }
                 }
                 StepField {
-                    label: t.t("Pattern swing")
+                    label: Tr.t("Pattern swing")
                     from: 25; to: 75
                     suffix: "%"
                     value: root.pat.swing !== undefined ? root.pat.swing : 50
@@ -292,7 +292,7 @@ Dialog {
 
             // ---- generators ------------------------------------------------
             Label {
-                text: t.t("Generate")
+                text: Tr.t("Generate")
                 font.bold: true
                 color: Material.foreground
             }
@@ -307,7 +307,7 @@ Dialog {
                     value: 4
                 }
                 Label {
-                    text: t.t("hits over")
+                    text: Tr.t("hits over")
                     color: Material.foreground
                     Layout.alignment: Qt.AlignVCenter
                 }
@@ -318,7 +318,7 @@ Dialog {
                     value: 16
                 }
                 Button {
-                    text: t.t("Euclid")
+                    text: Tr.t("Euclid")
                     // Spreads `pulses` as evenly as possible over `steps` — the
                     // most useful generator to have on a device with no
                     // keyboard, and it sets the track length to match. Same
@@ -336,26 +336,26 @@ Dialog {
                 Layout.fillWidth: true
                 spacing: 6
                 Button {
-                    text: t.t("Rotate ←")
+                    text: Tr.t("Rotate ←")
                     onClicked: Synth.rotateTrack(-1)
                 }
                 Button {
-                    text: t.t("Rotate →")
+                    text: Tr.t("Rotate →")
                     onClicked: Synth.rotateTrack(1)
                 }
                 Button {
-                    text: t.t("Humanize now")
+                    text: Tr.t("Humanize now")
                     // Bakes jitter into the stored velocities/micro-timing,
                     // unlike the per-track `humanize` above, which re-rolls on
                     // every pass.
                     onClicked: Synth.humanizeTrack(35)
                 }
                 Button {
-                    text: t.t("Clear track")
+                    text: Tr.t("Clear track")
                     onClicked: Synth.clearTrack()
                 }
                 Button {
-                    text: t.t("Clear pattern")
+                    text: Tr.t("Clear pattern")
                     onClicked: Synth.clearPattern()
                 }
             }

@@ -78,7 +78,7 @@ Rectangle {
         function onParamsDiscovered() { card.refresh() }
         // The switch beside this button writes the same id, and so does a
         // preset load; both arrive here.
-        function onParamChanged(id, value) {
+        function onParamChanged(id: int, value: real): void {
             if (id === card.paramId)
                 card.frozen = Math.round(value) === card.upValue
         }
@@ -113,7 +113,7 @@ Rectangle {
 
         Label {
             id: titleLabel
-            text: t.t(card.title)
+            text: Tr.t(card.title)
             font.bold: true
             font.pointSize: UI.fontSize * 0.95
             color: Material.foreground
@@ -127,9 +127,9 @@ Rectangle {
             // same parameter, and a preset load can too.
             highlighted: down || !card.frozen
             implicitWidth: 150
-            text: down ? t.t(card.downText)
-                       : (card.frozen ? t.t(card.idleText)
-                                      : t.t(card.activeText))
+            text: down ? Tr.t(card.downText)
+                       : (card.frozen ? Tr.t(card.idleText)
+                                      : Tr.t(card.activeText))
 
             onPressed: Synth.setParamNow(card.paramId, card.downValue)
             onReleased: Synth.setParamNow(card.paramId, card.upValue)
@@ -141,7 +141,7 @@ Rectangle {
 
         Label {
             visible: card.hint !== ""
-            text: t.t(card.hint)
+            text: Tr.t(card.hint)
             font.pointSize: UI.fontSize * 0.8
             color: Material.foreground
             opacity: 0.7

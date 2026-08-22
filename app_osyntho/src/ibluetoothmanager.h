@@ -16,11 +16,11 @@
 class IBluetoothManager : public QObject {
   Q_OBJECT
 
-  Q_PROPERTY(bool scanning READ getScanning WRITE setScanning NOTIFY scanningChanged)
-  Q_PROPERTY(bool connected READ getConnected NOTIFY connectedChanged)
-  Q_PROPERTY(QString deviceName READ getDeviceName NOTIFY deviceNameChanged)
-  Q_PROPERTY(QString deviceAddress READ getDeviceAddress NOTIFY deviceAddressChanged)
-  Q_PROPERTY(QVariantList discoveredDevices READ getDiscoveredDevices NOTIFY discoveredDevicesChanged)
+  Q_PROPERTY(bool scanning READ getScanning WRITE setScanning NOTIFY scanningChanged FINAL)
+  Q_PROPERTY(bool connected READ getConnected NOTIFY connectedChanged FINAL)
+  Q_PROPERTY(QString deviceName READ getDeviceName NOTIFY deviceNameChanged FINAL)
+  Q_PROPERTY(QString deviceAddress READ getDeviceAddress NOTIFY deviceAddressChanged FINAL)
+  Q_PROPERTY(QVariantList discoveredDevices READ getDiscoveredDevices NOTIFY discoveredDevicesChanged FINAL)
 
  public:
   virtual void finish() = 0;
@@ -31,6 +31,17 @@ class IBluetoothManager : public QObject {
   virtual void setScanning(bool newScanning) = 0;
 
   virtual bool getConnected() = 0;
+
+  // Device-selector screen entry/exit, plus the connect action. Declared here,
+  // not only on the backends, because the shared QML calls all three through
+  // the BluetoothManager singleton — and QML sees that singleton as this
+  // interface (src/qmlforeign.h). Left off, the calls only resolve by dynamic
+  // lookup on the concrete object, so nothing that touches them can compile.
+  Q_INVOKABLE virtual void connectToSelectedDevice() = 0;
+  // startDeviceScan() disconnects any current link and enters selection mode;
+  // stopDeviceScan() leaves it. See the backends for the auto-connect rules.
+  Q_INVOKABLE virtual void startDeviceScan() = 0;
+  Q_INVOKABLE virtual void stopDeviceScan() = 0;
 
   virtual QString getDeviceName() = 0;
   virtual QString getDeviceAddress() = 0;

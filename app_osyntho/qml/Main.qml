@@ -1,5 +1,4 @@
 import QtQuick
-import QtQuick.Layouts
 import QtQuick.Controls.Material
 import QtQuick.Dialogs
 // Window.FullScreen (applyImmersive) and the Screen attached property. Needed
@@ -95,7 +94,7 @@ ApplicationWindow {
     // the size the other mode gave it. Setting it here by hand is confined to
     // this explicit user action; nothing on the launch or resume paths touches
     // geometry, which is Qt's to own.
-    function setImmersive(on) {
+    function setImmersive(on: bool): void {
         App.saveSetting("android_immersive", on ? "true" : "false")
         applyImmersive()
         if (!App.isAndroid()) return
@@ -188,11 +187,11 @@ ApplicationWindow {
         }
     }
 
-    function writeBackupTo(path) {
+    function writeBackupTo(path: string): void {
         if (App.saveBackupTo(path))
-            toast.show(t.t("Backup saved."), 3000)
+            toast.show(Tr.t("Backup saved."), 3000)
         else
-            toast.show(t.t("Could not write the backup file."), 4000)
+            toast.show(Tr.t("Could not write the backup file."), 4000)
     }
 
     // Where an Android restore is staged; the picker copies the chosen file
@@ -228,15 +227,15 @@ ApplicationWindow {
     readonly property string jsonImportPath: App.exportFileLocation("import.json")
 
     // Patch names are free text and file names are not.
-    function safeFileName(name, fallback) {
+    function safeFileName(name: string, fallback: string): string {
         var base = String(name || "").replace(/[^A-Za-z0-9 ._-]/g, "_").trim()
         if (base.length === 0) base = fallback
         return base + ".json"
     }
 
-    function exportJson(text, suggestedName) {
+    function exportJson(text: string, suggestedName: string): void {
         if (!text || text.length === 0) {
-            toast.show(t.t("Nothing to export."), 3000)
+            toast.show(Tr.t("Nothing to export."), 3000)
             return
         }
         const fileName = safeFileName(suggestedName, "osyntho-patch")
@@ -245,7 +244,7 @@ ApplicationWindow {
             // it to the share sheet, the same route the database backup takes.
             const path = App.exportFileLocation(fileName)
             if (App.writeTextFile(path, text)) App.shareFile(path)
-            else toast.show(t.t("Could not write the file."), 4000)
+            else toast.show(Tr.t("Could not write the file."), 4000)
         } else if (nativePickers) {
             // The dialog blocks, so the text needs no holding onto — the answer
             // is already in hand by the time it returns.
@@ -258,11 +257,11 @@ ApplicationWindow {
         }
     }
 
-    function writeExportTo(path, text) {
+    function writeExportTo(path: string, text: string): void {
         if (App.writeTextFile(path, text))
-            toast.show(t.t("Exported."), 3000)
+            toast.show(Tr.t("Exported."), 3000)
         else
-            toast.show(t.t("Could not write the file."), 4000)
+            toast.show(Tr.t("Could not write the file."), 4000)
     }
 
     // ---- Loop track export (WAV) ----
@@ -270,11 +269,11 @@ ApplicationWindow {
     // difference is only that the bytes are binary and already sitting in the
     // SynthController, so nothing is held here between opening the picker and
     // the answer: writeWavExportTo() asks the controller to write them.
-    function exportWav(suggestedName) {
+    function exportWav(suggestedName: string): void {
         if (App.isAndroid()) {
             const path = App.exportFileLocation(suggestedName)
             if (Synth.saveLoopExportTo(path)) App.shareFile(path)
-            else toast.show(t.t("Could not write the file."), 4000)
+            else toast.show(Tr.t("Could not write the file."), 4000)
         } else if (nativePickers) {
             const path = App.saveFileDialog("wav", documentsFolder + "/" + suggestedName, "wav")
             if (path.length > 0) writeWavExportTo(path)
@@ -284,14 +283,14 @@ ApplicationWindow {
         }
     }
 
-    function writeWavExportTo(path) {
+    function writeWavExportTo(path: string): void {
         if (Synth.saveLoopExportTo(path))
-            toast.show(t.t("Exported."), 3000)
+            toast.show(Tr.t("Exported."), 3000)
         else
-            toast.show(t.t("Could not write the file."), 4000)
+            toast.show(Tr.t("Could not write the file."), 4000)
     }
 
-    function importJson(page) {
+    function importJson(page: string): void {
         jsonImportTarget = page
         if (App.isAndroid()) {
             pendingJsonImport = true
@@ -306,10 +305,10 @@ ApplicationWindow {
 
     // readTextFile() answers "" for both an unreadable file and an empty one, so
     // the message names both rather than asserting the wrong one.
-    function loadImportFrom(path) {
+    function loadImportFrom(path: string): void {
         const text = App.readTextFile(path)
         if (text.length > 0) UI.jsonImported(jsonImportTarget, text)
-        else toast.show(t.t("That file is empty, or could not be read."), 4000)
+        else toast.show(Tr.t("That file is empty, or could not be read."), 4000)
     }
 
     // Fallback pickers, used where nativePickers is false. Left non-native
@@ -321,7 +320,7 @@ ApplicationWindow {
         options: FileDialog.DontUseNativeDialog
         defaultSuffix: "json"
         currentFolder: mainWindow.documentsFolder
-        nameFilters: [t.t("Patch files (*.json)"), t.t("All files (*)")]
+        nameFilters: [Tr.t("Patch files (*.json)"), Tr.t("All files (*)")]
         onAccepted: {
             writeExportTo(selectedFile, mainWindow.pendingExportText)
             mainWindow.pendingExportText = ""
@@ -335,7 +334,7 @@ ApplicationWindow {
         options: FileDialog.DontUseNativeDialog
         defaultSuffix: "wav"
         currentFolder: mainWindow.documentsFolder
-        nameFilters: [t.t("Audio (*.wav)"), t.t("All files (*)")]
+        nameFilters: [Tr.t("Audio (*.wav)"), Tr.t("All files (*)")]
         onAccepted: writeWavExportTo(selectedFile)
     }
 
@@ -344,7 +343,7 @@ ApplicationWindow {
         fileMode: FileDialog.OpenFile
         options: FileDialog.DontUseNativeDialog
         currentFolder: mainWindow.documentsFolder
-        nameFilters: [t.t("Patch files (*.json)"), t.t("All files (*)")]
+        nameFilters: [Tr.t("Patch files (*.json)"), Tr.t("All files (*)")]
         onAccepted: loadImportFrom(selectedFile)
     }
 
@@ -358,7 +357,7 @@ ApplicationWindow {
         // filter then hides it.
         defaultSuffix: "db"
         currentFolder: mainWindow.downloadsFolder
-        nameFilters: [t.t("Database (*.db)"), t.t("All files (*)")]
+        nameFilters: [Tr.t("Database (*.db)"), Tr.t("All files (*)")]
         onAccepted: writeBackupTo(selectedFile)
     }
 
@@ -367,7 +366,7 @@ ApplicationWindow {
         fileMode: FileDialog.OpenFile
         options: FileDialog.DontUseNativeDialog
         currentFolder: mainWindow.downloadsFolder
-        nameFilters: [t.t("Database (*.db)"), t.t("All files (*)")]
+        nameFilters: [Tr.t("Database (*.db)"), Tr.t("All files (*)")]
         onAccepted: App.restoreBackupFrom(selectedFile)
     }
 
@@ -375,18 +374,18 @@ ApplicationWindow {
         target: UI
         function onShareBackupRequested() { shareBackup() }
         function onRestoreBackupRequested() { restoreBackup() }
-        function onExportJsonRequested(text, suggestedName) { exportJson(text, suggestedName) }
-        function onImportJsonRequested(page) { importJson(page) }
+        function onExportJsonRequested(text: string, suggestedName: string): void { exportJson(text, suggestedName) }
+        function onImportJsonRequested(page: string): void { importJson(page) }
         function onSettingsRequested() { mainStackView.push("SettingsScreen.qml", {}) }
         function onSelectDeviceRequested() { mainStackView.push("BluetoothDeviceSelectorScreen.qml", {}) }
-        function onUpdateFirmwareRequested(extension) {
-            toast.show(t.t("Firmware update is not available yet for osynth."), 4000)
+        function onUpdateFirmwareRequested(extension: string): void {
+            toast.show(Tr.t("Firmware update is not available yet for osynth."), 4000)
         }
     }
 
     Connections {
         target: App
-        function onSelectFileSelected(filename) {
+        function onSelectFileSelected(filename: string): void {
             // The signal carries a display name, not a path — the picker copied
             // the file to the destination we asked for, so read that.
             if (pendingJsonImport) {
@@ -412,24 +411,24 @@ ApplicationWindow {
         function onDatabaseRestored() {
             App.onDatabaseRestoredAction()
             reApplySettings()
-            toast.show(t.t("Backup restored."), 3000)
+            toast.show(Tr.t("Backup restored."), 3000)
         }
         // A restore that did not happen. Without this the success toast above
         // was shown either way, so a rejected file — or one that failed to copy
         // and was rolled back — looked exactly like a restore that worked.
-        function onRestoreFailed(reason) { toast.show(reason, 5000, "#B00020", "white") }
+        function onRestoreFailed(reason: string): void { toast.show(reason, 5000, "#B00020", "white") }
     }
 
     Connections {
         target: Synth
-        function onShowError(msg) { toast.show(msg, 5000, "#B00020", "white") }
-        function onShowInfo(msg) { toast.show(msg, 3000, "#2E7D32", "white") }
+        function onShowError(msg: string): void { toast.show(msg, 5000, "#B00020", "white") }
+        function onShowInfo(msg: string): void { toast.show(msg, 3000, "#2E7D32", "white") }
         // A loop track finished downloading and is decoded and waiting in the
         // controller. Handled here rather than on the looper page because the
         // three per-platform delivery routes all live here — and unlike the
         // patch import, there is only one page that can ask.
-        function onLoopExportReady(suggestedName) { exportWav(suggestedName) }
-        function onLoopExportFailed(reason) { toast.show(reason, 5000, "#B00020", "white") }
+        function onLoopExportReady(suggestedName: string): void { exportWav(suggestedName) }
+        function onLoopExportFailed(reason: string): void { toast.show(reason, 5000, "#B00020", "white") }
     }
 
     StackView {
@@ -438,9 +437,10 @@ ApplicationWindow {
 
         initialItem: Page {
             header: Toolbar {
+                pager: swipeView
                 subtitle: Synth.connected
-                    ? (BluetoothManager.deviceName + (Synth.ready ? (" · " + t.t(Synth.engineName)) : (" · " + t.t("connecting…"))))
-                    : t.t("Not connected")
+                    ? (BluetoothManager.deviceName + (Synth.ready ? (" · " + Tr.t(Synth.engineName)) : (" · " + Tr.t("connecting…"))))
+                    : Tr.t("Not connected")
             }
 
             // Navigator dock: jump straight to any screen. Centered under the
@@ -498,7 +498,7 @@ ApplicationWindow {
                                 }
                                 Label {
                                     anchors.horizontalCenter: parent.horizontalCenter
-                                    text: t.t(navBtn.modelData.label)
+                                    text: Tr.t(navBtn.modelData.label)
                                     font.pointSize: UI.fontSize * 0.62
                                     font.bold: navBtn.current
                                     color: navBtn.current ? Material.accent : Material.foreground

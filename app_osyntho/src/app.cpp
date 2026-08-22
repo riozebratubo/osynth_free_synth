@@ -10,6 +10,7 @@
 #include <QStandardPaths>
 #include <QSysInfo>
 #include <QVariant>
+#include <QtQml/qqmlengine.h>
 
 #include "src/apputils.h"
 #include "src/nativefiledialog.h"
@@ -696,4 +697,10 @@ bool App::eventFilter(QObject* watched, QEvent* event) {
     }
   }
   return QObject::eventFilter(watched, event);
+}
+
+App* App::create(QQmlEngine*, QJSEngine*) {
+  App* app = &App::instance();
+  QJSEngine::setObjectOwnership(app, QJSEngine::CppOwnership);
+  return app;
 }

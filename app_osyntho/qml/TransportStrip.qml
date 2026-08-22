@@ -50,7 +50,7 @@ RowLayout {
     spacing: 1
     visible: present && Synth.connected
 
-    function go(m) { if (modeId >= 0) Synth.setParam(modeId, m) }
+    function go(m: int): void { if (modeId >= 0) Synth.setParam(modeId, m) }
 
     Label {
         text: root.caption

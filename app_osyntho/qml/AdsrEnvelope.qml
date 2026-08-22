@@ -39,7 +39,7 @@ Item {
 
     Connections {
         target: Synth
-        function onParamChanged(id, value) {
+        function onParamChanged(id: int, value: real): void {
             if (id === root.aId || id === root.dId || id === root.sId || id === root.rId)
                 canvas.requestPaint()
         }

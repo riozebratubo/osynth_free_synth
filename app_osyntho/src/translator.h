@@ -4,12 +4,22 @@
 #include <QHash>
 #include <QObject>
 #include <QString>
+#include <QtQml/qqmlregistration.h>
 
-class Translator : public QObject {
+QT_BEGIN_NAMESPACE
+class QQmlEngine;
+class QJSEngine;
+QT_END_NAMESPACE
+
+class Translator final : public QObject {
   Q_OBJECT
+  QML_NAMED_ELEMENT(Tr)
+  QML_SINGLETON
 
  public:
   static Translator& instance();
+
+  static Translator* create(QQmlEngine*, QJSEngine*);
 
   Q_INVOKABLE void setActiveLanguage(const QString& language);
   Q_INVOKABLE QString t(const QString& str);

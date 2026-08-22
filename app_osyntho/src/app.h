@@ -20,32 +20,39 @@
 #endif
 
 #include "src/synthcontroller.h"
+#include <QtQml/qqmlregistration.h>
 
 // Composition root + QML façade. Owns the SynthController and wires it to the
 // platform BLE manager; exposes settings, theme, backup/restore and the
 // (future) firmware-file plumbing to QML.
-class App : public QObject {
+class App final : public QObject {
   Q_OBJECT
+  QML_ELEMENT
+  QML_SINGLETON
 
   Q_PROPERTY(QString fontAwesomeName READ getFontAwesomeFontName WRITE setFontAwesomeFontName NOTIFY
-                 fontAwesomeFontNameChanged)
+                 fontAwesomeFontNameChanged FINAL)
   Q_PROPERTY(QString fontAwesomeRegularName READ getFontAwesomeRegularFontName WRITE
-                 setFontAwesomeRegularFontName NOTIFY fontAwesomeRegularFontNameChanged)
-  Q_PROPERTY(Theme theme READ getTheme NOTIFY themeChanged)
-  Q_PROPERTY(int themePresetIndex READ getThemePresetIndex NOTIFY themeChanged)
+                 setFontAwesomeRegularFontName NOTIFY fontAwesomeRegularFontNameChanged FINAL)
+  Q_PROPERTY(Theme theme READ getTheme NOTIFY themeChanged FINAL)
+  Q_PROPERTY(int themePresetIndex READ getThemePresetIndex NOTIFY themeChanged FINAL)
   Q_PROPERTY(bool bluetoothEnabled READ getBluetoothEnabled WRITE setBluetoothEnabled NOTIFY
-                 bluetoothEnabledChanged)
+                 bluetoothEnabledChanged FINAL)
   Q_PROPERTY(QString bluetoothSelectedDeviceName READ getBluetoothSelectedDeviceName NOTIFY
-                 bluetoothSelectedDeviceChanged)
+                 bluetoothSelectedDeviceChanged FINAL)
   Q_PROPERTY(QString bluetoothSelectedDeviceAddress READ getBluetoothSelectedDeviceAddress NOTIFY
-                 bluetoothSelectedDeviceChanged)
+                 bluetoothSelectedDeviceChanged FINAL)
   // When true (desktop, keyboard visible), maps computer keys to piano notes via
   // a global event filter. The on-screen Keyboard binds this to its visibility.
   Q_PROPERTY(bool keyboardCaptureEnabled READ keyboardCaptureEnabled WRITE setKeyboardCaptureEnabled
-                 NOTIFY keyboardCaptureEnabledChanged)
+                 NOTIFY keyboardCaptureEnabledChanged FINAL)
 
  public:
   static App& instance();
+
+  // QML singleton factory. The engine never owns App -- instance() does --
+  // so ownership is pinned to C++ before the pointer is handed over.
+  static App* create(QQmlEngine*, QJSEngine*);
 
   // Composition-root constructor. Production uses instance() (which injects the
   // singletons); tests can construct App with a fake/in-memory IDatabase and

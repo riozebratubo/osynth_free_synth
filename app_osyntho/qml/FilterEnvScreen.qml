@@ -29,7 +29,7 @@ Item {
     Label {
         anchors.centerIn: parent
         visible: !Synth.ready
-        text: Synth.connected ? t.t("Discovering parameters…") : t.t("Not connected")
+        text: Synth.connected ? Tr.t("Discovering parameters…") : Tr.t("Not connected")
         opacity: 0.5
         color: Material.foreground
     }

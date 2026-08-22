@@ -28,7 +28,7 @@ RowLayout {
         amtId = Synth.paramIdForName("mod" + slot + ".amount")
     }
     function refreshPicker() {
-        var list = [{ id: 0, name: t.t("— none —") }]
+        var list = [{ id: 0, name: Tr.t("— none —") }]
         var pl = Synth.paramPickerList()
         for (var i = 0; i < pl.length; i++) {
             // Skip PID 0 (master.volume). The firmware reads dest 0 as "no
@@ -59,7 +59,7 @@ RowLayout {
     Connections {
         target: Synth
         function onParamsDiscovered() { root.refreshIds(); root.refreshPicker() }
-        function onParamChanged(id, value) { if (id === root.destId) root.syncDest() }
+        function onParamChanged(id: int, value: real): void { if (id === root.destId) root.syncDest() }
     }
 
     Label {
@@ -76,7 +76,7 @@ RowLayout {
     ColumnLayout {
         spacing: 1
         Label {
-            text: t.t("dest")
+            text: Tr.t("dest")
             font.pointSize: UI.fontSize * 0.68
             opacity: 0.75
             color: Material.foreground

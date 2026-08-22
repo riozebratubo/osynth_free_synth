@@ -6,8 +6,10 @@ import org.osynth.osyntho
 
 // Top toolbar: page prev/next for the horizontal SwipeView, a connection
 // indicator, and the overflow menu (Backup / Device / Firmware / Settings).
-// Instantiated inside Main.qml, so it resolves Main's ids (swipeView,
-// mainStackView) through the context chain.
+// The SwipeView it drives arrives as the `pager` property, and navigation
+// requests go out through the UI singleton's signals — so this does not
+// depend on Main's ids resolving through the context chain. It still reads
+// mainWindow for the keyboard/drum-pad toggles, which do.
 //
 // Icons are Font Awesome 6 Free solid glyphs written as "\uXXXX" escapes; the
 // weight pin (Font.Black) selects the solid face over the regular one.
@@ -16,6 +18,10 @@ ToolBar {
 
     property string title: "Osyntho"
     property string subtitle: ""
+    // The SwipeView the prev/next arrows drive. Named `pager` rather than
+    // `swipeView` so that `pager: swipeView` at the call site cannot resolve
+    // its right-hand side to this property and bind it to itself.
+    property SwipeView pager
 
     Material.foreground: App.theme.primaryColor
     Material.background: App.theme.primaryBgColor
@@ -42,8 +48,8 @@ ToolBar {
             font.family: App.fontAwesomeName
             font.weight: Font.Black  // solid face
             font.pointSize: UI.fontSize * 1.2
-            visible: swipeView.currentIndex > 0
-            onClicked: if (swipeView.currentIndex > 0) swipeView.currentIndex--
+            visible: t1.pager && t1.pager.currentIndex > 0
+            onClicked: if (t1.pager.currentIndex > 0) t1.pager.currentIndex--
         }
         // Stands in for the hidden prev button so the title does not jump to the
         // edge on the first page. Layout.preferredWidth, not width: a RowLayout
@@ -89,8 +95,8 @@ ToolBar {
         RowLayout {
             id: masterVol
             readonly property int volId: 0  // master.volume == 0x0000
-            property var meta: ({ exists: false })
-            visible: meta.exists
+            property paramMeta meta
+            visible: masterVol.meta.exists
             spacing: 4
             Layout.rightMargin: 6
             Layout.preferredWidth: 70  // reserve space so the slider isn't squeezed to 0
@@ -108,7 +114,7 @@ ToolBar {
             Connections {
                 target: Synth
                 function onParamsDiscovered() { masterVol.refresh() }
-                function onParamChanged(id, v) {
+                function onParamChanged(id: int, v: real): void {
                     if (id === masterVol.volId && !volSlider.pressed) {
                         volSlider.syncing = true
                         volSlider.value = v
@@ -155,15 +161,15 @@ ToolBar {
         RowLayout {
             id: outLevel
             property int levelId: -1
-            property var meta: ({ exists: false })
-            visible: meta.exists
+            property paramMeta meta
+            visible: outLevel.meta.exists
             spacing: 4
             Layout.rightMargin: 6
             Layout.preferredWidth: 70
 
             function refresh() {
                 levelId = Synth.paramIdForName("out.level")
-                meta = levelId >= 0 ? Synth.paramMeta(levelId) : ({ exists: false })
+                meta = Synth.paramMeta(levelId)
                 if (meta.exists) {
                     outSlider.syncing = true
                     outSlider.value = Synth.paramValue(levelId)
@@ -175,7 +181,7 @@ ToolBar {
             Connections {
                 target: Synth
                 function onParamsDiscovered() { outLevel.refresh() }
-                function onParamChanged(id, v) {
+                function onParamChanged(id: int, v: real): void {
                     if (id === outLevel.levelId && outLevel.levelId >= 0
                             && !outSlider.pressed) {
                         outSlider.syncing = true
@@ -194,7 +200,7 @@ ToolBar {
                 Layout.alignment: Qt.AlignVCenter
 
                 ToolTip.visible: outMouse.containsMouse
-                ToolTip.text: t.t("Output level: %1 dB").arg(outSlider.value.toFixed(1))
+                ToolTip.text: Tr.t("Output level: %1 dB").arg(outSlider.value.toFixed(1))
                 MouseArea {
                     id: outMouse
                     anchors.fill: parent
@@ -249,7 +255,7 @@ ToolBar {
             }
 
             readonly property real titleFloor: UI.fontSize * 5
-            readonly property real spare: t1.width - titleFloor - fixedChromeWidth
+            readonly property real spare: t1.width - titleFloor - t1.fixedChromeWidth
             readonly property bool showLooper: loopTransport.present
                                                && spare >= loopTransport.estimatedWidth
             // Room the looper strip is actually taking, so the sequencer's fit
@@ -277,13 +283,13 @@ ToolBar {
 
                 TransportStrip {
                     id: seqTransport
-                    caption: t.t("SEQ")
+                    caption: Tr.t("SEQ")
                     modeId: transports.seqModeId
                     visible: transports.showSeq
                 }
                 TransportStrip {
                     id: loopTransport
-                    caption: t.t("LOOP")
+                    caption: Tr.t("LOOP")
                     modeId: transports.loopModeId
                     armedId: transports.loopArmedId
                     visible: transports.showLooper
@@ -315,20 +321,20 @@ ToolBar {
                 y: menuButton.height
 
                 Menu {
-                    title: t.t("Backup")
-                    MenuItem { text: t.t("Save data..."); onTriggered: UI.shareBackupRequested() }
-                    MenuItem { text: t.t("Restore data..."); onTriggered: UI.restoreBackupRequested() }
+                    title: Tr.t("Backup")
+                    MenuItem { text: Tr.t("Save data..."); onTriggered: UI.shareBackupRequested() }
+                    MenuItem { text: Tr.t("Restore data..."); onTriggered: UI.restoreBackupRequested() }
                 }
 
                 MenuItem {
-                    text: t.t("Show keyboard")
+                    text: Tr.t("Show keyboard")
                     checkable: true
                     checked: mainWindow.keyboardVisible
                     onTriggered: mainWindow.keyboardVisible = !mainWindow.keyboardVisible
                 }
 
                 MenuItem {
-                    text: t.t("Show drum pads")
+                    text: Tr.t("Show drum pads")
                     checkable: true
                     checked: mainWindow.drumPadsVisible
                     onTriggered: mainWindow.drumPadsVisible = !mainWindow.drumPadsVisible
@@ -341,7 +347,7 @@ ToolBar {
                 // write-without-response, so one the synth's command queue
                 // drops leaves a note sounding that nothing is tracking.
                 MenuItem {
-                    text: t.t("All notes off")
+                    text: Tr.t("All notes off")
                     enabled: Synth.connected
                     onTriggered: Synth.allNotesOff()
                 }
@@ -349,15 +355,15 @@ ToolBar {
                 MenuSeparator {}
 
                 MenuItem {
-                    text: t.t("Select device...")
+                    text: Tr.t("Select device...")
                     // Off means off: the selector's scan would otherwise put
                     // the radio back to work behind the Settings toggle.
                     enabled: App.bluetoothEnabled
-                    onTriggered: mainStackView.push("BluetoothDeviceSelectorScreen.qml", {})
+                    onTriggered: UI.selectDeviceRequested()
                 }
 
                 MenuItem {
-                    text: t.t("Update firmware...")
+                    text: Tr.t("Update firmware...")
                     enabled: Synth.firmwareUpdateSupported
                     onTriggered: UI.updateFirmwareRequested("bin")
                 }
@@ -365,8 +371,8 @@ ToolBar {
                 MenuSeparator {}
 
                 MenuItem {
-                    text: t.t("Settings")
-                    onTriggered: mainStackView.push("SettingsScreen.qml", {})
+                    text: Tr.t("Settings")
+                    onTriggered: UI.settingsRequested()
                 }
             }
         }
@@ -377,8 +383,8 @@ ToolBar {
             font.family: App.fontAwesomeName
             font.weight: Font.Black  // solid face
             font.pointSize: UI.fontSize * 1.2
-            visible: swipeView.currentIndex < swipeView.count - 1
-            onClicked: if (swipeView.currentIndex < swipeView.count - 1) swipeView.currentIndex++
+            visible: t1.pager && t1.pager.currentIndex < t1.pager.count - 1
+            onClicked: if (t1.pager.currentIndex < t1.pager.count - 1) t1.pager.currentIndex++
         }
     }
 }

@@ -25,7 +25,7 @@ Dialog {
     property string pending: ""
     property string statusText: ""
 
-    title: t.t("Sequencer sets")
+    title: Tr.t("Sequencer sets")
     modal: true
     anchors.centerIn: Overlay.overlay
     width: Math.min(parent ? parent.width - 32 : 420, 480)
@@ -43,18 +43,18 @@ Dialog {
     Connections {
         target: Synth
         function onParamsDiscovered() { dlg.rebind() }
-        function onParamChanged(id, value) {
+        function onParamChanged(id: int, value: real): void {
             // The firmware reflects the trigger once the preset task is done —
             // and only on success, so a silent slot means the operation failed
             // and the settle timer below has the last word.
             const slot = Math.round(value)
             if (id === dlg.idLoad && dlg.pending === "load") {
                 dlg.pending = ""
-                dlg.statusText = t.ts("Loaded set %1.", slot)
+                dlg.statusText = Tr.ts("Loaded set %1.", slot)
                 Synth.refreshSequencer()
             } else if (id === dlg.idSave && dlg.pending === "save") {
                 dlg.pending = ""
-                dlg.statusText = t.ts("Saved to set %1.", slot)
+                dlg.statusText = Tr.ts("Saved to set %1.", slot)
             }
         }
     }
@@ -71,7 +71,7 @@ Dialog {
             const wasLoad = dlg.pending === "load"
             if (dlg.pending !== "") {
                 dlg.pending = ""
-                dlg.statusText = t.t("No answer from the synth — the slot may be empty, or its storage full. Its log says which.")
+                dlg.statusText = Tr.t("No answer from the synth — the slot may be empty, or its storage full. Its log says which.")
             }
             if (wasLoad) Synth.refreshSequencer()
         }
@@ -87,7 +87,7 @@ Dialog {
             visible: dlg.available
 
             Label {
-                text: t.t("Slot")
+                text: Tr.t("Slot")
                 color: Material.foreground
                 opacity: 0.7
             }
@@ -99,25 +99,25 @@ Dialog {
             }
             Item { Layout.fillWidth: true }
             Button {
-                text: t.t("Save set")
+                text: Tr.t("Save set")
                 enabled: Synth.connected && dlg.pending === ""
                 // pending is armed *after* the write: setParam echoes the
                 // value back synchronously for a responsive UI, and taking
                 // that echo for the synth's answer would report a save that
                 // has not happened yet.
                 onClicked: {
-                    dlg.statusText = t.t("Saving…")
+                    dlg.statusText = Tr.t("Saving…")
                     Synth.setParam(dlg.idSave, slotBox.value)
                     dlg.pending = "save"
                     settle.restart()
                 }
             }
             Button {
-                text: t.t("Load set")
+                text: Tr.t("Load set")
                 highlighted: true
                 enabled: Synth.connected && dlg.pending === ""
                 onClicked: {  // see the note on Save set
-                    dlg.statusText = t.t("Loading…")
+                    dlg.statusText = Tr.t("Loading…")
                     Synth.setParam(dlg.idLoad, slotBox.value)
                     dlg.pending = "load"
                     settle.restart()
@@ -132,7 +132,7 @@ Dialog {
             opacity: 0.6
             font.pointSize: UI.fontSize * 0.8
             visible: dlg.available
-            text: t.t("A set is every pattern, the song chain and the arrangement parameters. Loading replaces all of them; saving writes to the synth's flash, which briefly interrupts the audio — do it with the transport stopped.")
+            text: Tr.t("A set is every pattern, the song chain and the arrangement parameters. Loading replaces all of them; saving writes to the synth's flash, which briefly interrupts the audio — do it with the transport stopped.")
         }
 
         Label {
@@ -149,7 +149,7 @@ Dialog {
             color: Material.foreground
             opacity: 0.6
             visible: !dlg.available
-            text: t.t("This firmware has no sequencer sets.")
+            text: Tr.t("This firmware has no sequencer sets.")
         }
     }
 }

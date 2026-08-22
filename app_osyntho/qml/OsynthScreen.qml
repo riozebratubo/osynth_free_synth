@@ -96,7 +96,7 @@ Item {
                     spacing: 8
 
                     Label {
-                        text: t.t("USB port")
+                        text: Tr.t("USB port")
                         font.bold: true
                         font.pointSize: UI.fontSize * 0.95
                         color: Material.foreground
@@ -108,7 +108,7 @@ Item {
                         opacity: 0.7
                         color: Material.foreground
                         font.pointSize: UI.fontSize * 0.85
-                        text: t.t("One socket, one role. As a device the synth is an audio interface and MIDI port on a computer; as a host it plays a USB MIDI controller you plug into it. Changing this restarts the synth.")
+                        text: Tr.t("One socket, one role. As a device the synth is an audio interface and MIDI port on a computer; as a host it plays a USB MIDI controller you plug into it. Changing this restarts the synth.")
                     }
 
                     RowLayout {
@@ -128,20 +128,20 @@ Item {
                             // Three states worth telling apart: mid-restart, a
                             // pending change, and settled.
                             text: Synth.restarting
-                                  ? t.t("Restarting…")
+                                  ? Tr.t("Restarting…")
                                   : Synth.usbRestartRequired
-                                    ? t.t("Restart to apply — the port is still in %1 mode.")
-                                       .arg(Synth.usbActiveMode === 1 ? t.t("host") : t.t("device"))
+                                    ? Tr.t("Restart to apply — the port is still in %1 mode.")
+                                       .arg(Synth.usbActiveMode === 1 ? Tr.t("host") : Tr.t("device"))
                                     : (Synth.usbActiveMode === 1
-                                       ? t.t("Hosting MIDI controllers.")
-                                       : t.t("Connected to a computer as an audio + MIDI device."))
+                                       ? Tr.t("Hosting MIDI controllers.")
+                                       : Tr.t("Connected to a computer as an audio + MIDI device."))
                         }
                     }
 
                     // Only offered when it would do something. A restart with
                     // nothing pending is just a way to interrupt yourself.
                     Button {
-                        text: Synth.restarting ? t.t("Restarting…") : t.t("Restart synth")
+                        text: Synth.restarting ? Tr.t("Restarting…") : Tr.t("Restart synth")
                         enabled: Synth.usbRestartRequired && !Synth.restarting
                         visible: Synth.usbRestartRequired || Synth.restarting
                         highlighted: true
@@ -154,7 +154,7 @@ Item {
                         visible: root.restartFailed
                         color: Material.color(Material.Red)
                         font.pointSize: UI.fontSize * 0.85
-                        text: t.t("The synth did not come back. It may still be restarting — check its power and Bluetooth.")
+                        text: Tr.t("The synth did not come back. It may still be restarting — check its power and Bluetooth.")
                     }
 
                     // ---- what is attached ----
@@ -170,10 +170,10 @@ Item {
                         color: Material.foreground
                         font.pointSize: UI.fontSize * 0.85
                         text: Synth.usbAttachedCount === 0
-                              ? t.t("No controller detected. Check that it is powered and that its cable carries data.")
+                              ? Tr.t("No controller detected. Check that it is powered and that its cable carries data.")
                               : Synth.usbAttachedCount === 1
-                                ? t.t("Connected: %1").arg(Synth.usbAttachedName)
-                                : t.t("Connected: %1 (+%2 more)")
+                                ? Tr.t("Connected: %1").arg(Synth.usbAttachedName)
+                                : Tr.t("Connected: %1 (+%2 more)")
                                    .arg(Synth.usbAttachedName).arg(Synth.usbAttachedCount - 1)
                     }
                 }
@@ -185,7 +185,7 @@ Item {
         id: restartDialog
         anchors.centerIn: parent
         modal: true
-        title: t.t("Restart the synth?")
+        title: Tr.t("Restart the synth?")
         standardButtons: Dialog.Ok | Dialog.Cancel
         onAccepted: {
             root.restartFailed = false
@@ -199,7 +199,7 @@ Item {
             // Presets, sequencer patterns and the looper all persist; live
             // notes and an unsaved take do not, and that is the part worth
             // saying out loud before the box goes away.
-            text: t.t("The synth will restart to change its USB role. Audio stops and the app reconnects on its own. Saved presets, patterns and loops are kept.")
+            text: Tr.t("The synth will restart to change its USB role. Audio stops and the app reconnects on its own. Saved presets, patterns and loops are kept.")
         }
     }
 
@@ -211,7 +211,7 @@ Item {
     Label {
         anchors.centerIn: parent
         visible: !Synth.ready && !Synth.restarting
-        text: Synth.connected ? t.t("Discovering parameters…") : t.t("Not connected")
+        text: Synth.connected ? Tr.t("Discovering parameters…") : Tr.t("Not connected")
         opacity: 0.5
         color: Material.foreground
     }

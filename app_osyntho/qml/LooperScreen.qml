@@ -98,9 +98,9 @@ Item {
     // all (canPersist), and only as many as the backend has (slotMax: flash 0,
     // SD 7).
     readonly property var exportSources: {
-        var l = [t.t("Live set")]
+        var l = [Tr.t("Live set")]
         if (canPersist)
-            for (var i = 0; i <= slotMax; ++i) l.push(t.ts("Slot %1", String(i)))
+            for (var i = 0; i <= slotMax; ++i) l.push(Tr.ts("Slot %1", String(i)))
         return l
     }
     // Owned here rather than read off the ComboBox: a plain
@@ -124,7 +124,7 @@ Item {
         return out
     }
     readonly property var exportTrackLabels:
-        exportTracks.map(function(i) { return t.ts("Track %1", String(i + 1)) })
+        exportTracks.map(function(i) { return Tr.ts("Track %1", String(i + 1)) })
 
     // Both lists are rebuilt whenever the synth answers, and a selection that
     // no longer exists would otherwise index past the end — a slot that has
@@ -233,7 +233,7 @@ Item {
     // loop.maxlen is still in flight: its discovered default is the base
     // cap (stereo, 8 tracks) and each enabled toggle doubles it. Also
     // correct on S19 firmware, where default/max are the stereo/mono caps.
-    function predictedMax(mono, four) {
+    function predictedMax(mono: bool, four: bool): real {
         // In SD mode the cap is the card's, so neither toggle moves it —
         // predicting a doubling here would make the hint jump and then be
         // corrected by the firmware's own loop.maxlen a moment later.
@@ -271,7 +271,7 @@ Item {
     Connections {
         target: Synth
         function onParamsDiscovered() { root.rebind() }
-        function onParamChanged(id, value) {
+        function onParamChanged(id: int, value: real): void {
             if (id === root.idTrack) root.curTrack = Math.round(value)
             else if (id === root.idMode) {
                 const mode = Math.round(value)
@@ -376,20 +376,20 @@ Item {
                         // stopped (or old firmware without loop.pos): static
                         if (!root.posAvailable || root.curMode === 0) {
                             return root.loopLen > 0
-                                ? t.ts("loop %1 s", root.loopLen.toFixed(2))
-                                : t.ts("no loop — rec records the first track and sets the length (max %1 s)",
+                                ? Tr.ts("loop %1 s", root.loopLen.toFixed(2))
+                                : Tr.ts("no loop — rec records the first track and sets the length (max %1 s)",
                                        root.maxLen.toFixed(0))
                         }
                         // rec armed: punch lands at the next loop start
                         if (root.curMode === 2 && root.recTrack === 0
                                 && root.loopLen > 0) {
-                            return t.ts("punch at loop start — %1 s",
+                            return Tr.ts("punch at loop start — %1 s",
                                 Math.max(0, root.loopLen - root.dispPos).toFixed(1))
                         }
                         var den = root.loopLen > 0 ? root.loopLen : root.maxLen
                         var pos = root.dispPos.toFixed(1) + " / "
                                 + den.toFixed(1) + " s"
-                        return root.curMode === 2 ? t.ts("● rec %1", pos) : pos
+                        return root.curMode === 2 ? Tr.ts("● rec %1", pos) : pos
                     }
                 }
             }
@@ -424,7 +424,7 @@ Item {
                     spacing: 8
                     Switch {
                         id: monoSwitch
-                        text: t.t("Record mono")
+                        text: Tr.t("Record mono")
                         visible: root.idMono >= 0
                         enabled: Synth.connected
                         checked: root.monoOn
@@ -436,7 +436,7 @@ Item {
                     }
                     Switch {
                         id: fourSwitch
-                        text: t.t("4 tracks")
+                        text: Tr.t("4 tracks")
                         visible: root.idTracks >= 0
                         enabled: Synth.connected
                         checked: root.fourTracks
@@ -455,7 +455,7 @@ Item {
                     // hint below just follows it rather than predicting.
                     Switch {
                         id: sdSwitch
-                        text: t.t("Record to SD")
+                        text: Tr.t("Record to SD")
                         visible: root.idStore >= 0
                         enabled: Synth.connected
                         checked: root.sdStore
@@ -469,11 +469,11 @@ Item {
                     opacity: 0.55
                     font.pointSize: UI.fontSize * 0.75
                     text: root.loopLen > 0
-                        ? t.t("applies to the next loop (after clear all)")
+                        ? Tr.t("applies to the next loop (after clear all)")
                         : (root.sdStore
-                           ? t.ts("streamed from the card, max loop %1 s",
+                           ? Tr.ts("streamed from the card, max loop %1 s",
                                   root.maxLen.toFixed(0))
-                           : t.ts("max loop %1 s", root.maxLen.toFixed(0)))
+                           : Tr.ts("max loop %1 s", root.maxLen.toFixed(0)))
                 }
                 // Slot save/load holds the whole set in RAM, so it cannot
                 // take a streamed set — the firmware refuses it and says so
@@ -486,7 +486,7 @@ Item {
                     color: Material.foreground
                     opacity: 0.55
                     font.pointSize: UI.fontSize * 0.75
-                    text: t.t("slot save/load is unavailable for SD sets — "
+                    text: Tr.t("slot save/load is unavailable for SD sets — "
                               + "the tracks are /sd/osynth/liveN.olt")
                 }
             }
@@ -507,7 +507,7 @@ Item {
                     spacing: 6
 
                     Label {
-                        text: t.t("Tracks")
+                        text: Tr.t("Tracks")
                         font.bold: true
                         font.pointSize: UI.fontSize * 0.95
                         color: Material.foreground
@@ -560,28 +560,28 @@ Item {
                         // plain `checked` binding, and a loaded set adopting
                         // the stored format moves these from the firmware side.
                         SyncedButton {
-                            text: t.t("Sync to sequencer")
+                            text: Tr.t("Sync to sequencer")
                             visible: root.idSync >= 0
                             modelChecked: root.syncOn
                             onToggled: Synth.setParam(root.idSync, checked ? 1 : 0)
                             // The clock free-runs, so this works whether or not
                             // the sequencer is playing.
                             ToolTip.visible: hovered
-                            ToolTip.text: t.t("Recording starts on the next "
+                            ToolTip.text: Tr.t("Recording starts on the next "
                                               + "downbeat of the sequencer clock.")
                         }
                         SyncedButton {
-                            text: t.t("Count-in")
+                            text: Tr.t("Count-in")
                             visible: root.idCountIn >= 0
                             modelChecked: root.countInOn
                             onToggled: Synth.setParam(root.idCountIn, checked ? 1 : 0)
                             ToolTip.visible: hovered
-                            ToolTip.text: t.t("Four clicked beats before "
+                            ToolTip.text: Tr.t("Four clicked beats before "
                                               + "recording begins.")
                         }
                         Label {
                             visible: root.armedBeats > 0
-                            text: t.t("waiting") + " " + root.armedBeats
+                            text: Tr.t("waiting") + " " + root.armedBeats
                             color: "#FF5252"
                             font.bold: true
                             anchors.verticalCenter: parent.verticalCenter
@@ -599,12 +599,12 @@ Item {
                         // nothing. The track lights below still show what is
                         // actually recorded; that is the mask's real job.
                         Button {
-                            text: t.t("Clear track")
+                            text: Tr.t("Clear track")
                             enabled: Synth.connected && root.curTrack >= 1
                             onClicked: Synth.setParam(root.idClear, 1)
                         }
                         Button {
-                            text: t.t("Clear all")
+                            text: Tr.t("Clear all")
                             enabled: Synth.connected
                             onClicked: clearAllDialog.open()
                         }
@@ -629,7 +629,7 @@ Item {
                     spacing: 8
 
                     Label {
-                        text: t.t("Slot")
+                        text: Tr.t("Slot")
                         color: Material.foreground
                         opacity: 0.7
                     }
@@ -641,13 +641,13 @@ Item {
                         visible: root.slotMax > 0  // flash backend: only slot 0
                     }
                     Button {
-                        text: t.t("Save set")
+                        text: Tr.t("Save set")
                         enabled: Synth.connected && root.filledMask !== 0
                         // trigger param: writing the slot number performs the save
                         onClicked: Synth.setParam(root.idSave, slotBox.value)
                     }
                     Button {
-                        text: t.t("Load set")
+                        text: Tr.t("Load set")
                         enabled: Synth.connected
                         onClicked: Synth.setParam(root.idLoad, slotBox.value)
                     }
@@ -657,7 +657,7 @@ Item {
                         color: Material.foreground
                         opacity: 0.55
                         font.pointSize: UI.fontSize * 0.75
-                        text: t.t("Flash backend needs the loop stopped; loading replaces the current set.")
+                        text: Tr.t("Flash backend needs the loop stopped; loading replaces the current set.")
                     }
                 }
             }
@@ -692,7 +692,7 @@ Item {
                     spacing: 6
 
                     Label {
-                        text: t.t("Download")
+                        text: Tr.t("Download")
                         font.bold: true
                         font.pointSize: UI.fontSize * 0.95
                         color: Material.foreground
@@ -724,7 +724,7 @@ Item {
                             onActivated: root.exportTrackIndex = currentIndex
                         }
                         Button {
-                            text: t.t("Track WAV")
+                            text: Tr.t("Track WAV")
                             enabled: Synth.connected && !Synth.loopExportActive
                                      && root.exportTracks.length > 0
                             onClicked: Synth.startLoopExport(
@@ -732,14 +732,14 @@ Item {
                                 root.exportTracks[root.exportTrackIndex])
                         }
                         Button {
-                            text: t.t("Mix WAV")
+                            text: Tr.t("Mix WAV")
                             enabled: Synth.connected && !Synth.loopExportActive
                                      && root.exportTracks.length > 0
                             onClicked: Synth.startLoopMixExport(root.exportSource,
                                                                 root.exportSlot)
                         }
                         Button {
-                            text: t.t("Cancel")
+                            text: Tr.t("Cancel")
                             visible: Synth.loopExportActive
                             onClicked: Synth.cancelLoopExport()
                         }
@@ -761,18 +761,18 @@ Item {
                         font.pointSize: UI.fontSize * 0.75
                         text: {
                             if (Synth.loopExportActive)
-                                return t.ts("downloading… %1%",
+                                return Tr.ts("downloading… %1%",
                                             String(Math.round(Synth.loopExportProgress * 100)))
                             const info = Synth.loopExportInfo
                             if (!info.valid || root.exportTracks.length === 0)
-                                return t.t("nothing recorded there")
+                                return Tr.t("nothing recorded there")
                             // Audio comes over the same BLE link as everything
                             // else, so a long take is a long wait — say so
                             // before the user starts one, not during.
-                            return t.ts("%1 track(s), %2 s %3 — a download runs at BLE speed, so allow a while; the mix uses the track levels below",
+                            return Tr.ts("%1 track(s), %2 s %3 — a download runs at BLE speed, so allow a while; the mix uses the track levels below",
                                         String(root.exportTracks.length),
                                         info.seconds.toFixed(1),
-                                        info.mono ? t.t("mono") : t.t("stereo"))
+                                        info.mono ? Tr.t("mono") : Tr.t("stereo"))
                         }
                     }
                 }
@@ -786,10 +786,10 @@ Item {
         id: clearAllDialog
         anchors.centerIn: parent
         modal: true
-        title: t.t("Clear all tracks?")
+        title: Tr.t("Clear all tracks?")
         standardButtons: Dialog.Yes | Dialog.No
         Label {
-            text: t.t("All recorded tracks are discarded and the loop length is reset.")
+            text: Tr.t("All recorded tracks are discarded and the loop length is reset.")
             color: Material.foreground
         }
         onAccepted: Synth.setParam(root.idClear, 2)
@@ -804,7 +804,7 @@ Item {
         // registers no looper params, but so does any discovery that lost them,
         // and the two are indistinguishable from here. Blaming the hardware
         // sent a real enumeration bug undiagnosed for a long time.
-        text: t.t("Looper parameters were not received from this synth.")
+        text: Tr.t("Looper parameters were not received from this synth.")
         opacity: 0.5
         color: Material.foreground
     }
@@ -812,7 +812,7 @@ Item {
     Label {
         anchors.centerIn: parent
         visible: !Synth.ready
-        text: Synth.connected ? t.t("Discovering parameters…") : t.t("Not connected")
+        text: Synth.connected ? Tr.t("Discovering parameters…") : Tr.t("Not connected")
         opacity: 0.5
         color: Material.foreground
     }

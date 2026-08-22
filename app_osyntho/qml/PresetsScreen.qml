@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls.Material
@@ -31,13 +32,13 @@ Item {
 
     Connections {
         target: Synth
-        function onPresetsChanged(eng) { if (eng === screen.engine) screen.refresh() }
+        function onPresetsChanged(eng: int): void { if (eng === screen.engine) screen.refresh() }
         function onEngineChanged() { screen.engine = Synth.engine; screen.requestList(); screen.refresh() }
         function onReadyChanged() { screen.requestList() }
         function onConnectedChanged() { if (Synth.connected) screen.requestList() }
         // exportPresetJson() had to load the slot to read it; the file text
         // comes back here once the values have landed.
-        function onPresetJsonReady(json, name) { UI.exportJsonRequested(json, name) }
+        function onPresetJsonReady(json: string, name: string): void { UI.exportJsonRequested(json, name) }
     }
 
     Connections {
@@ -46,7 +47,7 @@ Item {
         // to the app's library instead, and both pages are alive at once. The
         // name seeds the save panel, ready to store it — and raises it, since
         // the imported patch is playing but is in no slot yet.
-        function onJsonImported(page, text) {
+        function onJsonImported(page: string, text: string): void {
             if (page !== "preset") return
             const result = Synth.importPatchJson(text)
             if (result.ok && result.name.length > 0) {
@@ -64,7 +65,7 @@ Item {
         RowLayout {
             Layout.fillWidth: true
             Label {
-                text: t.t("Presets") + " — " + t.t(Synth.engineName)
+                text: Tr.t("Presets") + " — " + Tr.t(Synth.engineName)
                 font.bold: true
                 font.pointSize: UI.fontSize * 1.1
                 color: Material.foreground
@@ -72,23 +73,23 @@ Item {
                 Layout.fillWidth: true
             }
             ToolButton {
-                text: t.t("Save…")
+                text: Tr.t("Save…")
                 // Raises the save panel at the foot of the page. Pressing it
                 // again is the way back out of it, so the state is shown.
                 highlighted: screen.saveOpen
                 onClicked: screen.saveOpen = !screen.saveOpen
                 ToolTip.visible: hovered
-                ToolTip.text: t.t("Store the live sound in one of the synth's user slots")
+                ToolTip.text: Tr.t("Store the live sound in one of the synth's user slots")
             }
             ToolButton {
-                text: t.t("Import…")
+                text: Tr.t("Import…")
                 // Applies the file to the live sound; the save panel then
                 // writes it to a slot, which is the synth's own step.
                 enabled: Synth.connected && Synth.ready
                 onClicked: UI.importJsonRequested("preset")
             }
             ToolButton {
-                text: t.t("Refresh")
+                text: Tr.t("Refresh")
                 enabled: Synth.connected
                 onClicked: screen.requestList()
             }
@@ -131,9 +132,9 @@ Item {
                     highlighted: tile.modelData.slot === Synth.presetSlot
                     onClicked: Synth.loadPreset(screen.engine, tile.modelData.slot)
                     ToolTip.visible: hovered
-                    ToolTip.text: (tile.modelData.factory ? t.t("Factory preset")
-                                                          : t.t("User preset"))
-                                  + " — " + t.t("tap to load")
+                    ToolTip.text: (tile.modelData.factory ? Tr.t("Factory preset")
+                                                          : Tr.t("User preset"))
+                                  + " — " + Tr.t("tap to load")
 
                     contentItem: ColumnLayout {
                         spacing: 2
@@ -174,14 +175,14 @@ Item {
                                 enabled: Synth.connected && Synth.ready
                                 onClicked: Synth.exportPresetJson(screen.engine, tile.modelData.slot)
                                 ToolTip.visible: hovered
-                                ToolTip.text: t.t("Export this preset to a JSON file. It is loaded first — the only way to read a slot.")
+                                ToolTip.text: Tr.t("Export this preset to a JSON file. It is loaded first — the only way to read a slot.")
                             }
                         }
 
                         Label {
                             Layout.fillWidth: true
                             text: (tile.modelData.name && tile.modelData.name.length)
-                                  ? tile.modelData.name : t.t("(unnamed)")
+                                  ? tile.modelData.name : Tr.t("(unnamed)")
                             color: Material.foreground
                             opacity: (tile.modelData.name && tile.modelData.name.length) ? 1.0 : 0.5
                             elide: Label.ElideRight
@@ -197,7 +198,7 @@ Item {
             Label {
                 anchors.centerIn: parent
                 visible: presetGrid.count === 0
-                text: Synth.connected ? t.t("No presets") : t.t("Not connected")
+                text: Synth.connected ? Tr.t("No presets") : Tr.t("Not connected")
                 opacity: 0.5
                 color: Material.foreground
             }
@@ -215,7 +216,7 @@ Item {
                 anchors.fill: parent
                 anchors.margins: 8
                 spacing: 8
-                Label { text: t.t("Save to slot"); color: Material.foreground }
+                Label { text: Tr.t("Save to slot"); color: Material.foreground }
                 SpinBox {
                     id: slotBox
                     from: 48
@@ -225,10 +226,10 @@ Item {
                 TextField {
                     id: nameField
                     Layout.fillWidth: true
-                    placeholderText: t.t("Preset name")
+                    placeholderText: Tr.t("Preset name")
                 }
                 Button {
-                    text: t.t("Save")
+                    text: Tr.t("Save")
                     enabled: Synth.connected
                     onClicked: {
                         Synth.savePreset(screen.engine, slotBox.value, nameField.text.trim())

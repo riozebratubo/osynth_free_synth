@@ -92,7 +92,7 @@ Item {
                         spacing: 8
 
                         Label {
-                            text: t.t("Kit")
+                            text: Tr.t("Kit")
                             color: Material.foreground
                             Layout.alignment: Qt.AlignVCenter
                         }
@@ -140,7 +140,7 @@ Item {
                         // binding, after which a preset load moving drums.choke
                         // no longer moves the button. See SyncedButton.qml.
                         SyncedButton {
-                            text: t.t("Choke groups")
+                            text: Tr.t("Choke groups")
                             modelChecked: chokeVal.on
                             onToggled: if (root.pidChoke > 0) Synth.setParam(root.pidChoke, checked ? 1 : 0)
                         }
@@ -154,7 +154,7 @@ Item {
                 wrapMode: Text.WordWrap
                 opacity: 0.6
                 color: Material.foreground
-                text: t.t("This firmware has no drum kit built in. Build one with "
+                text: Tr.t("This firmware has no drum kit built in. Build one with "
                           + "tools/gen_drumkit.py and reflash, or put a kit on the "
                           + "SD card.")
             }
@@ -249,6 +249,6 @@ Item {
         visible: !Synth.ready
         opacity: 0.5
         color: Material.foreground
-        text: Synth.connected ? t.t("Discovering parameters…") : t.t("Not connected")
+        text: Synth.connected ? Tr.t("Discovering parameters…") : Tr.t("Not connected")
     }
 }

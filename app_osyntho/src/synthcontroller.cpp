@@ -355,7 +355,7 @@ void SynthController::trackRequest(quint8 seq, const QByteArray& frame,
 }
 
 void SynthController::forgetRequest(quint8 seq) {
-  if (m_sentRequests.remove(seq) > 0) m_sentRequestOrder.removeAll(seq);
+  if (m_sentRequests.remove(seq)) m_sentRequestOrder.removeAll(seq);
 }
 
 void SynthController::onRequestBusy(quint8 seq) {
@@ -1530,26 +1530,30 @@ bool SynthController::paramValueKnown(int id) const {
   return it != m_params.constEnd() && it->valueKnown;
 }
 
-QVariantMap SynthController::paramMeta(int id) const {
-  QVariantMap m;
+ParamMeta SynthController::paramMeta(int id) const {
+  ParamMeta m;
+  // Range-checked before the narrowing cast: quint16(-1) is 0xFFFF, which is
+  // the protocol's "every id" sentinel rather than a parameter, and QML passes
+  // -1 freely for a control that has not resolved its id yet.
+  if (id < 0 || id > 0xFFFF) return m;
   const auto it = m_params.constFind(quint16(id));
-  const bool exists = it != m_params.constEnd() && it->infoKnown;
-  m.insert("exists", exists);
-  if (!exists) return m;
+  if (it == m_params.constEnd() || !it->infoKnown) return m;
   const ParamInfo& pi = it->info;
-  m.insert("id", pi.id);
-  m.insert("name", pi.name);
-  m.insert("type", pi.type);
-  m.insert("curve", pi.curve);
-  m.insert("min", pi.min);
-  m.insert("max", pi.max);
-  m.insert("def", pi.def);
-  m.insert("enumNames", pi.enumNames);
+  m.exists = true;
+  m.id = pi.id;
+  m.name = pi.name;
+  m.type = pi.type;
+  m.curve = pi.curve;
+  m.min = pi.min;
+  m.max = pi.max;
+  m.def = pi.def;
+  m.enumNames = pi.enumNames;
   return m;
 }
 
-QVariantList SynthController::paramIds() const {
-  QVariantList out;
+QList<int> SynthController::paramIds() const {
+  QList<int> out;
+  out.reserve(m_paramOrder.size());
   for (quint16 id : m_paramOrder) out.append(id);
   return out;
 }
@@ -1597,8 +1601,8 @@ static bool isReadOnlyTelemetry(const QString& name) {
 // Feeds ParamGroup, and nothing else — so the telemetry filter belongs here
 // rather than at each call site. A screen that wants to *display* one of those
 // values reads it through ParamValue, which is not a control.
-QVariantList SynthController::paramIdsByPrefix(const QString& prefix) const {
-  QVariantList out;
+QList<int> SynthController::paramIdsByPrefix(const QString& prefix) const {
+  QList<int> out;
   for (quint16 id : m_paramOrder) {
     const Param& p = m_params.value(id);
     if (!p.infoKnown || !p.info.name.startsWith(prefix)) continue;

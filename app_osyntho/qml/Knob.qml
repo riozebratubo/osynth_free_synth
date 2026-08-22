@@ -11,7 +11,7 @@ Item {
     id: root
 
     property int paramId: -1
-    readonly property var meta: paramId >= 0 ? Synth.paramMeta(paramId) : ({ exists: false })
+    readonly property paramMeta meta: Synth.paramMeta(root.paramId)
     readonly property bool isExp: meta.exists && meta.curve === 1 && meta.min > 0
     readonly property bool isInt: meta.exists && meta.type === 1
     property real actualValue: meta.exists ? Synth.paramValue(paramId) : 0
@@ -20,7 +20,7 @@ Item {
     implicitWidth: 84
     implicitHeight: 100
 
-    function posToValue(pos) {
+    function posToValue(pos: real): real {
         if (!meta.exists)
             return 0
         var v = isExp ? meta.min * Math.pow(meta.max / meta.min, pos)
@@ -29,14 +29,14 @@ Item {
             v = Math.round(v)
         return v
     }
-    function valueToPos(v) {
+    function valueToPos(v: real): real {
         if (!meta.exists || meta.max === meta.min)
             return 0
         var p = isExp ? Math.log(v / meta.min) / Math.log(meta.max / meta.min)
                       : (v - meta.min) / (meta.max - meta.min)
         return Math.max(0, Math.min(1, p))
     }
-    function fmt(v) {
+    function fmt(v: real): string {
         if (!meta.exists)
             return ""
         if (isInt)
@@ -57,7 +57,7 @@ Item {
         Label {
             width: parent.width
             horizontalAlignment: Text.AlignHCenter
-            text: meta.exists ? meta.name.split('.').pop() : ""
+            text: root.meta.exists ? root.meta.name.split('.').pop() : ""
             font.pointSize: UI.fontSize * 0.68
             elide: Text.ElideRight
             color: Material.foreground
@@ -108,7 +108,7 @@ Item {
 
     Connections {
         target: Synth
-        function onParamChanged(id, value) {
+        function onParamChanged(id: int, value: real): void {
             if (id === root.paramId && !dial.pressed) {
                 root.actualValue = value
                 root.syncDial()

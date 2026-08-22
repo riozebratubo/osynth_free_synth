@@ -18,6 +18,7 @@
 #include "src/ble/synthprotocol.h"
 #include "src/business/databaseclient.h"
 #include "src/loopwav.h"
+#include "src/paramtypes.h"
 
 // Drives one connected osynth over SynthCtl v1.
 //
@@ -36,87 +37,87 @@
 // and App wired it up, which cost a dependency nothing ever asked a question
 // through — and made it look, to anyone reading, as though some behaviour here
 // were user-configurable.)
-class SynthController : public QObject, public DatabaseClient {
+class SynthController final : public QObject, public DatabaseClient {
   Q_OBJECT
 
-  Q_PROPERTY(bool connected READ connected NOTIFY connectedChanged)
-  Q_PROPERTY(bool ready READ ready NOTIFY readyChanged)
+  Q_PROPERTY(bool connected READ connected NOTIFY connectedChanged FINAL)
+  Q_PROPERTY(bool ready READ ready NOTIFY readyChanged FINAL)
 
-  Q_PROPERTY(int engine READ engine NOTIFY engineChanged)
-  Q_PROPERTY(QString engineName READ engineName NOTIFY engineChanged)
-  Q_PROPERTY(int caps READ caps NOTIFY engineChanged)
+  Q_PROPERTY(int engine READ engine NOTIFY engineChanged FINAL)
+  Q_PROPERTY(QString engineName READ engineName NOTIFY engineChanged FINAL)
+  Q_PROPERTY(int caps READ caps NOTIFY engineChanged FINAL)
 
   // [{n, e}] for the engine picker: which engines the *connected* firmware
   // actually has, so the app never offers a slot that cannot be bound. Derived
   // from engine.type's enum labels rather than from a list here, which is what
   // lets one app build talk to firmware older than itself.
-  Q_PROPERTY(QVariantList engineList READ engineList NOTIFY engineListChanged)
+  Q_PROPERTY(QVariantList engineList READ engineList NOTIFY engineListChanged FINAL)
 
-  Q_PROPERTY(int presetSlot READ presetSlot NOTIFY presetChanged)
-  Q_PROPERTY(QString presetName READ presetName NOTIFY presetChanged)
-  Q_PROPERTY(bool presetIsFactory READ presetIsFactory NOTIFY presetChanged)
+  Q_PROPERTY(int presetSlot READ presetSlot NOTIFY presetChanged FINAL)
+  Q_PROPERTY(QString presetName READ presetName NOTIFY presetChanged FINAL)
+  Q_PROPERTY(bool presetIsFactory READ presetIsFactory NOTIFY presetChanged FINAL)
 
-  Q_PROPERTY(QString synthTarget READ synthTarget NOTIFY infoChanged)
-  Q_PROPERTY(QString firmwareVersion READ firmwareVersion NOTIFY infoChanged)
-  Q_PROPERTY(int protocolVersion READ protocolVersion NOTIFY infoChanged)
+  Q_PROPERTY(QString synthTarget READ synthTarget NOTIFY infoChanged FINAL)
+  Q_PROPERTY(QString firmwareVersion READ firmwareVersion NOTIFY infoChanged FINAL)
+  Q_PROPERTY(int protocolVersion READ protocolVersion NOTIFY infoChanged FINAL)
 
   // Kept for a future osynth firmware-update capability (none today).
-  Q_PROPERTY(bool firmwareUpdateSupported READ firmwareUpdateSupported CONSTANT)
-  Q_PROPERTY(bool isUpdatingFirmware READ isUpdatingFirmware NOTIFY isUpdatingFirmwareChanged)
+  Q_PROPERTY(bool firmwareUpdateSupported READ firmwareUpdateSupported CONSTANT FINAL)
+  Q_PROPERTY(bool isUpdatingFirmware READ isUpdatingFirmware NOTIFY isUpdatingFirmwareChanged FINAL)
 
   // --- sequencer (S23) ---
   // The firmware's compile-time sizing: a PSRAM build has 8 tracks x 8
   // patterns, a classic ESP32 half that. The grid binds to these rather than
   // assuming, so one UI serves both.
-  Q_PROPERTY(bool seqAvailable READ seqAvailable NOTIFY seqInfoChanged)
-  Q_PROPERTY(int seqTracks READ seqTracks NOTIFY seqInfoChanged)
-  Q_PROPERTY(int seqPatterns READ seqPatterns NOTIFY seqInfoChanged)
-  Q_PROPERTY(int seqMaxSteps READ seqMaxSteps NOTIFY seqInfoChanged)
-  Q_PROPERTY(int seqPlockCapacity READ seqPlockCapacity NOTIFY seqInfoChanged)
-  Q_PROPERTY(int seqPlockUsed READ seqPlockUsed NOTIFY seqInfoChanged)
+  Q_PROPERTY(bool seqAvailable READ seqAvailable NOTIFY seqInfoChanged FINAL)
+  Q_PROPERTY(int seqTracks READ seqTracks NOTIFY seqInfoChanged FINAL)
+  Q_PROPERTY(int seqPatterns READ seqPatterns NOTIFY seqInfoChanged FINAL)
+  Q_PROPERTY(int seqMaxSteps READ seqMaxSteps NOTIFY seqInfoChanged FINAL)
+  Q_PROPERTY(int seqPlockCapacity READ seqPlockCapacity NOTIFY seqInfoChanged FINAL)
+  Q_PROPERTY(int seqPlockUsed READ seqPlockUsed NOTIFY seqInfoChanged FINAL)
   // Which pattern/track the grid is showing (app-side view state).
-  Q_PROPERTY(int editPattern READ editPattern WRITE setEditPattern NOTIFY editTargetChanged)
-  Q_PROPERTY(int editTrack READ editTrack WRITE setEditTrack NOTIFY editTargetChanged)
+  Q_PROPERTY(int editPattern READ editPattern WRITE setEditPattern NOTIFY editTargetChanged FINAL)
+  Q_PROPERTY(int editTrack READ editTrack WRITE setEditTrack NOTIFY editTargetChanged FINAL)
   // Live playhead, mirrored from seq.pos (-1 when stopped).
-  Q_PROPERTY(int playhead READ playhead NOTIFY playheadChanged)
-  Q_PROPERTY(bool playing READ playing NOTIFY playheadChanged)
+  Q_PROPERTY(int playhead READ playhead NOTIFY playheadChanged FINAL)
+  Q_PROPERTY(bool playing READ playing NOTIFY playheadChanged FINAL)
 
   // --- drum kit (S22) ---
-  Q_PROPERTY(QVariantList kitSlots READ kitSlots NOTIFY kitChanged)
-  Q_PROPERTY(QVariantList kits READ kits NOTIFY kitChanged)
-  Q_PROPERTY(int currentKit READ currentKit NOTIFY kitChanged)
+  Q_PROPERTY(QVariantList kitSlots READ kitSlots NOTIFY kitChanged FINAL)
+  Q_PROPERTY(QVariantList kits READ kits NOTIFY kitChanged FINAL)
+  Q_PROPERTY(int currentKit READ currentKit NOTIFY kitChanged FINAL)
   // Note of the kit's first populated slot — the kick in the factory kit.
   // The sensible starting pick for drum placement, since the melodic
   // default (60) answers to no slot at all. -1 before a kit arrives.
-  Q_PROPERTY(int defaultDrumNote READ defaultDrumNote NOTIFY kitChanged)
+  Q_PROPERTY(int defaultDrumNote READ defaultDrumNote NOTIFY kitChanged FINAL)
 
   // ---- modular patch graph (S28) ----
   // graphAvailable stays false until GRAPH_INFO answers OK, so the patch page
   // hides itself on firmware built without the modular engine rather than
   // offering controls that would all fail.
-  Q_PROPERTY(bool graphAvailable READ graphAvailable NOTIFY graphInfoChanged)
-  Q_PROPERTY(int graphMaxNodes READ graphMaxNodes NOTIFY graphInfoChanged)
-  Q_PROPERTY(int graphMaxInputs READ graphMaxInputs NOTIFY graphInfoChanged)
-  Q_PROPERTY(int graphOutSlot READ graphOutSlot NOTIFY graphInfoChanged)
-  Q_PROPERTY(int graphEngineIndex READ graphEngineIndex NOTIFY graphInfoChanged)
-  Q_PROPERTY(int graphCost READ graphCost NOTIFY graphCostChanged)
-  Q_PROPERTY(int graphCostBudget READ graphCostBudget NOTIFY graphInfoChanged)
+  Q_PROPERTY(bool graphAvailable READ graphAvailable NOTIFY graphInfoChanged FINAL)
+  Q_PROPERTY(int graphMaxNodes READ graphMaxNodes NOTIFY graphInfoChanged FINAL)
+  Q_PROPERTY(int graphMaxInputs READ graphMaxInputs NOTIFY graphInfoChanged FINAL)
+  Q_PROPERTY(int graphOutSlot READ graphOutSlot NOTIFY graphInfoChanged FINAL)
+  Q_PROPERTY(int graphEngineIndex READ graphEngineIndex NOTIFY graphInfoChanged FINAL)
+  Q_PROPERTY(int graphCost READ graphCost NOTIFY graphCostChanged FINAL)
+  Q_PROPERTY(int graphCostBudget READ graphCostBudget NOTIFY graphInfoChanged FINAL)
   // [{kind,name,rate,cost,inputs:[..],params:[..]}], indexed by kind
-  Q_PROPERTY(QVariantList graphKinds READ graphKinds NOTIFY graphKindsChanged)
+  Q_PROPERTY(QVariantList graphKinds READ graphKinds NOTIFY graphKindsChanged FINAL)
   // [{slot,kind,in:[..],x,y}] — one entry per slot, empty slots included
-  Q_PROPERTY(QVariantList graphNodes READ graphNodes NOTIFY graphChanged)
-  Q_PROPERTY(QString graphError READ graphError NOTIFY graphErrorChanged)
+  Q_PROPERTY(QVariantList graphNodes READ graphNodes NOTIFY graphChanged FINAL)
+  Q_PROPERTY(QString graphError READ graphError NOTIFY graphErrorChanged FINAL)
 
   // ---- loop track download (S33) ----
   // False until an OP_LOOP_DUMP request has actually been answered, so the
   // looper page keeps its download controls off the screen on firmware that
   // has no such opcode rather than showing a button that can only fail.
-  Q_PROPERTY(bool loopExportSupported READ loopExportSupported NOTIFY loopExportChanged)
-  Q_PROPERTY(bool loopExportActive READ loopExportActive NOTIFY loopExportChanged)
-  Q_PROPERTY(double loopExportProgress READ loopExportProgress NOTIFY loopExportChanged)
+  Q_PROPERTY(bool loopExportSupported READ loopExportSupported NOTIFY loopExportChanged FINAL)
+  Q_PROPERTY(bool loopExportActive READ loopExportActive NOTIFY loopExportChanged FINAL)
+  Q_PROPERTY(double loopExportProgress READ loopExportProgress NOTIFY loopExportChanged FINAL)
   // What the last probe found: {valid,source,slot,filled,tracks,frames,rate,
   // seconds,codec,mono,trackBytes}. `filled` is a bitmask, track 1 = bit 0.
-  Q_PROPERTY(QVariantMap loopExportInfo READ loopExportInfo NOTIFY loopExportInfoChanged)
+  Q_PROPERTY(QVariantMap loopExportInfo READ loopExportInfo NOTIFY loopExportInfoChanged FINAL)
 
   // ---- USB role (S35) ----
   // What the OTG port is doing, straight from the synth. `usbHostSupported`
@@ -128,16 +129,16 @@ class SynthController : public QObject, public DatabaseClient {
   // `usbRestartRequired` is the synth's own comparison of the stored setting
   // against the live role, so it survives a disconnect: the app never has to
   // remember that a change is pending, it just asks again.
-  Q_PROPERTY(bool usbStatusKnown READ usbStatusKnown NOTIFY usbStatusChanged)
-  Q_PROPERTY(bool usbHostSupported READ usbHostSupported NOTIFY usbStatusChanged)
-  Q_PROPERTY(int usbActiveMode READ usbActiveMode NOTIFY usbStatusChanged)
-  Q_PROPERTY(int usbRequestedMode READ usbRequestedMode NOTIFY usbStatusChanged)
-  Q_PROPERTY(bool usbRestartRequired READ usbRestartRequired NOTIFY usbStatusChanged)
-  Q_PROPERTY(int usbAttachedCount READ usbAttachedCount NOTIFY usbStatusChanged)
-  Q_PROPERTY(QString usbAttachedName READ usbAttachedName NOTIFY usbStatusChanged)
+  Q_PROPERTY(bool usbStatusKnown READ usbStatusKnown NOTIFY usbStatusChanged FINAL)
+  Q_PROPERTY(bool usbHostSupported READ usbHostSupported NOTIFY usbStatusChanged FINAL)
+  Q_PROPERTY(int usbActiveMode READ usbActiveMode NOTIFY usbStatusChanged FINAL)
+  Q_PROPERTY(int usbRequestedMode READ usbRequestedMode NOTIFY usbStatusChanged FINAL)
+  Q_PROPERTY(bool usbRestartRequired READ usbRestartRequired NOTIFY usbStatusChanged FINAL)
+  Q_PROPERTY(int usbAttachedCount READ usbAttachedCount NOTIFY usbStatusChanged FINAL)
+  Q_PROPERTY(QString usbAttachedName READ usbAttachedName NOTIFY usbStatusChanged FINAL)
   // True from the moment a restart is asked for until the link is back and
   // answering. Drives the page's "restarting…" state; see restartSynth().
-  Q_PROPERTY(bool restarting READ restarting NOTIFY restartingChanged)
+  Q_PROPERTY(bool restarting READ restarting NOTIFY restartingChanged FINAL)
 
  public:
   explicit SynthController(QObject* parent = nullptr);
@@ -170,15 +171,18 @@ class SynthController : public QObject, public DatabaseClient {
   // legitimate-looking zero — so anything that re-reads on a signal
   // must check this before overwriting state learned from an event.
   Q_INVOKABLE bool paramValueKnown(int id) const;
-  Q_INVOKABLE QVariantMap paramMeta(int id) const;  // exists,name,type,curve,min,max,def,enumNames
-  Q_INVOKABLE QVariantList paramIds() const;
+  // A default-constructed ParamMeta (exists == false) for any id the synth
+  // has not described, including an out-of-range one — so callers can bind
+  // straight to it without a >= 0 guard.
+  Q_INVOKABLE ParamMeta paramMeta(int id) const;
+  Q_INVOKABLE QList<int> paramIds() const;
   QVariantList engineList() const;
   // UI helpers: resolve by name, or gather every registered id whose name starts
   // with `prefix` (registration order). paramPickerList returns [{id,name}] for
   // the mod-matrix destination picker.
   Q_INVOKABLE int paramIdForName(const QString& name) const;
   Q_INVOKABLE QString paramName(int id) const;
-  Q_INVOKABLE QVariantList paramIdsByPrefix(const QString& prefix) const;
+  Q_INVOKABLE QList<int> paramIdsByPrefix(const QString& prefix) const;
   Q_INVOKABLE QVariantList paramPickerList() const;
 
   // --- commands ----------------------------------------------------------

@@ -21,7 +21,7 @@ Item {
             // header + engine picker: full width, so they keep their own lines
             Label {
                 width: panels.contentWidth
-                text: Synth.ready ? t.ts("%1 engine", t.t(Synth.engineName)) : t.t("Discovering…")
+                text: Synth.ready ? Tr.ts("%1 engine", Tr.t(Synth.engineName)) : Tr.t("Discovering…")
                 font.pointSize: UI.fontSize * 1.4
                 font.bold: true
                 color: Material.foreground
@@ -40,7 +40,7 @@ Item {
                     model: Synth.engineList
                     delegate: Button {
                         required property var modelData
-                        text: t.t(modelData.n)
+                        text: Tr.t(modelData.n)
                         highlighted: Synth.engine === modelData.e
                         enabled: Synth.connected
                         onClicked: Synth.selectEngine(modelData.e)
@@ -61,14 +61,14 @@ Item {
                     id: presetRow
                     anchors.fill: parent
                     anchors.margins: 10
-                    Label { text: t.t("Preset"); opacity: 0.7; color: Material.foreground }
+                    Label { text: Tr.t("Preset"); opacity: 0.7; color: Material.foreground }
                     Label {
                         Layout.fillWidth: true
                         horizontalAlignment: Text.AlignRight
                         color: Material.foreground
                         text: Synth.presetSlot >= 0
                             ? (Synth.presetSlot + (Synth.presetName ? (" · " + Synth.presetName) : "")
-                               + (Synth.presetIsFactory ? ("  (" + t.t("factory") + ")") : ""))
+                               + (Synth.presetIsFactory ? ("  (" + Tr.t("factory") + ")") : ""))
                             : "—"
                     }
                 }
@@ -104,21 +104,21 @@ Item {
                     Column {
                         Layout.fillWidth: true
                         Label {
-                            text: t.t("Start from scratch")
+                            text: Tr.t("Start from scratch")
                             color: Material.foreground
                             opacity: 0.7
                         }
                         Label {
                             width: parent.width
                             wrapMode: Text.WordWrap
-                            text: t.t("The synth remembers how you left it and comes back that way. This puts it back to the sound it had out of the box.")
+                            text: Tr.t("The synth remembers how you left it and comes back that way. This puts it back to the sound it had out of the box.")
                             color: Material.foreground
                             opacity: 0.5
                             font.pointSize: Math.max(8, UI.fontSize * 0.75)
                         }
                     }
                     Button {
-                        text: t.t("Reset…")
+                        text: Tr.t("Reset…")
                         enabled: Synth.connected
                         onClicked: resetDialog.open()
                     }
@@ -132,7 +132,7 @@ Item {
         anchors.centerIn: Overlay.overlay
         modal: true
         focus: true
-        title: t.t("Reset the synth?")
+        title: Tr.t("Reset the synth?")
         standardButtons: Dialog.Ok | Dialog.Cancel
         width: Math.min(parent ? parent.width - 32 : 420, 420)
 
@@ -142,7 +142,7 @@ Item {
             // Says exactly what goes and what stays. The firmware draws the
             // same line: the working state is the patch, the graph and the
             // sequencer; the NVS settings and the looper are not in it.
-            text: t.t("Every sound setting goes back to its default, and the sequencer patterns and the modular patch are cleared. Your saved presets, the patch library, the looper and the volume and input settings are left alone.")
+            text: Tr.t("Every sound setting goes back to its default, and the sequencer patterns and the modular patch are cleared. Your saved presets, the patch library, the looper and the volume and input settings are left alone.")
         }
 
         onAccepted: {
@@ -153,7 +153,7 @@ Item {
     Label {
         anchors.centerIn: parent
         visible: !Synth.connected
-        text: t.t("Not connected")
+        text: Tr.t("Not connected")
         opacity: 0.5
         color: Material.foreground
     }

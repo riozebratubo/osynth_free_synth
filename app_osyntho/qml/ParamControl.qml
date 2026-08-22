@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls.Material
 
@@ -19,10 +20,10 @@ Item {
     // so the delegates are never recreated and every control stayed invisible.
     // Bumping this re-evaluates `meta` in place.
     property int metaRevision: 0
-    readonly property var meta: {
+    readonly property paramMeta meta: {
         const dep = pc.metaRevision  // read only to register the dependency
         void dep
-        return pc.paramId >= 0 ? Synth.paramMeta(pc.paramId) : ({ exists: false })
+        return Synth.paramMeta(pc.paramId)
     }
 
     // paramsDiscovered fires several times a second for the length of a
@@ -36,8 +37,8 @@ Item {
         target: Synth
         function onParamsDiscovered() {
             if (!pc.meta.exists) { pc.metaRevision++; return }
-            const now = pc.paramId >= 0 ? Synth.paramMeta(pc.paramId) : null
-            if (!now || !now.exists || now.name !== pc.meta.name) pc.metaRevision++
+            const now = Synth.paramMeta(pc.paramId)
+            if (!now.exists || now.name !== pc.meta.name) pc.metaRevision++
         }
     }
 
@@ -89,7 +90,7 @@ Item {
                     onToggled: if (!syncing) Synth.setParam(pc.paramId, checked ? 1 : 0)
                     Connections {
                         target: Synth
-                        function onParamChanged(id, value) {
+                        function onParamChanged(id: int, value: real): void {
                             if (id === pc.paramId) {
                                 sw.syncing = true
                                 sw.checked = Math.round(value) === 1

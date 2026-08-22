@@ -1,6 +1,7 @@
 #include "translator.h"
 
 #include <QDebug>
+#include <QtQml/qqmlengine.h>
 
 Translator& Translator::instance() {
   static Translator myInstance;
@@ -401,4 +402,10 @@ Translator::Translator() {
       "Q…I e 1…8 tocam os pads de bateria. Clique para tocarem uma segunda oitava.";
   pt["Q…I and 1…8 play a second octave. Click to fire the drum pads instead."] =
       "Q…I e 1…8 tocam uma segunda oitava. Clique para tocarem os pads de bateria.";
+}
+
+Translator* Translator::create(QQmlEngine*, QJSEngine*) {
+  Translator* translator = &Translator::instance();
+  QJSEngine::setObjectOwnership(translator, QJSEngine::CppOwnership);
+  return translator;
 }

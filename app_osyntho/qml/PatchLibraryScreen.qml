@@ -25,7 +25,7 @@ Item {
     // the picker's: it has to name every engine that could have written a row
     // in the DB, including ones the connected synth does not have. Positional
     // and append-only for the same reason the firmware's enum is.
-    readonly property var engineNames: ["Subtractive", "Additive", "FM", "Wavetable",
+    readonly property list<string> engineNames: ["Subtractive", "Additive", "FM", "Wavetable",
                                         "Modular", "Granular"]
 
     function refresh() { patchList = Synth.patches(-1) }
@@ -35,7 +35,7 @@ Item {
         target: UI
         // Answers this page's Import button only; the Presets page has one of
         // its own, and both pages are alive in the SwipeView at the same time.
-        function onJsonImported(page, text) {
+        function onJsonImported(page: string, text: string): void {
             if (page !== "library") return
             if (Synth.importPatchesToLibrary(text).ok) screen.refresh()
         }
@@ -49,7 +49,7 @@ Item {
         RowLayout {
             Layout.fillWidth: true
             Label {
-                text: t.t("Patch library")
+                text: Tr.t("Patch library")
                 font.bold: true
                 font.pointSize: UI.fontSize * 1.1
                 color: Material.foreground
@@ -57,16 +57,16 @@ Item {
                 Layout.fillWidth: true
             }
             Button {
-                text: t.t("Import…")
+                text: Tr.t("Import…")
                 // Stores the file's patches here and leaves the live sound
                 // alone — applying one is the Presets page's Import. Needs no
                 // connection either: the library is the app's own database.
                 onClicked: UI.importJsonRequested("library")
                 ToolTip.visible: hovered
-                ToolTip.text: t.t("Import patches from a JSON file into this library, without playing them")
+                ToolTip.text: Tr.t("Import patches from a JSON file into this library, without playing them")
             }
             Button {
-                text: t.t("Export all…")
+                text: Tr.t("Export all…")
                 // Exports from the stored rows, so it works disconnected; the
                 // parameter names are filled in only when the synth is there to
                 // supply them (see patchToJson).
@@ -74,7 +74,7 @@ Item {
                 onClicked: UI.exportJsonRequested(Synth.libraryToJson(), "osyntho-patches")
             }
             Button {
-                text: t.t("Save current…")
+                text: Tr.t("Save current…")
                 enabled: Synth.connected && Synth.ready
                 onClicked: { nameDialog.mode = "save"; nameDialog.patchId = -1; nameDialog.field = ""; nameDialog.open() }
             }
@@ -86,19 +86,19 @@ Item {
             Label {
                 // No vertical anchor: a Flow positions its children, and
                 // anchoring inside a positioner is refused at runtime.
-                text: t.t("Load with the patch:")
+                text: Tr.t("Load with the patch:")
                 color: Material.foreground
                 opacity: 0.7
             }
             Switch {
-                text: t.t("Synth volume")
+                text: Tr.t("Synth volume")
                 checked: screen.loadMasterVolume
                 onToggled: {
                     screen.loadMasterVolume = checked
                     App.saveSetting("patch_load_master_volume", checked ? "true" : "false")
                 }
                 ToolTip.visible: hovered
-                ToolTip.text: t.t("Also set the master volume a patch was saved with. Off by default: that is the level you are monitoring at, not part of the sound.")
+                ToolTip.text: Tr.t("Also set the master volume a patch was saved with. Off by default: that is the level you are monitoring at, not part of the sound.")
             }
             Switch {
                 id: outLevelSwitch
@@ -111,7 +111,7 @@ Item {
                 // signal is what re-runs it.
                 property int outLevelId: -1
                 visible: Synth.ready && outLevelId >= 0
-                text: t.t("Headphone level")
+                text: Tr.t("Headphone level")
                 checked: screen.loadOutLevel
                 onToggled: {
                     screen.loadOutLevel = checked
@@ -125,7 +125,7 @@ Item {
                     }
                 }
                 ToolTip.visible: hovered
-                ToolTip.text: t.t("Also set the analogue output level a patch was saved with. Off by default: it is set once by ear for what is plugged into the jack.")
+                ToolTip.text: Tr.t("Also set the analogue output level a patch was saved with. Off by default: it is set once by ear for what is plugged into the jack.")
             }
         }
 
@@ -147,19 +147,19 @@ Item {
                     Column {
                         Layout.fillWidth: true
                         Label {
-                            text: modelData.name && modelData.name.length ? modelData.name : t.t("(unnamed)")
+                            text: modelData.name && modelData.name.length ? modelData.name : Tr.t("(unnamed)")
                             color: Material.foreground
                             font.bold: true
                         }
                         Label {
-                            text: t.t(screen.engineNames[modelData.engine] || "?") + " · " + modelData.created
+                            text: Tr.t(screen.engineNames[modelData.engine] || "?") + " · " + modelData.created
                             color: Material.foreground
                             opacity: 0.6
                             font.pointSize: UI.fontSize * 0.75
                         }
                     }
                     Button {
-                        text: t.t("Load")
+                        text: Tr.t("Load")
                         // Same gate as "Save current…": pushing a patch needs
                         // the parameter table, which is what `ready` announces.
                         enabled: Synth.connected && Synth.ready
@@ -175,10 +175,10 @@ Item {
                         onClicked: UI.exportJsonRequested(Synth.patchToJson(modelData.id),
                                                           modelData.name)
                         ToolTip.visible: hovered
-                        ToolTip.text: t.t("Export this patch to a JSON file")
+                        ToolTip.text: Tr.t("Export this patch to a JSON file")
                     }
                     Button {
-                        text: t.t("Rename")
+                        text: Tr.t("Rename")
                         onClicked: {
                             nameDialog.mode = "rename"
                             nameDialog.patchId = modelData.id
@@ -187,7 +187,7 @@ Item {
                         }
                     }
                     Button {
-                        text: t.t("Delete")
+                        text: Tr.t("Delete")
                         onClicked: { Synth.deletePatch(modelData.id); screen.refresh() }
                     }
                 }
@@ -196,7 +196,7 @@ Item {
             Label {
                 anchors.centerIn: parent
                 visible: patchListView.count === 0
-                text: t.t("No saved patches yet")
+                text: Tr.t("No saved patches yet")
                 opacity: 0.5
                 color: Material.foreground
             }
@@ -210,7 +210,7 @@ Item {
         // Without this the popup never takes the window's active focus, so the
         // field below could be given focus but not typed into.
         focus: true
-        title: mode === "save" ? t.t("Save patch") : t.t("Rename patch")
+        title: mode === "save" ? Tr.t("Save patch") : Tr.t("Rename patch")
         standardButtons: Dialog.Ok | Dialog.Cancel
         // The dialog sizes the field, not the other way round: an explicit width
         // on the content does not feed the dialog's implicit width, which is how
@@ -225,7 +225,7 @@ Item {
         // it follows the width above instead of overflowing it.
         contentItem: TextField {
             id: dialogField
-            placeholderText: t.t("Patch name")
+            placeholderText: Tr.t("Patch name")
             onAccepted: nameDialog.accept()
         }
 
