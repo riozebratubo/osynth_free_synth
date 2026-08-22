@@ -21,6 +21,7 @@ using namespace SynthProto;
 namespace {
 constexpr int kSetCoalesceMs = 40;         // ~25 Hz knob-write batches
 constexpr int kEngineSwitchSettleMs = 400; // let 0x02xx re-register before a patch push
+constexpr int kGraphSettleMs = 300;        // load_model re-registers node params too
 constexpr int kPresetLoadSettleMs = 500;   // firmware finishes loading a preset slot
 constexpr int kPresetReadSettleMs = 400;   // GET_PARAM answers land before snapshotting
 // Ceilings at the documented MTU (247 -> 240 payload bytes): 40×6B of set
@@ -2215,6 +2216,10 @@ static bool isNotPatchMaterial(const QString& name) {
       QStringLiteral("preset.seq.load"),
       QStringLiteral("preset.seqset.save"),  // writes a whole sequencer set
       QStringLiteral("preset.seqset.load"),
+      // Wipes the patch, the sequencer and the modular graph back to defaults
+      // (S40). The single most destructive write on the instrument, and a
+      // stored 1 would fire it on every load of that patch.
+      QStringLiteral("state.reset"),
       // Transport (stop/play/rec): replaying one would start the synth playing
       // — or recording — behind the user.
       QStringLiteral("seq.mode"),
@@ -2255,9 +2260,94 @@ int SynthController::saveCurrentAsPatch(const QString& name) {
     emit showError(Translator::instance().t("Nothing to save yet — no parameters have been read."));
     return 0;
   }
-  const int id = db().insertPatch(name, m_engine, params);
+  const int id = db().insertPatch(name, m_engine, params, graphJson());
   if (id <= 0) emit showError(Translator::instance().t("Could not save the patch."));
   return id;
+}
+
+/* ------------------------------------------ the graph a patch is built on */
+
+// The live model as a library patch stores it. Empty for every engine but
+// Modular: the other four have no graph, and writing "[]" for them would be a
+// stored claim that their graph is empty rather than absent.
+QString SynthController::graphJson() const {
+  if (!m_graphAvailable || m_engine != m_graphEngineIndex) return QString();
+  if (m_graphNodes.isEmpty()) return QString();
+  QJsonArray arr;
+  for (const QVariant& v : m_graphNodes) {
+    const QVariantMap n = v.toMap();
+    QJsonObject o;
+    o["kind"] = n.value("kind").toInt();
+    QJsonArray ins;
+    for (const QVariant& src : n.value("in").toList()) ins.append(src.toInt());
+    o["in"] = ins;
+    o["x"] = n.value("x").toInt();
+    o["y"] = n.value("y").toInt();
+    arr.append(o);
+  }
+  return QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact));
+}
+
+QList<GraphNode> SynthController::graphFromJson(const QString& text) {
+  QList<GraphNode> out;
+  if (text.isEmpty()) return out;
+  const QJsonDocument doc = QJsonDocument::fromJson(text.toUtf8());
+  if (!doc.isArray()) return out;
+  for (const QJsonValue& v : doc.array()) {
+    const QJsonObject o = v.toObject();
+    GraphNode n;
+    n.kind = o.value("kind").toInt();
+    for (const QJsonValue& src : o.value("in").toArray()) n.in.append(src.toInt(-1));
+    n.x = o.value("x").toInt();
+    n.y = o.value("y").toInt();
+    out.append(n);
+  }
+  return out;
+}
+
+// One edit for the whole model, so the synth compiles and cost-checks it once
+// and never renders the half-built graphs in between. The per-node replay
+// below is the fallback for firmware that has no such sub-op.
+void SynthController::pushGraph(const QList<GraphNode>& nodes) {
+  if (!m_graphAvailable || nodes.isEmpty()) return;
+  if (!m_graphLoadModelSupported) {
+    pushGraphNodeByNode(nodes);
+    return;
+  }
+  m_pendingGraphPush = nodes;
+  m_graphLoadModelInFlight = true;
+  send(OP_GRAPH_EDIT, payloadGraphLoadModel(nodes, m_graphMaxNodes), true);
+}
+
+// Kinds first, then cables, then positions — the order the edit API demands:
+// connect() refuses a port on a slot whose kind does not have it, and set_kind
+// drops every cable touching the slot it changes, so a cable laid before both
+// of its ends exist would be thrown away by the node that arrived later.
+//
+// Audible, and that is why it is not the first choice: each set_kind is its
+// own recompile with its own duck, and the patch passes through every
+// intermediate shape on the way.
+void SynthController::pushGraphNodeByNode(const QList<GraphNode>& nodes) {
+  // Not `slots`: Qt defines that as a keyword macro, so a local by that name
+  // vanishes at preprocessing and the loop below stops parsing.
+  const int slotCount = qMin(nodes.size(), m_graphMaxNodes);
+  for (int i = 0; i < slotCount; ++i) {
+    // The Out slot is structural and the firmware refuses to change it; asking
+    // would earn a BAD_ARG and a red banner for a slot that is already right.
+    if (i == m_graphOutSlot) continue;
+    send(OP_GRAPH_EDIT, payloadGraphSetKind(i, nodes.at(i).kind), true);
+  }
+  for (int i = 0; i < slotCount; ++i) {
+    const GraphNode& n = nodes.at(i);
+    for (int port = 0; port < n.in.size() && port < m_graphMaxInputs; ++port) {
+      if (n.in.at(port) < 0) continue;  // unpatched is the state after set_kind
+      send(OP_GRAPH_EDIT, payloadGraphConnect(i, port, n.in.at(port)), true);
+    }
+  }
+  for (int i = 0; i < slotCount; ++i) {
+    send(OP_GRAPH_EDIT, payloadGraphSetPos(i, nodes.at(i).x, nodes.at(i).y), false);
+  }
+  refreshGraphModel();
 }
 
 // A whole patch is ~180 parameters, i.e. ~5 full frames. Blasting them
@@ -2285,9 +2375,22 @@ void SynthController::pushParams(const QList<QPair<int, double>>& params) {
   if (pairs > 0) queueSetFrame(payload);
 }
 
-void SynthController::loadPatch(int patchId) {
-  const QList<QPair<int, double>> params = db().getPatchParams(patchId);
+void SynthController::loadPatch(int patchId, bool withMasterVolume, bool withOutLevel) {
+  QList<QPair<int, double>> params = db().getPatchParams(patchId);
   if (params.isEmpty()) return;
+
+  // The two levels the Lib page gates. Dropped from the push rather than from
+  // the stored row: the row is the whole synth and stays that way, and a
+  // switch turned on later has to find the value still there.
+  if (!withMasterVolume || !withOutLevel) {
+    const int volId = paramIdForName(QStringLiteral("master.volume"));
+    const int outId = paramIdForName(QStringLiteral("out.level"));
+    for (int i = params.size() - 1; i >= 0; --i) {
+      const int id = params.at(i).first;
+      if (!withMasterVolume && volId >= 0 && id == volId) params.removeAt(i);
+      else if (!withOutLevel && outId >= 0 && id == outId) params.removeAt(i);
+    }
+  }
 
   // Find the patch's engine so we switch first if it differs from the live one.
   int patchEngine = m_engine;
@@ -2300,10 +2403,35 @@ void SynthController::loadPatch(int patchId) {
     }
   }
 
+  const QList<GraphNode> graph = graphFromJson(db().getPatchGraph(patchId));
+
+  // The graph goes in before the values, and it is the whole subtlety of
+  // loading a modular patch: a node parameter id only exists while its slot
+  // holds a kind that defines it, so values pushed onto the old graph land on
+  // the wrong controls — or on none. The firmware's own preset loader has the
+  // same rule for the same reason (presets.cpp, do_load).
   if (patchEngine != m_engine) {
     selectEngine(patchEngine);
     m_pendingPatchParams = params;
-    QTimer::singleShot(kEngineSwitchSettleMs, this, [this]() {
+    QTimer::singleShot(kEngineSwitchSettleMs, this, [this, graph]() {
+      pushGraph(graph);
+      // A second settle after the graph, for the same reason as the first:
+      // load_model re-registers every occupied slot's parameters, and a value
+      // written before that lands nowhere.
+      if (!graph.isEmpty()) {
+        QTimer::singleShot(kGraphSettleMs, this, [this]() {
+          pushParams(m_pendingPatchParams);
+          m_pendingPatchParams.clear();
+        });
+      } else {
+        pushParams(m_pendingPatchParams);
+        m_pendingPatchParams.clear();
+      }
+    });
+  } else if (!graph.isEmpty()) {
+    pushGraph(graph);
+    m_pendingPatchParams = params;
+    QTimer::singleShot(kGraphSettleMs, this, [this]() {
       pushParams(m_pendingPatchParams);
       m_pendingPatchParams.clear();
     });
@@ -2334,7 +2462,8 @@ QVariantList SynthController::patches(int engine) { return db().getPatches(engin
 QJsonObject SynthController::patchJsonObject(const QString& name,
                                              int engine,
                                              const QString& created,
-                                             const QList<QPair<int, double>>& params) const {
+                                             const QList<QPair<int, double>>& params,
+                                             const QString& graph) const {
   QJsonArray items;
   for (const auto& pv : params) {
     const QString pname = paramName(pv.first);
@@ -2356,6 +2485,12 @@ QJsonObject SynthController::patchJsonObject(const QString& name,
   out["engineName"] = engineNameFor(engine);
   if (!created.isEmpty()) out["created"] = created;
   out["params"] = items;
+  // Only when there is one, so a subtractive patch's file is byte-identical to
+  // what earlier builds wrote.
+  if (!graph.isEmpty()) {
+    const QJsonDocument g = QJsonDocument::fromJson(graph.toUtf8());
+    if (g.isArray()) out["graph"] = g.array();
+  }
   return out;
 }
 
@@ -2367,7 +2502,8 @@ QString SynthController::patchToJson(int patchId) const {
     const QJsonObject obj = patchJsonObject(m.value("name").toString(),
                                             m.value("engine").toInt(),
                                             m.value("created").toString(),
-                                            db().getPatchParams(patchId));
+                                            db().getPatchParams(patchId),
+                                            db().getPatchGraph(patchId));
     return QString::fromUtf8(QJsonDocument(obj).toJson(QJsonDocument::Indented));
   }
   return QString();
@@ -2383,7 +2519,8 @@ QString SynthController::libraryToJson() const {
     patchArray.append(patchJsonObject(m.value("name").toString(),
                                       m.value("engine").toInt(),
                                       m.value("created").toString(),
-                                      db().getPatchParams(m.value("id").toInt())));
+                                      db().getPatchParams(m.value("id").toInt()),
+                                      db().getPatchGraph(m.value("id").toInt())));
   }
 
   QJsonObject out;
@@ -2431,7 +2568,8 @@ void SynthController::exportPresetJson(int engine, int slot) {
         emit showError(Translator::instance().t("Nothing to save yet — no parameters have been read."));
         return;
       }
-      const QJsonObject obj = patchJsonObject(name, engine, QString(), params);
+      const QJsonObject obj = patchJsonObject(name, engine, QString(), params,
+                                             graphJson());
       emit presetJsonReady(QString::fromUtf8(QJsonDocument(obj).toJson(QJsonDocument::Indented)),
                            name);
     });
@@ -2544,12 +2682,29 @@ QVariantMap SynthController::importPatchJson(const QString& text) {
   const QString name = patch.value("name").toString();
   const int engine = patch.value("engine").isDouble() ? patch.value("engine").toInt() : -1;
 
+  QList<GraphNode> graph;
+  if (patch.value("graph").isArray()) {
+    graph = graphFromJson(QString::fromUtf8(
+        QJsonDocument(patch.value("graph").toArray()).toJson(QJsonDocument::Compact)));
+  }
+
   if (engine >= 0 && engine != m_engine) {
     // The ids the names resolve to only exist after the new engine has
-    // re-registered, so resolution waits with the push.
+    // re-registered, so resolution waits with the push — and, on a modular
+    // patch, waits again for the graph, which re-registers them a second time.
     selectEngine(engine);
     m_pendingImport = items;
-    QTimer::singleShot(kEngineSwitchSettleMs, this, [this]() {
+    QTimer::singleShot(kEngineSwitchSettleMs, this, [this, graph]() {
+      pushGraph(graph);
+      QTimer::singleShot(graph.isEmpty() ? 0 : kGraphSettleMs, this, [this]() {
+        resolveAndPushImport(m_pendingImport);
+        m_pendingImport.clear();
+      });
+    });
+  } else if (!graph.isEmpty()) {
+    pushGraph(graph);
+    m_pendingImport = items;
+    QTimer::singleShot(kGraphSettleMs, this, [this]() {
       resolveAndPushImport(m_pendingImport);
       m_pendingImport.clear();
     });
@@ -2637,7 +2792,15 @@ QVariantMap SynthController::importPatchesToLibrary(const QString& text) {
 
     QString name = patch.value("name").toString().trimmed();
     if (name.isEmpty()) name = Translator::instance().t("Imported patch");
-    if (db().insertPatch(name, engine, params) > 0) {
+    // Stored verbatim. Unlike the parameters there is nothing to resolve — a
+    // graph is slots, kinds and cables, and those are the same numbers on
+    // every build that has the engine at all.
+    QString graph;
+    if (patch.value("graph").isArray()) {
+      graph = QString::fromUtf8(
+          QJsonDocument(patch.value("graph").toArray()).toJson(QJsonDocument::Compact));
+    }
+    if (db().insertPatch(name, engine, params, graph) > 0) {
       ++imported;
       lastName = name;
     } else {
@@ -3459,6 +3622,20 @@ void SynthController::handleGraphEdit(const QByteArray& payload, quint8 status) 
   if (m_graphCost != e.cost) {
     m_graphCost = e.cost;
     emit graphCostChanged();
+  }
+  if (m_graphLoadModelInFlight) {
+    m_graphLoadModelInFlight = false;
+    const QList<GraphNode> pending = m_pendingGraphPush;
+    m_pendingGraphPush.clear();
+    // BAD_ARG here is firmware that has no whole-model sub-op — every other
+    // refusal (too expensive, a cycle) is about the patch and is reported
+    // below like any other. Remembered for the session so the rest of it goes
+    // straight to the slow path instead of probing each time.
+    if ((status & 0x7F) == 3) {
+      m_graphLoadModelSupported = false;
+      pushGraphNodeByNode(pending);
+      return;
+    }
   }
   if (status != 0) {
     // The three refusals are different problems and deserve different words —

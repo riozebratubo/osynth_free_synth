@@ -284,6 +284,8 @@ esp_err_t persist_init(void) {
     return ESP_OK;
 }
 
+bool persist_owns(uint16_t id) { return is_persisted(id); }
+
 esp_err_t persist_save_now(void) { return flush("forced"); }
 
 esp_err_t persist_reset(void) {

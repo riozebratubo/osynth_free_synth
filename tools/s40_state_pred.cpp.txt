@@ -1,0 +1,58 @@
+bool state_id(uint16_t id) {
+    if (id == osynth::PID_ENGINE_TYPE) return false; /* in the header */
+    /* skip_id first because it is a switch and persist_owns() is a scan, and
+     * this runs on every parameter write in the instrument. */
+    if (skip_id(id)) {
+        switch (id) {
+            case DRUM_PID_KIT:
+            case SEQ_PID_PATTERN:
+                break;
+            default:
+                return false;
+        }
+    }
+    return !persist_owns(id);
+}
+
+/* Whether a write to `id` means the working state has moved — which depends
+ * on who wrote it.
+ *
+ * ParamOrigin::Internal is the firmware talking to itself, and almost all of
+ * it is transient: playhead telemetry, and above all *parameter locks*, which
+ * rewrite a patch value on every locked step and put it back when the track
+ * stops. Counting those as edits would leave the state dirty for as long as a
+ * p-locked pattern played, and the defer budget would then force a
+ * multi-kilobyte write straight through the playback it exists to stay out
+ * of. It would also store the lock's momentary value rather than the one the
+ * player set.
+ *
+ * The two exceptions are the revision counters. Pattern data and the graph
+ * are not parameters, so a counter is the only way either of them can say it
+ * changed at all — and both are change-filtered, so a Euclidean fill or a
+ * whole-graph load marks the state dirty once rather than once per step.
+ *
+ * Every other origin is a player action — the app, MIDI, the local UI, or a
+ * preset load, which is included deliberately: a preset selected and then
+ * powered off has to come back selected. Those two carry the values the file
+ * keeps in its header rather than in its pair list, which is why they are
+ * named here and excluded from state_id(). */
+bool state_tracks(uint16_t id, ParamOrigin origin) {
+    if (origin == ParamOrigin::Internal) {
+        if (id == SEQ_PID_REV) return true;
+#if SYNTH_ENABLE_MODULAR
+        if (id == osynth::graph::PID_GRAPH_REV) return true;
+#endif
+        return false;
+    }
+    if (id == osynth::PID_ENGINE_TYPE || id == PRESET_PID_LOAD) return true;
+    return state_id(id);
+}
+
+/* Any control task; must stay short. Marking is all it does — the tick in
+ * preset_task decides when. */
+void state_touch(uint16_t id, ParamOrigin origin) {
+    if (!s_state_ready.load(std::memory_order_relaxed)) return;
+    if (!state_tracks(id, origin)) return;
+    s_state_dirty.store(true, std::memory_order_relaxed);
+    s_state_seq.fetch_add(1, std::memory_order_relaxed);
+}

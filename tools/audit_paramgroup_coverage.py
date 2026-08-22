@@ -33,6 +33,9 @@ HAND_BUILT = {
     "drums.": "DrumsScreen / DrumPads",
     "preset.": "PresetsScreen (actions)",
     "engine.": "HomeScreen engine buttons",
+    # state.reset (S40) is the Home page's "Start from scratch" card: one
+    # button behind a confirmation, not a control anyone drags.
+    "state.": "HomeScreen reset card",
 }
 
 

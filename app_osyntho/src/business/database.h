@@ -40,11 +40,13 @@ class Database : public IDatabase {
   /* patch library */
   int insertPatch(const QString& name,
                   int engine,
-                  const QList<QPair<int, double>>& params) override;
+                  const QList<QPair<int, double>>& params,
+                  const QString& graph = QString()) override;
   bool renamePatch(int id, const QString& name) override;
   bool deletePatch(int id) override;
   QVariantList getPatches(int engine = -1) override;
   QList<QPair<int, double>> getPatchParams(int patchId) override;
+  QString getPatchGraph(int patchId) override;
 
   /* file paths / backup / lifecycle */
   QString getDatabaseFileFolder() override;
@@ -67,7 +69,9 @@ class Database : public IDatabase {
   // create/migrate pass.
   // 2 (S36): back-fills the per-effect enable switches into patches saved
   // before they existed. See the migration in Database::createTables().
-  static constexpr unsigned int currentSchemaVersion = 2;
+  // 3 (S40): patch.graph, so a modular patch stores the cables it was built
+  // from and not only the values hanging off them.
+  static constexpr unsigned int currentSchemaVersion = 3;
   // Version recorded in the DB's schema_version table (0 = none/pre-versioning).
   // Stamped at the END of the create/migrate pass, so a migration interrupted
   // mid-way keeps the old version recorded and is retried on the next open.

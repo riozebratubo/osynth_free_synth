@@ -968,6 +968,37 @@ inline GraphModel parseGraphModel(const QByteArray& payload) {
   return m;
 }
 
+// The whole model in one edit (S40). The payload after the sub-op byte is the
+// v1 'OGR1' blob parseGraphModel() reads, rebuilt from the app's view — so
+// what goes back is exactly the shape that came out, with no third encoding.
+// `slotCount` is the firmware's node count (GraphInfo::maxNodes): the blob is
+// positional and a short one would silently empty the tail. Not called
+// `slots` — that is a Qt keyword macro and expands to nothing here.
+//
+// Node-by-node replay is the fallback, not the plan: every set_kind is its own
+// recompile and its own audio duck, and the half-built graphs in between are
+// patches the synth actually renders. Firmware without sub-op 3 answers
+// ST_BAD_ARG, which is what tells the app to fall back.
+inline QByteArray payloadGraphLoadModel(const QList<GraphNode>& nodes, int slotCount) {
+  QByteArray p;
+  appendU8(p, 3);  // cmd: load whole model
+  appendU32(p, 0x3152474Fu);  // 'OGR1'
+  appendU8(p, 1);             // blob version
+  appendU8(p, quint8(slotCount));
+  appendU32(p, 0);            // revision: the firmware keeps its own
+  for (int i = 0; i < slotCount; ++i) {
+    const GraphNode n = i < nodes.size() ? nodes.at(i) : GraphNode();
+    appendU8(p, quint8(n.kind));
+    for (int k = 0; k < 4; ++k) {
+      const int src = k < n.in.size() ? n.in.at(k) : -1;
+      appendU8(p, quint8(qint8(src < 0 ? -1 : src)));
+    }
+    appendU16(p, quint16(qint16(n.x)));
+    appendU16(p, quint16(qint16(n.y)));
+  }
+  return p;
+}
+
 // GRAPH_EDIT response: { u16 revision, u16 cost } — sent on failure too, so
 // a rejected edit still tells the app exactly where it stands.
 struct GraphEditReply {

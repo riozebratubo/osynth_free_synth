@@ -172,6 +172,26 @@ Pane {
                             font.pointSize: Math.max(8, UI.fontSize * 0.7)
                         }
 
+                        Text { text: t.t("Navigation"); font.bold: true; color: Material.foreground }
+                        SettingsSwitch {
+                            text: t.t("Swipe to change screens")
+                            checked: App.settingIsTrue("swipe_change_screens")
+                            onToggled: {
+                                App.saveSetting("swipe_change_screens", checked ? "true" : "false")
+                                // App.setting() is a plain function call, not a
+                                // tracked read, so the singleton has to be told.
+                                UI.swipeNavigation = checked
+                            }
+                        }
+                        Text {
+                            width: parent.width - 20
+                            wrapMode: Text.WordWrap
+                            text: t.t("Drag left or right anywhere on a page to move to the next one. Off by default: most pages are covered in knobs, grids and cables, and a drag meant for one of those changes the page instead. The bar at the top and the arrows in the toolbar always work.")
+                            color: Material.foreground
+                            opacity: 0.6
+                            font.pointSize: Math.max(8, UI.fontSize * 0.7)
+                        }
+
                         Text { text: t.t("App language (restart to apply)"); font.bold: true; color: Material.foreground }
                         ComboBox {
                             width: Math.min(parent.width - 20, 300)

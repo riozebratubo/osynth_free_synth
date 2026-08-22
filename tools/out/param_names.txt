@@ -311,6 +311,7 @@ seq.steps
 seq.swing
 seq.tempo
 seqarp.h
+state.reset
 usb.mode
 vel.bright
 wt1.pos

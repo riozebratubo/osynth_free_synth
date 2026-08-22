@@ -24,6 +24,10 @@
  * render chain: voice sum -> drums -> FX bus -> looper) -> codec (S31b; the
  * ES8388's I2C bring-up, *after* the audio task because that is what starts
  * the MCLK it needs — a no-op on a discrete front end)
+ * -> the working state (S40; restores the engine, the patch, the graph and
+ * the sequencer the synth was switched off with — after the audio task
+ * because a restore may switch engines, and before BLE so the app connects
+ * to a settled synth)
  * -> midi (hooks the USB RX callback)
  * -> BLE control (S14; NimBLE + the SynthCtl GATT service — after the
  * audio task on purpose: it registers no params, and radio bring-up frees
@@ -396,6 +400,28 @@ extern "C" void app_main(void) {
     audio_io_mic_probe_pads();
     ESP_LOGI(TAG, "audio sink: %s | codec: %s", audio_io_sink_name(),
              codec_name());
+
+    /* The working state (S40): the box comes back as it was switched off.
+     *
+     * Here, and not up with the other init calls, because applying it can
+     * switch engines — and the S6 switch protocol hands the voice pool over
+     * on two render boundaries, so before the audio task there is no boundary
+     * to hand over on and the switch is refused. Still ahead of BLE, so the
+     * app connects to a synth that has already settled rather than watching
+     * the whole parameter set move underneath its first read.
+     *
+     * Queued, not blocking: the restore runs on the preset task and the rest
+     * of this function has nothing it can disturb. Nothing is auto-saved
+     * until it has finished (presets.h). */
+    /* Not ESP_ERROR_CHECKed. The only way this fails is a full request queue,
+     * and a synth that refuses to boot because it could not arrange to restore
+     * a patch is worse than one that boots at its defaults — the same
+     * sink-fallback rule persist_init() follows. */
+    const esp_err_t rerr = presets_state_restore();
+    if (rerr != ESP_OK) {
+        ESP_LOGW(TAG, "working state not restored: %s (starting at defaults)",
+                 esp_err_to_name(rerr));
+    }
 
     ESP_ERROR_CHECK(midi_init());
     ESP_ERROR_CHECK(ble_ctrl_init());

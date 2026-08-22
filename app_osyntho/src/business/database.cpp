@@ -5,6 +5,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QSqlRecord>
 #include <QStandardPaths>
 #include <QStringList>
 #include <QVariantMap>
@@ -134,6 +135,15 @@ void Database::runCreateTables() {
     return query.next();
   };
 
+  // For migrations that add a column: a database can be at an older *stamped*
+  // version and still have the column (a restore from a newer backup, an
+  // interrupted migrate), and ALTER TABLE ADD COLUMN is an error rather than a
+  // no-op when it is already there.
+  auto columnExists = [&thisDb](const QString& tableName, const QString& column) {
+    const QSqlRecord rec = thisDb.record(tableName);
+    return rec.indexOf(column) >= 0;
+  };
+
   auto runCreateTable = [&tableExists, this](const QString& tableName, const QString& tableQuery) {
     if (not tableExists(tableName)) {
       QSqlQuery query{db};
@@ -188,7 +198,8 @@ void Database::runCreateTables() {
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           name TEXT,
           engine INTEGER DEFAULT 0,
-          created DATETIME DEFAULT CURRENT_TIMESTAMP
+          created DATETIME DEFAULT CURRENT_TIMESTAMP,
+          graph TEXT
       )
   )EOF");
 
@@ -252,6 +263,16 @@ void Database::runCreateTables() {
                   "(SELECT patch_id FROM patch_param WHERE param_id = %1)")
               .arg(QString::number(u.on), QString::number(u.mix)));
     }
+  }
+
+  // Schema 3 (S40): patch.graph. A database created by this build already has
+  // the column (runCreateTable above), so this is only for one that predates
+  // it — ALTER TABLE ADD COLUMN on SQLite rewrites no rows and fills existing
+  // ones with NULL, which reads back as an empty string: exactly "this patch
+  // stored no graph", which is true of every patch saved before now.
+  if (dbSchemaVersion < 3 and tableExists("patch") and
+      not columnExists("patch", "graph")) {
+    runQueryNoError("patch", "ALTER TABLE patch ADD COLUMN graph TEXT");
   }
 
   // Stamp the schema version only AFTER any migrations above ran.
@@ -409,7 +430,8 @@ QList<QString> Database::getLastConnectedDevices(int maxDevices) {
 /* --------------------------------------------------------------- patch library */
 
 int Database::insertPatch(const QString& name, int engine,
-                          const QList<QPair<int, double>>& params) {
+                          const QList<QPair<int, double>>& params,
+                          const QString& graph) {
   if (not isDatabaseOpen()) return 0;
 
   if (not db.transaction()) {
@@ -418,9 +440,12 @@ int Database::insertPatch(const QString& name, int engine,
   }
 
   QSqlQuery query{db};
-  query.prepare("INSERT INTO patch(name, engine) VALUES (:name, :engine)");
+  query.prepare("INSERT INTO patch(name, engine, graph) VALUES (:name, :engine, :graph)");
   query.bindValue(":name", name);
   query.bindValue(":engine", engine);
+  // NULL rather than "" when there is none, so "no graph" reads the same on a
+  // row written now as on one migrated in from before the column existed.
+  query.bindValue(":graph", graph.isEmpty() ? QVariant() : QVariant(graph));
   if (not query.exec()) {
     qWarning() << "Error: insertPatch failed:" << query.lastError().text();
     db.rollback();
@@ -540,6 +565,22 @@ QList<QPair<int, double>> Database::getPatchParams(int patchId) {
     qWarning() << "Error: getPatchParams query, id:" << patchId;
   }
   return out;
+}
+
+QString Database::getPatchGraph(int patchId) {
+  if (not isDatabaseOpen()) return {};
+
+  QSqlQuery query{db};
+  query.prepare("SELECT graph FROM patch WHERE id = :id");
+  query.bindValue(":id", patchId);
+
+  if (not query.exec()) {
+    // Not a warning: a database still at schema 2 has no such column, and the
+    // caller's answer for that is the same as for a patch that stored nothing.
+    return {};
+  }
+  if (not query.next()) return {};
+  return query.value(0).toString();
 }
 
 /* ------------------------------------------------------ file paths / backup */

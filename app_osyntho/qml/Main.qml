@@ -512,6 +512,11 @@ ApplicationWindow {
 
             SwipeView {
                 id: swipeView
+                // Off unless the setting says otherwise (UI.swipeNavigation).
+                // With it off the pages still change — the nav dock, the
+                // toolbar arrows and the startup index all write currentIndex
+                // — they just do not answer a drag across the page body.
+                interactive: UI.swipeNavigation
                 anchors.top: navDock.bottom
                 anchors.left: parent.left
                 anchors.right: parent.right

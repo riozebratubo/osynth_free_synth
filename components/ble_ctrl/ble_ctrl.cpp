@@ -622,6 +622,16 @@ void handle_reboot(uint8_t seq) {
         ESP_LOGW(TAG, "persist flush before reboot failed: %s",
                  esp_err_to_name(err));
     }
+    /* And the working state (S40), for exactly the same reason one line up:
+     * it is written when the synth has been left alone and has gone quiet, so
+     * a restart requested a second after an edit would otherwise come back
+     * missing it — and this restart is the one case where the instrument is
+     * definitely about to stop being able to save. */
+    const esp_err_t serr = presets_state_save_now();
+    if (serr != ESP_OK) {
+        ESP_LOGW(TAG, "state flush before reboot failed: %s",
+                 esp_err_to_name(serr));
+    }
     ESP_LOGI(TAG, "restarting on app request");
     vTaskDelay(pdMS_TO_TICKS(250));
     esp_restart();
@@ -1355,6 +1365,26 @@ void handle_graph_edit(uint8_t seq, const uint8_t* p, uint16_t plen) {
                                     (int16_t)rd16(p + 4));
             }
             break;
+        case 3: {
+            /* Whole model in one edit: the v1 'OGR1' blob, byte for byte what
+             * a version-4 preset stores and what GRAPH_NODES hands out — so
+             * the app pushes back exactly the shape it read, with no third
+             * encoding to keep in step.
+             *
+             * It exists because replaying a patch node by node does not
+             * work in practice: every set_kind is its own recompile and its
+             * own audio duck, a twelve-node patch is a dozen of them, and the
+             * intermediate graphs are real patches the synth renders on the
+             * way past. This is compiled and cost-checked as a unit, so a
+             * patch that does not fit is refused whole rather than half
+             * applied. Older firmware answers sub-op 3 with ST_BAD_ARG, which
+             * is the app's cue to fall back to the per-node path. */
+            gr::Model m;
+            rc = gr::deserialize(p + 1, (size_t)plen - 1, m)
+                     ? gr::load_model(m)
+                     : ESP_ERR_INVALID_ARG;
+            break;
+        }
         default:
             rc = ESP_ERR_INVALID_ARG;
             break;

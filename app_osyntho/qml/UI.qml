@@ -49,6 +49,16 @@ QtObject {
     // Same deal as fontSize — SettingsScreen re-assigns it on change.
     property bool tiledPanels: App.setting("panel_layout") !== "rows"
 
+    // Whether a horizontal drag anywhere on a page changes page (SwipeView's
+    // `interactive`). Off by default, and that is the point: nearly every page
+    // here is covered in things you drag — knobs, the sequencer grid, the
+    // graph canvas, the keyboard — and a drag that starts on one of those and
+    // is read as a page swipe both misses the control and moves the page. The
+    // nav dock and the toolbar arrows are always there either way. Same deal
+    // as fontSize: App.setting() is not a tracked read, so SettingsScreen
+    // re-assigns this on change.
+    property bool swipeNavigation: App.settingIsTrue("swipe_change_screens")
+
     // Note written into a step when you tap an empty cell in the sequencer
     // grid. These live here rather than on SequencerScreen because the
     // surfaces that *pick* them — the on-screen keyboard and the drum pads —

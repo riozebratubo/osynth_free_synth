@@ -4,12 +4,23 @@ import QtQuick.Controls.Material
 
 import org.osynth.osyntho
 
-// Local patch library — named snapshots of the live parameters, stored in the
-// app's SQLite DB (independent of the synth's own preset slots).
+// Local patch library — named snapshots of the whole synth, stored in the app's
+// SQLite DB (independent of the synth's own preset slots): every parameter that
+// is not an action, plus the modular graph the parameters hang off when the
+// engine has one.
 Item {
     id: screen
 
     property var patchList: []
+    // Whether a Load also replays the two levels the snapshot carries. Off by
+    // default and remembered per install: both describe the room and the
+    // wiring rather than the sound — master volume is what you are monitoring
+    // at, out.level is set once by ear for whatever is in the jack — and a
+    // patch that moved either behind you is the surprise the synth's own
+    // presets exclude them to avoid. They stay in the stored snapshot either
+    // way, so turning a switch on later finds the value still there.
+    property bool loadMasterVolume: App.settingIsTrue("patch_load_master_volume")
+    property bool loadOutLevel: App.settingIsTrue("patch_load_out_level")
     // Indexed by the engine id stored on a saved patch, so this list is not
     // the picker's: it has to name every engine that could have written a row
     // in the DB, including ones the connected synth does not have. Positional
@@ -69,6 +80,55 @@ Item {
             }
         }
 
+        Flow {
+            Layout.fillWidth: true
+            spacing: 16
+            Label {
+                // No vertical anchor: a Flow positions its children, and
+                // anchoring inside a positioner is refused at runtime.
+                text: t.t("Load with the patch:")
+                color: Material.foreground
+                opacity: 0.7
+            }
+            Switch {
+                text: t.t("Synth volume")
+                checked: screen.loadMasterVolume
+                onToggled: {
+                    screen.loadMasterVolume = checked
+                    App.saveSetting("patch_load_master_volume", checked ? "true" : "false")
+                }
+                ToolTip.visible: hovered
+                ToolTip.text: t.t("Also set the master volume a patch was saved with. Off by default: that is the level you are monitoring at, not part of the sound.")
+            }
+            Switch {
+                id: outLevelSwitch
+                // out.level exists only on firmware with a codec that has an
+                // output driver register (an ES8388 build). Hidden rather than
+                // disabled elsewhere — a switch for a control the connected
+                // synth does not have is just a puzzle. Resolved by name, like
+                // the toolbar's own out.level strip: paramIdForName returns -1
+                // until discovery finds it, and is not a tracked read, so the
+                // signal is what re-runs it.
+                property int outLevelId: -1
+                visible: Synth.ready && outLevelId >= 0
+                text: t.t("Headphone level")
+                checked: screen.loadOutLevel
+                onToggled: {
+                    screen.loadOutLevel = checked
+                    App.saveSetting("patch_load_out_level", checked ? "true" : "false")
+                }
+                Component.onCompleted: outLevelId = Synth.paramIdForName("out.level")
+                Connections {
+                    target: Synth
+                    function onParamsDiscovered() {
+                        outLevelSwitch.outLevelId = Synth.paramIdForName("out.level")
+                    }
+                }
+                ToolTip.visible: hovered
+                ToolTip.text: t.t("Also set the analogue output level a patch was saved with. Off by default: it is set once by ear for what is plugged into the jack.")
+            }
+        }
+
         ListView {
             id: patchListView
             Layout.fillWidth: true
@@ -103,7 +163,8 @@ Item {
                         // Same gate as "Save current…": pushing a patch needs
                         // the parameter table, which is what `ready` announces.
                         enabled: Synth.connected && Synth.ready
-                        onClicked: Synth.loadPatch(modelData.id)
+                        onClicked: Synth.loadPatch(modelData.id, screen.loadMasterVolume,
+                                                   screen.loadOutLevel)
                     }
                     // Icon-only: a fourth worded button does not fit a phone row.
                     ToolButton {

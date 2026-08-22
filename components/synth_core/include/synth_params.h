@@ -78,6 +78,10 @@ constexpr uint16_t PID_LINE_IN_SOURCE = 0x000D;
  * whichever way it is set. Registered on the same condition as the selector,
  * since with one device `in.gain` already is the trim. */
 constexpr uint16_t PID_LINE_IN_MICGAIN = 0x000E;
+/* 0x000F is `state.reset`, the last of the 0x00xx globals in use — it belongs
+ * to the preset system like the six triggers above it (PRESET_PID_STATE_RESET
+ * in presets.h) and is named here only so this list stays the one place that
+ * says which global ids are taken. */
 
 /* Engine-common parameters (0x01xx) — registered by the voice manager,
  * meaningful for every engine. C code uses the SYNTH_PID_* mirrors in

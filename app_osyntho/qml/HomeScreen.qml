@@ -4,9 +4,10 @@ import QtQuick.Controls.Material
 
 import org.osynth.osyntho
 
-// Overview: engine select, master + voice (glide/unison/bend) controls, and the
-// current preset.
+// Overview: engine select, master + voice (glide/unison/bend) controls, the
+// current preset, and the way back to a blank instrument.
 Item {
+    id: screen
     Flickable {
         anchors.fill: parent
         contentWidth: width
@@ -72,6 +73,80 @@ Item {
                     }
                 }
             }
+
+            // Back to a blank instrument. Resolved by name rather than by a
+            // hardcoded id, and hidden entirely when the connected firmware
+            // does not have it — the same existence test the toolbar's
+            // out.level strip uses, and for the same reason: older firmware
+            // answers a write to an unregistered id with nothing at all, so a
+            // button that is always there would look broken instead of absent.
+            Rectangle {
+                id: resetCard
+                property int resetId: -1
+                width: panels.contentWidth
+                height: resetRow.implicitHeight + 20
+                radius: 8
+                visible: Synth.ready && resetId >= 0
+                color: Material.theme === Material.Dark ? "#1AFFFFFF" : "#0D000000"
+
+                function refresh() { resetId = Synth.paramIdForName("state.reset") }
+                Component.onCompleted: refresh()
+                Connections {
+                    target: Synth
+                    function onParamsDiscovered() { resetCard.refresh() }
+                }
+
+                RowLayout {
+                    id: resetRow
+                    anchors.fill: parent
+                    anchors.margins: 10
+                    spacing: 8
+                    Column {
+                        Layout.fillWidth: true
+                        Label {
+                            text: t.t("Start from scratch")
+                            color: Material.foreground
+                            opacity: 0.7
+                        }
+                        Label {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            text: t.t("The synth remembers how you left it and comes back that way. This puts it back to the sound it had out of the box.")
+                            color: Material.foreground
+                            opacity: 0.5
+                            font.pointSize: Math.max(8, UI.fontSize * 0.75)
+                        }
+                    }
+                    Button {
+                        text: t.t("Reset…")
+                        enabled: Synth.connected
+                        onClicked: resetDialog.open()
+                    }
+                }
+            }
+        }
+    }
+
+    Dialog {
+        id: resetDialog
+        anchors.centerIn: Overlay.overlay
+        modal: true
+        focus: true
+        title: t.t("Reset the synth?")
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        width: Math.min(parent ? parent.width - 32 : 420, 420)
+
+        contentItem: Label {
+            wrapMode: Text.WordWrap
+            color: Material.foreground
+            // Says exactly what goes and what stays. The firmware draws the
+            // same line: the working state is the patch, the graph and the
+            // sequencer; the NVS settings and the looper are not in it.
+            text: t.t("Every sound setting goes back to its default, and the sequencer patterns and the modular patch are cleared. Your saved presets, the patch library, the looper and the volume and input settings are left alone.")
+        }
+
+        onAccepted: {
+            if (resetCard.resetId >= 0) Synth.setParamNow(resetCard.resetId, 1)
         }
     }
 

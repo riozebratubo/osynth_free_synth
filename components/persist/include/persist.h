@@ -72,6 +72,15 @@ size_t persist_add(const uint16_t* ids, size_t count);
  * any other write, and the S9 rule is that the audio task starts last. */
 esp_err_t persist_init(void);
 
+/* True when `id` is one of the parameters this component stores.
+ *
+ * Exists so a second snapshot mechanism can leave these alone rather than
+ * carry a hard-coded copy of the list. The working state the preset system
+ * auto-saves (presets.h, "current patch") is the caller: two owners writing
+ * the same parameter from two files with two different write policies is a
+ * setting that changes depending on which one lost the race. */
+bool persist_owns(uint16_t id);
+
 /* Writes now if anything is dirty, ignoring the settle and silence waits.
  * For a caller that knows a stall is acceptable — a settings screen's
  * explicit "save", or before a deliberate reboot. Blocking; control tasks

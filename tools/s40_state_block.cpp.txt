@@ -1,0 +1,440 @@
+/* ---- the working state (S40) --------------------------------------------
+ *
+ * One unnamed slot that saves itself. See presets.h for what it carries and
+ * why, and state_id() above for the fence around it.
+ */
+
+void state_path(char* out, size_t n) {
+    snprintf(out, n, "%s/state.osw", kBasePath);
+}
+
+/* Where a section of the blob goes. `fp == nullptr` is the probe pass: it
+ * builds and hashes exactly the same bytes without touching flash, which is
+ * what lets a save that would change nothing cost nothing. */
+struct StateSink {
+    FILE* fp;
+    uint32_t hash;
+    size_t bytes;
+    bool ok;
+
+    void put(const void* d, size_t n) {
+        if (!ok || n == 0) return;
+        hash_feed(hash, d, n);
+        bytes += n;
+        if (fp != nullptr && fwrite(d, 1, n, fp) != n) ok = false;
+    }
+};
+
+/* Builds the whole blob into `sk`. `buf`/`cap` is the pattern scratch — one
+ * pattern at a time, so the caller allocates seqarp_pattern_max_bytes() once
+ * and both passes share it. False if a section could not be produced or
+ * written. */
+bool build_state(StateSink& sk, uint8_t* buf, size_t cap) {
+    ParamStore& ps = ParamStore::instance();
+
+    /* Sparse, exactly like a preset: defaults are implicit, because the load
+     * resets before it applies. A firmware that adds a parameter therefore
+     * boots it at its new default instead of at a value the old build never
+     * had an opinion about. */
+    const size_t total = ps.listIds(s_ids, ParamStore::kMaxParams);
+    int count = 0;
+    for (size_t i = 0; i < total; ++i) {
+        if (!state_id(s_ids[i])) continue;
+        const ParamDesc* d = ps.describe(s_ids[i]);
+        if (d == nullptr) continue;
+        const float v = ps.get(s_ids[i]);
+        if (v == d->def) continue;
+        s_pairs[count].id = s_ids[i];
+        s_pairs[count].val = v;
+        ++count;
+    }
+
+    size_t graph_len = 0;
+#if SYNTH_ENABLE_MODULAR
+    if ((int)engines_active_type() == SYNTH_ENGINE_MODULAR) {
+        graph_len = osynth::graph::serialize(osynth::graph::model(),
+                                             s_graph_blob,
+                                             sizeof(s_graph_blob));
+    }
+#endif
+
+    seq_song_entry_t song[SEQ_SONG_MAX];
+    int song_len = seq_song_length();
+    if (song_len < 0) song_len = 0;
+    if (song_len > SEQ_SONG_MAX) song_len = SEQ_SONG_MAX;
+    for (int i = 0; i < song_len; ++i) seq_song_get(i, &song[i]);
+
+    StateHdr h = {};
+    h.magic = kStateMagic;
+    h.version = kStateVersion;
+    h.engine = (uint8_t)engines_active_type();
+    h.patterns = (uint8_t)SEQ_PATTERNS;
+    h.params = (uint16_t)count;
+    h.graph_len = (uint16_t)graph_len;
+    h.song_len = (uint8_t)song_len;
+    h.preset = (int16_t)s_cur_load;
+
+    sk.put(&h, sizeof(h));
+    if (count > 0) sk.put(s_pairs, (size_t)count * sizeof(preset_pair_t));
+#if SYNTH_ENABLE_MODULAR
+    if (graph_len > 0) sk.put(s_graph_blob, graph_len);
+#endif
+    if (song_len > 0) sk.put(song, (size_t)song_len * sizeof(song[0]));
+
+    for (int p = 0; p < SEQ_PATTERNS; ++p) {
+        const uint32_t len = (uint32_t)seqarp_pattern_export(p, buf, cap);
+        if (len == 0) return false; /* a pattern that will not serialise */
+        sk.put(&len, sizeof(len));
+        sk.put(buf, len);
+    }
+    return sk.ok;
+}
+
+/* Records what the live state hashes to *right now*, so the next save can
+ * tell whether anything actually moved. Called after a restore and after a
+ * reset — both leave the synth in a state that is by definition already
+ * stored (or, for a reset, deliberately not worth storing until it is
+ * played). Costs no flash: the probe sink writes nowhere. */
+void state_baseline(uint8_t* buf, size_t cap) {
+    StateSink probe = {nullptr, kHashSeed, 0, true};
+    if (build_state(probe, buf, cap)) {
+        s_state_hash = probe.hash;
+        s_state_hash_valid = true;
+    } else {
+        s_state_hash_valid = false;
+    }
+}
+
+/* `why` only labels the log line. */
+void do_state_save(const char* why) {
+    if (!s_fs_ok) return;
+
+    const size_t cap = seqarp_pattern_max_bytes();
+    uint8_t* buf = (uint8_t*)malloc(cap);
+    if (buf == nullptr) {
+        ESP_LOGW(TAG, "state save: no memory for a %u B pattern",
+                 (unsigned)cap);
+        return;
+    }
+
+    /* Probe first. The dirty flag only says a parameter was *written* — a
+     * knob dragged back where it started, a preset re-loaded, a step toggled
+     * twice — so without this pass an untouched session would still cost a
+     * flash write every few minutes for the life of the instrument. */
+    StateSink probe = {nullptr, kHashSeed, 0, true};
+    if (!build_state(probe, buf, cap)) {
+        ESP_LOGW(TAG, "state save: could not serialise the sequencer");
+        free(buf);
+        return;
+    }
+    if (s_state_hash_valid && probe.hash == s_state_hash) {
+        free(buf);
+        return;
+    }
+
+    char tmp[40], path[40];
+    snprintf(tmp, sizeof(tmp), "%s/tmp.osw", kBasePath);
+    state_path(path, sizeof(path));
+
+    /* Temp file + rename, like every other write here: a power cut during the
+     * save leaves the previous state intact rather than half of this one —
+     * which matters more for this file than for any other, because it is the
+     * one the synth reads on every boot. */
+    FILE* fp = fopen(tmp, "wb");
+    if (fp == nullptr) {
+        ESP_LOGW(TAG, "cannot create %s", tmp);
+        free(buf);
+        return;
+    }
+    StateSink w = {fp, kHashSeed, 0, true};
+    const bool built = build_state(w, buf, cap);
+    fclose(fp);
+    free(buf);
+
+    if (!built || !w.ok || rename(tmp, path) != 0) {
+        ESP_LOGW(TAG, "state save failed (filesystem full?)");
+        remove(tmp);
+        return;
+    }
+    /* The hash of what was *written*, not of the probe: anything that moved
+     * between the two passes is in the file and has to be in the baseline. */
+    s_state_hash = w.hash;
+    s_state_hash_valid = true;
+    ESP_LOGI(TAG, "state saved: %u B [%s]", (unsigned)w.bytes, why);
+}
+
+void do_state_load(void) {
+    /* Whatever happens below, auto-saving is armed on the way out and the
+     * baseline is taken from the live state — a restore that failed still
+     * leaves the synth in a state worth not re-writing immediately. */
+    const size_t cap = seqarp_pattern_max_bytes();
+    uint8_t* buf = (uint8_t*)malloc(cap);
+    if (buf == nullptr) {
+        ESP_LOGW(TAG, "state: no memory for a %u B pattern — not restored",
+                 (unsigned)cap);
+        return;
+    }
+
+    do {
+        if (!s_fs_ok) {
+            ESP_LOGW(TAG, "state: storage unavailable — starting at defaults");
+            break;
+        }
+        char path[40];
+        state_path(path, sizeof(path));
+        FILE* fp = fopen(path, "rb");
+        if (fp == nullptr) {
+            ESP_LOGI(TAG, "state: nothing stored yet — starting at defaults");
+            break;
+        }
+
+        StateHdr h;
+        if (fread(&h, sizeof(h), 1, fp) != 1 || h.magic != kStateMagic ||
+            h.version != kStateVersion || h.params > kMaxPairs ||
+            h.song_len > SEQ_SONG_MAX || h.engine >= SYNTH_ENGINE_COUNT ||
+            h.graph_len > kGraphBlobMax) {
+            fclose(fp);
+            ESP_LOGW(TAG, "state: bad file header, ignoring");
+            break;
+        }
+
+        const int params = (int)h.params;
+        if (params > 0 &&
+            (int)fread(s_pairs, sizeof(preset_pair_t), (size_t)params, fp) !=
+                params) {
+            fclose(fp);
+            ESP_LOGW(TAG, "state: truncated, ignoring");
+            break;
+        }
+        s_graph_len = 0;
+        if (h.graph_len > 0) {
+#if SYNTH_ENABLE_MODULAR
+            s_graph_len = fread(s_graph_blob, 1, h.graph_len, fp);
+            if (s_graph_len != h.graph_len) {
+                fclose(fp);
+                ESP_LOGW(TAG, "state: truncated graph, ignoring");
+                break;
+            }
+#else
+            /* A file written by a build with the modular engine, read by one
+             * without it: step over the blob rather than refuse the state. */
+            if (fseek(fp, (long)h.graph_len, SEEK_CUR) != 0) {
+                fclose(fp);
+                ESP_LOGW(TAG, "state: truncated graph, ignoring");
+                break;
+            }
+#endif
+        }
+        seq_song_entry_t song[SEQ_SONG_MAX];
+        const int song_len = (int)h.song_len;
+        if (song_len > 0 &&
+            (int)fread(song, sizeof(song[0]), (size_t)song_len, fp) !=
+                song_len) {
+            fclose(fp);
+            ESP_LOGW(TAG, "state: truncated song, ignoring");
+            break;
+        }
+
+        /* The engine before anything else: a 0x02xx id only means what the
+         * bound engine says it means, so every value below would land on the
+         * wrong control — or nowhere — until the right engine is in place.
+         * Same ordering rule as the graph blob and as S27's seq.pattern. */
+        const bool switched = switch_engine_wait((int)h.engine, "state");
+
+#if SYNTH_ENABLE_MODULAR
+        if (switched && (int)h.engine == SYNTH_ENGINE_MODULAR &&
+            s_graph_len > 0) {
+            osynth::graph::Model m;
+            if (osynth::graph::deserialize(s_graph_blob, s_graph_len, m)) {
+                const esp_err_t rc = osynth::graph::load_model(m);
+                if (rc != ESP_OK) {
+                    ESP_LOGW(TAG, "state: graph rejected (%s), values only",
+                             esp_err_to_name(rc));
+                }
+            } else {
+                ESP_LOGW(TAG, "state: graph blob malformed, values only");
+            }
+        }
+#else
+        (void)switched;
+#endif
+
+        /* Patterns, streamed straight out of the file into the model. Same
+         * rule the set slots follow: the sequencer that comes back is the one
+         * that was saved, so patterns the file does not carry are cleared
+         * rather than left holding whatever was there before. */
+        int loaded = 0;
+        for (int p = 0; p < (int)h.patterns; ++p) {
+            uint32_t len = 0;
+            if (fread(&len, sizeof(len), 1, fp) != 1 || len == 0) break;
+            if (len > cap) {
+                /* A pattern from a build with more tracks or steps than this
+                 * one — skip it rather than abandon the restore. */
+                if (p < SEQ_PATTERNS) seq_pattern_clear(p);
+                if (fseek(fp, (long)len, SEEK_CUR) != 0) break;
+                continue;
+            }
+            if (fread(buf, 1, len, fp) != len) break;
+            if (p < SEQ_PATTERNS && seqarp_pattern_import(p, buf, len)) {
+                ++loaded;
+            }
+        }
+        for (int p = (int)h.patterns; p < SEQ_PATTERNS; ++p) {
+            seq_pattern_clear(p);
+        }
+        fclose(fp);
+
+        seq_song_set_length(song_len);
+        for (int i = 0; i < song_len; ++i) seq_song_set(i, &song[i]);
+
+        /* Defaults first, stored values on top — a sparse blob has to land on
+         * a defined state, exactly as a preset does. */
+        ParamStore& ps = ParamStore::instance();
+        const size_t total = ps.listIds(s_ids, ParamStore::kMaxParams);
+        for (size_t i = 0; i < total; ++i) {
+            if (!state_id(s_ids[i])) continue;
+            const ParamDesc* d = ps.describe(s_ids[i]);
+            if (d != nullptr) ps.set(s_ids[i], d->def, ParamOrigin::Preset);
+        }
+        for (int i = 0; i < params; ++i) {
+            /* The fence is the authority on what may be applied, whatever
+             * wrote the file — a firmware that stops covering an id must not
+             * have it pushed back in from an old state. */
+            if (!state_id(s_pairs[i].id)) continue;
+            ps.set(s_pairs[i].id, s_pairs[i].val, ParamOrigin::Preset);
+        }
+
+        /* Last, so the edited pattern's own scale/root/swing win over the
+         * defaults the reset above wrote: they are pattern data, and the
+         * pattern they belong to has only just been imported. */
+        seqarp_pattern_reflect(seqarp_edit_pattern());
+
+        /* Display only — reflect() writes with origin Preset, which the
+         * listener ignores, so nothing is re-loaded. It just means the app's
+         * "current preset" readout survives the power cycle with everything
+         * else. */
+        if (h.preset >= 0 && h.preset < kSlotCount) {
+            s_cur_load = h.preset;
+            reflect(PRESET_PID_LOAD, s_cur_load);
+        }
+
+        ESP_LOGI(TAG,
+                 "state restored: %s, %d value(s), %d pattern(s), %d song "
+                 "step(s), preset %d",
+                 engine_name((int)h.engine), params, loaded, song_len,
+                 (int)h.preset);
+    } while (false);
+
+    state_baseline(buf, cap);
+    free(buf);
+    s_state_dirty.store(false, std::memory_order_relaxed);
+    s_state_ready.store(true, std::memory_order_relaxed);
+}
+
+/* Back to the state a first boot would have produced — before the working
+ * state existed, that is simply what every boot produced.
+ *
+ * Deliberately *not* a factory reset. The NVS settings (master volume, the
+ * line input, the output level, the USB role) survived a power cycle long
+ * before this file did, and someone reaching for "reset the patch" is not
+ * asking for their monitoring level back at 0.8 or their USB role flipped.
+ * state_id() draws that line and this reuses it. The looper is left alone for
+ * the same reason: it is not in the working state either, and silently wiping
+ * a take someone is part-way through would be indefensible. */
+void do_state_reset(void) {
+    ParamStore& ps = ParamStore::instance();
+
+    /* The engine first, for the ordering reason the restore documents: the
+     * 0x02xx defaults that matter are the ones the *default* engine
+     * registers. */
+    const ParamDesc* ed = ps.describe(osynth::PID_ENGINE_TYPE);
+    if (ed != nullptr) {
+        (void)switch_engine_wait((int)ed->def, "reset");
+    }
+
+#if SYNTH_ENABLE_MODULAR
+    osynth::graph::reset_model();
+    if ((int)engines_active_type() == SYNTH_ENGINE_MODULAR) {
+        /* Bound: the plan has to be recompiled from the model the reset just
+         * wrote, or the audio task keeps rendering the old patch. */
+        const osynth::graph::Model m = osynth::graph::model();
+        (void)osynth::graph::load_model(m);
+    }
+#endif
+
+    const size_t total = ps.listIds(s_ids, ParamStore::kMaxParams);
+    for (size_t i = 0; i < total; ++i) {
+        if (!state_id(s_ids[i])) continue;
+        const ParamDesc* d = ps.describe(s_ids[i]);
+        if (d != nullptr) ps.set(s_ids[i], d->def, ParamOrigin::Preset);
+    }
+
+    for (int p = 0; p < SEQ_PATTERNS; ++p) seq_pattern_clear(p);
+    seq_song_set_length(0);
+    seqarp_pattern_reflect(seqarp_edit_pattern());
+
+    s_cur_load = 0;
+    reflect(PRESET_PID_LOAD, 0);
+
+    if (s_fs_ok) {
+        char path[40];
+        state_path(path, sizeof(path));
+        remove(path); /* absent is "never saved" as far as the next boot cares */
+    }
+
+    const size_t cap = seqarp_pattern_max_bytes();
+    uint8_t* buf = (uint8_t*)malloc(cap);
+    if (buf != nullptr) {
+        state_baseline(buf, cap);
+        free(buf);
+    } else {
+        s_state_hash_valid = false;
+    }
+    s_state_dirty.store(false, std::memory_order_relaxed);
+
+    /* Snaps back to 0 so the app can fire it again, and so nothing reads a
+     * latched 1 as "still resetting". */
+    reflect(PRESET_PID_STATE_RESET, 0);
+    ESP_LOGI(TAG, "state reset to defaults");
+}
+
+/* Runs on the preset task between requests. The three gates are persist.h's,
+ * for the same reason: a flash write parks the render chain, so it waits for
+ * the edits to stop, then for the output to go quiet, and only gives up
+ * waiting for silence after kStateMaxDeferMs — losing a session because
+ * someone left a drone running is worse than one stall. */
+void state_tick(void) {
+    static uint32_t last_seq = 0;
+    static uint32_t settled_ms = 0;
+    static uint32_t waiting_ms = 0;
+
+    if (!s_state_ready.load(std::memory_order_relaxed) ||
+        !s_state_dirty.load(std::memory_order_relaxed)) {
+        settled_ms = 0;
+        waiting_ms = 0;
+        return;
+    }
+
+    const uint32_t seq = s_state_seq.load(std::memory_order_relaxed);
+    if (seq != last_seq) {
+        last_seq = seq;
+        settled_ms = 0; /* still moving — but the defer budget keeps running */
+    } else {
+        settled_ms += kStatePollMs;
+    }
+    waiting_ms += kStatePollMs;
+
+    if (settled_ms < kStateSettleMs) return;
+
+    const bool quiet = audio_io_quiet_ms() >= kStateQuietMs;
+    const bool overdue = waiting_ms >= kStateMaxDeferMs;
+    if (!quiet && !overdue) return;
+
+    /* Cleared before the write, so a change that lands during it leaves the
+     * state dirty again rather than being swallowed. */
+    s_state_dirty.store(false, std::memory_order_relaxed);
+    do_state_save(quiet ? "quiet" : "overdue");
+    settled_ms = 0;
+    waiting_ms = 0;
+}
+

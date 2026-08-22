@@ -33,6 +33,50 @@
  * mutes). Rig setup and transport state are not part of a set: seq.clock,
  * seq.mode, the playhead telemetry and the edit cursors stay put across a
  * load, exactly as they do across a preset load.
+ *
+ * ---------------------------------------------------------------------------
+ * The working state (S40): "the box as you left it"
+ *
+ * Above the named slots sits one unnamed one, `/lfs/state.osw`, and nothing
+ * ever asks for it. It is written by itself whenever the synth has been left
+ * alone for a few seconds and the output has gone quiet, and it is read back
+ * once at boot. Power the instrument off mid-session and it comes back on the
+ * same engine, the same patch, the same drum kit, the same graph and the same
+ * patterns — which is what a hardware groovebox does and what the named slots
+ * alone could never do, because remembering to save is exactly what nobody
+ * does before pulling the plug.
+ *
+ * It carries: every patch parameter (the preset rule below), plus the three
+ * things a preset deliberately leaves alone because a *named* snapshot must
+ * not move them behind the player — engine.type, drums.kit and seq.pattern —
+ * plus the modular graph, plus the whole sequencer (every pattern and the
+ * song chain), plus which preset slot was last loaded, so the app's "current
+ * preset" readout survives the power cycle too.
+ *
+ * It deliberately does not carry:
+ *   - anything persist (S25) already owns — master volume, the line input, the
+ *     output level, the USB role. Those live in NVS with their own write
+ *     policy, and two owners writing one setting from two files is a value
+ *     that depends on which one lost the race. persist_owns() is the fence.
+ *   - the transport (seq.mode) and the clock source (seq.clock). A synth that
+ *     boots *playing*, or boots slaved to a clock that is not plugged in and
+ *     therefore looks dead, is a trap — and it is the same trap the set slots
+ *     document.
+ *   - the looper (0x06xx). Minutes of audio is not a setting; the looper has
+ *     its own explicit save, and auto-writing takes to flash would stall the
+ *     render chain for as long as it took.
+ *   - the momentary controls (voc.freeze, anr.learn, seq.fill) and every
+ *     firmware-written telemetry value, for the reasons skip_id() lists.
+ *
+ * Writes are made rare and then made inaudible, by the same rules persist.h
+ * sets out and for the same reason: dirty-marked rather than written,
+ * settled, then held until audio_io reports silence, and skipped entirely
+ * when the bytes would be identical to what is already on flash.
+ *
+ * `state.reset` (0x000F) is the way back: it puts everything the working
+ * state covers back to its registered default, clears the sequencer and the
+ * graph, and forgets the file — the state a first boot would have produced,
+ * with the NVS settings above left exactly as they are.
  */
 #pragma once
 
@@ -65,6 +109,10 @@ extern "C" {
 #define PRESET_PID_SEQ_SAVE    0x0005
 #define PRESET_PID_SEQSET_LOAD 0x0006
 #define PRESET_PID_SEQSET_SAVE 0x0007
+/* Write 1 to reset the synth to the state a first boot would have produced.
+ * Int, min 0, and it snaps back to 0 when the reset has been performed, so an
+ * app can watch it the way it watches the load/save triggers. */
+#define PRESET_PID_STATE_RESET 0x000F
 
 /* Mounts LittleFS on the "storage" partition (formats on first boot; a
  * mount failure degrades to factory-presets-only with a warning), registers
@@ -86,6 +134,25 @@ esp_err_t presets_request_seq_save(int slot);
  * is the sequencer as it was saved, not a merge. */
 esp_err_t presets_request_seqset_load(int slot);
 esp_err_t presets_request_seqset_save(int slot);
+
+/* ---- the working state ("current patch"; see the header comment) -------- */
+
+/* Queues the boot restore. Call *after* audio_io_start(): applying it can
+ * switch engines, and the S6 switch protocol's detach handshake needs the
+ * audio task to be running blocks — before it there is no render boundary to
+ * hand over on and the switch is refused. Returns ESP_OK when queued; the
+ * result is logged, and a missing or unreadable file simply leaves the synth
+ * at its registered defaults.
+ *
+ * Auto-saving starts when this completes, and not before: a restore that
+ * marked its own writes dirty would spend the first quiet moment writing back
+ * the file it had just read. */
+esp_err_t presets_state_restore(void);
+
+/* Writes the working state now if anything has moved, ignoring the settle and
+ * silence waits. For a caller that knows a stall is acceptable — before a
+ * deliberate reboot. Blocking; control tasks only. */
+esp_err_t presets_state_save_now(void);
 
 /* True if the slot holds a preset; copies its name out (both optional
  * outputs). Served from an in-RAM directory cache, so it is safe to call in a

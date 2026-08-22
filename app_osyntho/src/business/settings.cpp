@@ -104,6 +104,18 @@ void Settings::fillSettingsCacheDefaultValues() {
   // in Main.qml/UI.qml; an out-of-range value falls back to Home there.
   settingsCache["startup_screen"] = "0";
   settingsCache["last_swipeview_index"] = "0";  // page left on the last run
+  // Horizontal drag = change page (SwipeView.interactive). Off by default:
+  // nearly every page is covered in draggable controls, and a drag that starts
+  // on one of them and is taken as a page swipe both misses the control and
+  // moves the page. The nav dock and the toolbar arrows always work.
+  settingsCache["swipe_change_screens"] = "false";
+  // Load the two levels stored in a library patch (master volume / analogue
+  // output level) along with the rest of it. Both off: they describe the room
+  // and the wiring, not the sound, and a patch that reset the monitoring level
+  // of whoever loaded it is the kind of surprise the firmware's own presets
+  // exclude them to avoid.
+  settingsCache["patch_load_master_volume"] = "false";
+  settingsCache["patch_load_out_level"] = "false";
 }
 
 void Settings::fillSettingsCacheCurrentValues() {
