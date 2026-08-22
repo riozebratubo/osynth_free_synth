@@ -7,11 +7,11 @@ import org.osynth.osyntho
 // Engine-independent (registered at boot), so these persist across engine
 // switches.
 //
-// The panels are in signal-chain order — drive -> chorus -> flanger ->
-// phaser -> delay -> granular -> reverb -> bitcrush -> filter -> EQ ->
-// compressor -> stereo — so the page reads the way the audio flows. The two
-// LFO panels come last because they are not a stage of the chain; they
-// modulate the panels above them.
+// The panels are in signal-chain order — adaptive NR -> NR -> vocoder ->
+// drive -> chorus -> flanger -> phaser -> delay -> granular -> reverb ->
+// bitcrush -> filter -> EQ -> compressor -> stereo — so the page reads the
+// way the audio flows. The two LFO panels come last because they are not a
+// stage of the chain; they modulate the panels above them.
 Item {
     Flickable {
         anchors.fill: parent
@@ -29,7 +29,30 @@ Item {
             // Everything from here down self-hides on firmware that does not
             // register the prefix, same as Line in above — so one app build
             // still drives a pre-S33 or pre-S34 synth.
-            // First in the firmware's chain, so first on the page.
+            //
+            // Noise reduction (S39) is the head of the firmware's chain and
+            // so the head of the page. Hold-to-learn writes the same id the
+            // switch beside it does, inverted against the vocoder's freeze
+            // below: held means *doing* something here, where held means
+            // "not freezing" there.
+            //
+            // Both cards carry a `src` selector (S39b). It is drawn beside the
+            // bypass rather than among the knobs because it is not a setting
+            // of the effect, it is what the effect is pointed at: `input`
+            // cleans the microphone and leaves the instrument alone, and needs
+            // Line in's route set to fx to have anything to work on.
+            ParamGroup { title: "Adaptive NR"; prefix: "fx.anr" }
+            HoldSampleCard {
+                title: "Noise profile"
+                paramName: "fx.anr.learn"
+                downValue: 1
+                upValue: 0
+                idleText: "Hold to learn"
+                downText: "Learning…"
+                activeText: "Learning"
+                hint: "Hold during a silent moment; the room is sampled."
+            }
+            ParamGroup { title: "Noise reduction"; prefix: "fx.nr" }
             ParamGroup { title: "Vocoder"; prefix: "fx.voc" }
             HoldSampleCard {
                 title: "Vocoder capture"

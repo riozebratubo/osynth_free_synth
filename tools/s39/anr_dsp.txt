@@ -1,0 +1,287 @@
+/* ---- adaptive noise reduction (S39): subtract whatever never stops ----
+ *
+ * A per-band spectral subtractor. The bus is split into `bands` sections;
+ * each keeps an estimate of its own *steady* level, and each is attenuated by
+ * however much of what is currently in it looks like that estimate. Speech,
+ * notes and transients move; a fan, a hiss floor and a spinning disk do not,
+ * and that difference is the entire algorithm.
+ *
+ * Reconstruction is by *residual*, not by summing the bank back up:
+ *
+ *     y = x + sum_k (g_k - 1) * band_k(x)
+ *
+ * which buys the one property that matters for a unit that spends most of its
+ * life doing nothing: with every g_k at 1 the output is the input, sample for
+ * sample — no filterbank colouration, no phase smear to explain away. A bank
+ * summed the ordinary way is only approximately flat, and "approximately
+ * flat" is an audible dulling that would sit on the patch whether or not
+ * there was any noise to remove. The price is at the other end — the deepest
+ * achievable cut is bounded by how well the bank sums back — and that end is
+ * capped by `fx.anr.floor` anyway, which no useful setting takes past -30 dB.
+ *
+ * Band shapes: the first is a lowpass and the last a highpass, both
+ * Butterworth, so `low` and `high` are crossovers and not centres. That is
+ * what makes the bank cover the whole spectrum, and it matters more here than
+ * anywhere else in this file: rumble under `low` and hiss over `high` are
+ * precisely the two places noise lives, and a bank of bandpasses alone would
+ * have left both of them untouched. Everything between is a *unity-peak*
+ * bandpass — BpN, not Bp, because the residual form adds each band back at
+ * its own gain and a plain Bp peaks at Q, which would subtract two and a half
+ * times what it measured.
+ *
+ * ---- the estimator ----
+ *
+ * A sliding-window minimum, in two buckets held one window each. The floor of
+ * a band is its minimum over a few seconds, not its average: an average
+ * includes the speech, the minimum does not. `fx.anr.adapt` is the window.
+ *
+ * Two things guard it, and both exist because this runs on a *synth* bus,
+ * where a held pad looks exactly like a fan:
+ *
+ *   - a band is offered to the bucket only while it is within
+ *     kAnrSignalRatio of the current estimate. Above that it is signal, and
+ *     signal has no business in a noise profile.
+ *   - if two whole windows go by with nothing offered — something loud has
+ *     been sitting in that band the entire time — the estimate may climb
+ *     toward the raw minimum, by no more than kAnrCreep per window. Without
+ *     an escape the unit locks out completely on any input that starts loud;
+ *     with an unbounded one, a long pad is learned and fades away under the
+ *     player's hands. Bounded, a pad 40 dB up takes the better part of a
+ *     minute to be mistaken for noise, while a floor that genuinely rises
+ *     6 dB is tracked in one window.
+ *
+ * The estimate carries kAnrBias, because the minimum of a fluctuating noise
+ * sits below its average and subtracting the minimum would leave most of the
+ * noise behind. That is the classic minimum-statistics bias correction, at a
+ * fixed factor rather than the derived one: the derivation needs the variance
+ * of the estimator, and one number tuned by ear is worth more here than three
+ * that are exactly right about a Gaussian assumption the input does not obey.
+ *
+ * Nothing is subtracted from a band until a window has closed over it, and a
+ * band is not primed at all until something turns up in it. The unit listens
+ * for `adapt` seconds after being switched on and only then starts working,
+ * which is the difference between switching it on mid-sentence and having the
+ * sentence disappear; the per-band half of that is what makes switching it on
+ * over a *silent* bus — the usual case, since that is when anyone sets this up
+ * — behave the same way instead of priming every estimate to zero and then
+ * rejecting every real signal for being too far above it. `fx.anr.learn` is the short cut: held, the window drops
+ * to kAnrLearnMs and the offer test is waived, so a second of held button in
+ * a quiet room is a complete profile.
+ *
+ * ---- rates ----
+ *
+ * Everything except the filters runs once per block: one mean-|x| accumulator
+ * per band, then the estimate, the gain and its attack/release, then a linear
+ * ramp of (g - 1) across the *following* block. Same shape as the compressor,
+ * same reason — the divides stay out of the sample loop — and the same
+ * consequence, that gain movement lands on a 1.33 ms grid, which is why
+ * `fx.anr.attack` has a 1 ms floor. The one-block lag is deliberate: the
+ * alternative is running the whole bank twice to look 1.33 ms further into a
+ * noise floor that is by definition not changing.
+ */
+
+constexpr float kAnrSignalRatio = 4.0f; /* +12 dB over the estimate is signal */
+constexpr float kAnrBias = 1.5f;        /* minimum -> average, see above */
+constexpr float kAnrCreep = 2.0f;       /* ceiling on a locked-out band's climb */
+constexpr float kAnrLearnMs = 80.0f;    /* the window while `learn` is held */
+constexpr float kAnrOversub = 3.0f;     /* what `amount` = 1 subtracts */
+constexpr float kAnrEndK = 1.41421356f; /* Butterworth: the two end bands */
+constexpr float kAnrHuge = 1e30f;       /* "this bucket took nothing" */
+constexpr float kAnrSeed = 1e-6f;       /* keeps the offer test alive at zero */
+constexpr float kAnrEps = 1e-7f;      /* under this a band is empty, not quiet */
+
+struct AnrBand {
+    osynth::dsp::Svf l, r;
+    osynth::dsp::SvfCoef c;
+    osynth::dsp::SvfMode mode = osynth::dsp::SvfMode::BpN;
+    float acc = 0.0f;      /* sum |band| over the block, both channels */
+    float noise = 0.0f;    /* the estimate, biased, in the units of acc */
+    float cur = kAnrHuge;  /* this window's offered minimum */
+    float prev = kAnrHuge; /* the previous window's */
+    float raw = kAnrHuge;  /* this window's minimum, offered or not */
+    float g = 1.0f;        /* smoothed gain, block boundary */
+    float d = 0.0f;        /* (g - 1), ramped across the block */
+    float dstep = 0.0f;
+    /* Per band, not per unit. A band with nothing in it has nothing to
+     * estimate from, and priming it anyway from a silent bus is what used to
+     * wedge the whole unit — see the estimator note above. */
+    bool primed = false;  /* the estimate holds something */
+    bool settled = false; /* ...and a window has closed over it */
+};
+
+struct AnrFx {
+    AnrBand b[kAnrBandsMax];
+    int n = 0;
+    /* Doubles as the "has run since the last reset" flag: -1 both requests a
+     * coefficient build and says the state below is already clean. */
+    int c_bands = -1;
+    float c_low = 0.0f, c_high = 0.0f;
+    uint32_t win_cnt = 0;
+    osynth::dsp::Smooth s_amount, s_floor;
+    UnitState u;
+};
+
+AnrFx s_anr;
+
+void anr_rebuild(AnrFx& a, int bands, float low, float high) {
+    if (bands < kAnrBandsMin) bands = kAnrBandsMin;
+    if (bands > kAnrBandsMax) bands = kAnrBandsMax;
+    /* Two crossovers with a couple of octaves between them; below this the
+     * ratio arithmetic divides by ~0. */
+    if (high < low * 4.0f) high = low * 4.0f;
+
+    const float ratio = powf(high / low, 1.0f / (float)(bands - 1));
+    /* Adjacent -3 dB skirts landing on their neighbours' centres — the same
+     * constant-Q figure the vocoder's bank uses, for the same reason: it is
+     * the spacing at which a bank sums back to something flat. */
+    const float k = (ratio - 1.0f) / sqrtf(ratio);
+    float f = low;
+    for (int i = 0; i < bands; ++i) {
+        const bool end = (i == 0) || (i == bands - 1);
+        a.b[i].c = osynth::dsp::svf_coef_k(f, end ? kAnrEndK : k, kSr);
+        a.b[i].mode = (i == 0) ? osynth::dsp::SvfMode::Lp
+                      : (i == bands - 1) ? osynth::dsp::SvfMode::Hp
+                                         : osynth::dsp::SvfMode::BpN;
+        f *= ratio;
+    }
+    a.n = bands;
+}
+
+void SYNTH_RENDER_IRAM anr_process(float* __restrict__ bl,
+                                   float* __restrict__ br, size_t frames) {
+    AnrFx& a = s_anr;
+    const float m = unit_gate(a.u, pv(ANR_ON), nullptr, 0);
+    if (m < 0.0f) {
+        /* Off: drop the banks and the profile, once, on the way down. A
+         * profile describes a room, and the room it is switched back on in is
+         * the only one worth describing. */
+        if (a.c_bands >= 0) {
+            for (int k = 0; k < kAnrBandsMax; ++k) a.b[k] = AnrBand{};
+            a.c_bands = -1;
+            a.win_cnt = 0;
+        }
+        return;
+    }
+
+    const int bands = (int)pv(ANR_BANDS);
+    const float low = pvm(ANR_LOW);
+    const float high = pvm(ANR_HIGH);
+    if (bands != a.c_bands || low != a.c_low || high != a.c_high) {
+        /* A moved crossover leaves every estimate describing a band that no
+         * longer exists, so the profile goes with the coefficients rather
+         * than being carried across to quietly mean something else. */
+        for (int k = 0; k < kAnrBandsMax; ++k) {
+            a.b[k].noise = 0.0f;
+            a.b[k].cur = a.b[k].prev = a.b[k].raw = kAnrHuge;
+            a.b[k].primed = false;
+            a.b[k].settled = false;
+        }
+        a.win_cnt = 0;
+        anr_rebuild(a, bands, low, high);
+        a.c_bands = bands;
+        a.c_low = low;
+        a.c_high = high;
+    }
+    const int n = a.n;
+
+    const float amount = osynth::dsp::smooth_lin(a.s_amount, pvm(ANR_AMOUNT));
+    const float gmin = powf(
+        10.0f,
+        osynth::dsp::smooth_lin(a.s_floor, pvm(ANR_FLOOR)) * (1.0f / 20.0f));
+    const float sub = amount * kAnrOversub;
+
+    /* One block is the clock for everything below the filters. */
+    const float blk_s = (float)frames / kSr;
+    const float ka =
+        1.0f - expf(-blk_s / fmaxf(pvm(ANR_ATTACK) * 0.001f, 1e-4f));
+    const float kr =
+        1.0f - expf(-blk_s / fmaxf(pvm(ANR_RELEASE) * 0.001f, 1e-4f));
+
+    const bool learn = pv(ANR_LEARN) >= 0.5f;
+    const float win_s = learn ? (kAnrLearnMs * 0.001f) : pvm(ANR_ADAPT);
+    uint32_t win = (uint32_t)(win_s / blk_s);
+    if (win < 1) win = 1;
+
+    /* The bank, and the correction it earned last block. bl[i] is read into a
+     * local first: every band has to analyse the *input*, not what the bands
+     * ahead of it have already been subtracted from. */
+    for (size_t i = 0; i < frames; ++i) {
+        const float xl = bl[i], xr = br[i];
+        float cl = 0.0f, cr = 0.0f;
+        for (int k = 0; k < n; ++k) {
+            AnrBand& b = a.b[k];
+            const float yl = osynth::dsp::svf_next(b.l, b.c, b.mode, xl);
+            const float yr = osynth::dsp::svf_next(b.r, b.c, b.mode, xr);
+            b.acc += fabsf(yl) + fabsf(yr);
+            cl += b.d * yl;
+            cr += b.d * yr;
+            b.d += b.dstep;
+        }
+        bl[i] = xl + m * cl;
+        br[i] = xr + m * cr;
+    }
+
+    const bool boundary = (++a.win_cnt >= win);
+    if (boundary) a.win_cnt = 0;
+
+    const float inv = 1.0f / (2.0f * (float)frames);
+    for (int k = 0; k < n; ++k) {
+        AnrBand& b = a.b[k];
+        const float mag = b.acc * inv;
+        b.acc = 0.0f;
+
+        if (!b.primed) {
+            /* Seeded from whatever is there, loud or not — the offer test
+             * below needs a non-zero estimate to be a test at all, and the
+             * first window to close replaces this with a real minimum. But
+             * only from *something*: an empty band is not a quiet one, and
+             * an estimate of zero rejects every signal that follows it. */
+            if (mag > kAnrEps) {
+                b.noise = mag * kAnrBias;
+                b.cur = b.prev = b.raw = mag;
+                b.primed = true;
+            }
+        } else {
+            if (mag < b.raw) b.raw = mag;
+            if (learn || mag < b.noise * kAnrSignalRatio + kAnrSeed) {
+                if (mag < b.cur) b.cur = mag;
+            }
+            if (boundary) {
+                if (b.cur < kAnrHuge || b.prev < kAnrHuge) {
+                    b.noise = fminf(b.cur, b.prev) * kAnrBias;
+                } else {
+                    /* Two windows with nothing plausible in either. Climb,
+                     * but by no more than kAnrCreep — see the estimator note
+                     * above. */
+                    b.noise = fminf(b.raw * kAnrBias, b.noise * kAnrCreep);
+                }
+                b.prev = b.cur;
+                b.cur = kAnrHuge;
+                b.raw = kAnrHuge;
+                /* A window that closed on silence did not measure a floor,
+                 * it measured the absence of one. Throwing it away and
+                 * re-priming is the difference between an input that arrives
+                 * late being cleaned up and being ignored forever. */
+                if (b.noise <= kAnrEps) {
+                    b.primed = false;
+                    b.settled = false;
+                } else {
+                    b.settled = true;
+                }
+            }
+        }
+
+        /* Wiener-ish: what fraction of this band is not accounted for by the
+         * estimate. Floored, because a band taken to silence is what makes
+         * the residual noise sound like wind chimes rather than like a room;
+         * leaving 20 dB of it in place is what a listener hears as "quiet". */
+        float g = 1.0f;
+        if (b.settled && mag > kAnrEps) {
+            g = (mag - sub * b.noise) / mag;
+            if (g < gmin) g = gmin;
+            else if (g > 1.0f) g = 1.0f;
+        }
+        b.g += ((g > b.g) ? ka : kr) * (g - b.g);
+        b.dstep = (b.g - 1.0f - b.d) / (float)frames;
+    }
+}

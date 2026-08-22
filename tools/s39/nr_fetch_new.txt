@@ -1,0 +1,26 @@
+    /* What this unit is looking at (S39b); the note in anr_process() covers
+     * why these are not __restrict__. */
+    const bool from_input = ((int)pv(NR_SRC) == 1);
+    const float* sl = bl;
+    const float* sr = br;
+    if (from_input) {
+        if (frames > SYNTH_BLOCK_SIZE ||
+            !audio_io_in_fx_block(s_nr_src_l, s_nr_src_r, frames)) {
+            /* Nothing arriving, so nothing to correct. The filters and the
+             * detector are dropped rather than left charged: an input that
+             * comes back should meet an open expander and clean integrators,
+             * not the tail of the last thing it said. */
+            c.hp_l = c.hp_r = osynth::dsp::Svf{};
+            for (int h = 0; h < kNrHumHarmonics; ++h) {
+                c.hum_l[h] = osynth::dsp::Svf{};
+                c.hum_r[h] = osynth::dsp::Svf{};
+            }
+            c.env = 0.0f;
+            c.gain = 1.0f;
+            c.hold = 0;
+            return;
+        }
+        sl = s_nr_src_l;
+        sr = s_nr_src_r;
+    }
+

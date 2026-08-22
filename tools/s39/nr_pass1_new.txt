@@ -1,0 +1,42 @@
+    /* Pass 1: the filters, and the detector on what leaves them. What goes on
+     * the bus is the filters' *difference*: in `bus` mode that is the familiar
+     * dry/wet crossfade, and in `input` mode it replaces the input's
+     * contribution and touches nothing else. */
+    float peak = 0.0f;
+    for (size_t i = 0; i < frames; ++i) {
+        const float xl = sl[i], xr = sr[i];
+        float l = xl, r = xr;
+        if (use_hp) {
+            l = osynth::dsp::svf_next(c.hp_l, c.hp_c, osynth::dsp::SvfMode::Hp,
+                                      l);
+            r = osynth::dsp::svf_next(c.hp_r, c.hp_c, osynth::dsp::SvfMode::Hp,
+                                      r);
+        }
+        if (hum > 0) {
+            for (int h = 0; h < kNrHumHarmonics; ++h) {
+                l = osynth::dsp::svf_next(c.hum_l[h], c.hum_c[h],
+                                          osynth::dsp::SvfMode::Notch, l);
+                r = osynth::dsp::svf_next(c.hum_r[h], c.hum_c[h],
+                                          osynth::dsp::SvfMode::Notch, r);
+            }
+        }
+        /* Kept only where pass 2 needs it back: there the expander's share of
+         * the correction is a multiple of the filtered *input*, not of the
+         * bus. Overwriting the scratch is safe — xl was read out of it. */
+        if (from_input) {
+            s_nr_src_l[i] = l;
+            s_nr_src_r[i] = r;
+        }
+        bl[i] += m * (l - xl);
+        br[i] += m * (r - xr);
+        /* Detected on what the unit is *looking at* rather than on the bus: in
+         * `input` mode a synth beside it must not be able to hold the expander
+         * open, and in `bus` mode the two are the same signal once the
+         * crossfade is through. Worth knowing which level the threshold is in
+         * terms of — the input as it arrives on the bus, i.e. after in.gain,
+         * which is the one the master meter shows. */
+        const float al = fabsf(l), ar = fabsf(r);
+        const float t = (al > ar) ? al : ar;
+        c.env += ((t > c.env) ? ka : kr) * (t - c.env);
+        if (c.env > peak) peak = c.env;
+    }

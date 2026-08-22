@@ -1,0 +1,199 @@
+/* ---- noise reduction (S39): high-pass, hum notch, downward expander ----
+ *
+ * The fixed half of the pair, and the one that behaves the way the DSP inside
+ * a USB microphone behaves: three stages, no learning, every number chosen by
+ * the player. It is what the adaptive unit above cannot be — predictable —
+ * and that is its entire job description.
+ *
+ *   fx.nr.hpf     a Butterworth high-pass. Desk rumble, footfalls, the low
+ *                 end of a laptop fan, and the thump of a hand landing on the
+ *                 same table as the microphone. The registered minimum (20 Hz)
+ *                 *is* the bypass: below audibility there is nothing for a
+ *                 two-pole to remove, so the stage is skipped outright rather
+ *                 than run at a setting that rounds to unity — the same
+ *                 convention fx.rev.tone uses at the other end of the range.
+ *   fx.nr.hum     notches at the mains frequency and its first two harmonics.
+ *                 Q of 20, which is narrow enough to leave a bass line alone
+ *                 and deep enough to take out what an unbalanced lead picks
+ *                 up from a wall wart. Off by default: a notch nobody needs
+ *                 is a hole in the spectrum nobody asked for.
+ *   the expander  everything below fx.nr.thresh is pushed down at
+ *                 fx.nr.ratio, no further than fx.nr.floor, and not until
+ *                 fx.nr.hold has run out.
+ *
+ * `floor` is the control that separates this from a gate, and it is the one
+ * worth understanding. A gate closes; a room that goes absolutely silent
+ * between words does not sound like a quiet room, it sounds like a broken
+ * connection, and the moment it reopens the noise arrives as an audible
+ * *swell*. Capping the attenuation at -24 dB leaves the room present and
+ * simply distant, which is what "quiet" sounds like to a listener. Take
+ * `floor` to -60 dB and this is a gate again, deliberately.
+ *
+ * `hold` is the other half of that. Speech ends in unvoiced consonants at a
+ * fraction of the energy of the vowel before them, and an expander with no
+ * hold eats every one of them — the classic word-ending chop. A hold of
+ * 150 ms keeps the unit open across it and across the gaps *inside* a phrase,
+ * which are shorter than the gaps between phrases by a wide enough margin for
+ * one number to tell them apart.
+ *
+ * The detector runs on the *filtered* signal, which is why the filters are
+ * first: a footfall is nearly all energy below 80 Hz, and a gate that opens
+ * on it has opened for something nobody can hear. Peak, per sample, with the
+ * gain computed once per block from the block's peak and ramped across the
+ * next one — the compressor's structure exactly, including the reason for
+ * fx.nr.attack's 1 ms floor (below the block period it would be a promise the
+ * structure cannot keep).
+ *
+ * Stereo, one detector: the two channels share a gain because a microphone
+ * that ducks one side and not the other is a microphone with a hole in the
+ * middle of it. That is also why the detector takes the larger of the two
+ * rather than their sum.
+ */
+
+constexpr int kNrHumHarmonics = 3;
+constexpr float kNrHumK = 0.05f;        /* Q = 20 */
+constexpr float kNrHpfOff = 20.0f;      /* the registered minimum is the bypass */
+constexpr float kNrHpK = 1.41421356f;   /* Butterworth */
+constexpr float kNrKnee = 6.0f;         /* dB, fixed, as on the compressor */
+constexpr float kNrFloorEps = 1e-6f;
+
+struct NrFx {
+    osynth::dsp::Svf hp_l, hp_r;
+    osynth::dsp::SvfCoef hp_c;
+    osynth::dsp::Svf hum_l[kNrHumHarmonics], hum_r[kNrHumHarmonics];
+    osynth::dsp::SvfCoef hum_c[kNrHumHarmonics];
+    int c_hum = -1;    /* the hum coefficients cost three tanf to build */
+    float env = 0.0f;  /* detector */
+    float gain = 1.0f; /* smoothed, block boundary */
+    uint32_t hold = 0; /* blocks of hold left */
+    osynth::dsp::Smooth s_hpf, s_thresh, s_ratio, s_floor, s_atk, s_hold, s_rel;
+    UnitState u;
+};
+
+NrFx s_nr;
+
+void SYNTH_RENDER_IRAM nr_process(float* __restrict__ bl,
+                                  float* __restrict__ br, size_t frames) {
+    NrFx& c = s_nr;
+    const float m = unit_gate(c.u, pv(NR_ON), nullptr, 0);
+    if (m < 0.0f) {
+        /* Off: drop the filter states and reopen the expander, so switching
+         * back on cannot ring or arrive mid-duck. */
+        c.hp_l = c.hp_r = osynth::dsp::Svf{};
+        for (int h = 0; h < kNrHumHarmonics; ++h) {
+            c.hum_l[h] = osynth::dsp::Svf{};
+            c.hum_r[h] = osynth::dsp::Svf{};
+        }
+        c.env = 0.0f;
+        c.gain = 1.0f;
+        c.hold = 0;
+        return;
+    }
+
+    const float hpf = osynth::dsp::smooth_exp(c.s_hpf, pvm(NR_HPF));
+    const bool use_hp = hpf > kNrHpfOff * 1.02f;
+    if (use_hp) {
+        c.hp_c = osynth::dsp::svf_coef_k(hpf, kNrHpK, kSr);
+    } else {
+        /* Bypassed, and held clean rather than merely unread: a sweep back up
+         * off the minimum would otherwise re-engage the filter on top of
+         * whatever its integrators were holding when it went out. */
+        c.hp_l = c.hp_r = osynth::dsp::Svf{};
+    }
+
+    const int hum = (int)pv(NR_HUM);
+    if (hum != c.c_hum) {
+        c.c_hum = hum;
+        /* New coefficients describe a different filter, so the state charged
+         * at the old frequency is not this one's — carried across, it rings
+         * out as a beat instead of settling into a null. */
+        for (int h = 0; h < kNrHumHarmonics; ++h) {
+            c.hum_l[h] = osynth::dsp::Svf{};
+            c.hum_r[h] = osynth::dsp::Svf{};
+        }
+        if (hum > 0) {
+            const float f0 = (hum == 1) ? 50.0f : 60.0f;
+            for (int h = 0; h < kNrHumHarmonics; ++h) {
+                c.hum_c[h] =
+                    osynth::dsp::svf_coef_k(f0 * (float)(h + 1), kNrHumK, kSr);
+            }
+        }
+    }
+
+    const float thresh = osynth::dsp::smooth_lin(c.s_thresh, pvm(NR_THRESH));
+    const float ratio = osynth::dsp::smooth_exp(c.s_ratio, pvm(NR_RATIO));
+    const float floor_db = osynth::dsp::smooth_lin(c.s_floor, pvm(NR_FLOOR));
+    const float atk_ms = osynth::dsp::smooth_exp(c.s_atk, pvm(NR_ATTACK));
+    const float rel_ms = osynth::dsp::smooth_exp(c.s_rel, pvm(NR_RELEASE));
+    const float hold_ms = osynth::dsp::smooth_lin(c.s_hold, pvm(NR_HOLD));
+
+    const float ka = 1.0f - expf(-1.0f / (atk_ms * 0.001f * kSr));
+    const float kr = 1.0f - expf(-1.0f / (rel_ms * 0.001f * kSr));
+
+    /* Pass 1: the filters, in place, and the detector on what leaves them. */
+    float peak = 0.0f;
+    for (size_t i = 0; i < frames; ++i) {
+        float l = bl[i], r = br[i];
+        if (use_hp) {
+            l = osynth::dsp::svf_next(c.hp_l, c.hp_c, osynth::dsp::SvfMode::Hp,
+                                      l);
+            r = osynth::dsp::svf_next(c.hp_r, c.hp_c, osynth::dsp::SvfMode::Hp,
+                                      r);
+        }
+        if (hum > 0) {
+            for (int h = 0; h < kNrHumHarmonics; ++h) {
+                l = osynth::dsp::svf_next(c.hum_l[h], c.hum_c[h],
+                                          osynth::dsp::SvfMode::Notch, l);
+                r = osynth::dsp::svf_next(c.hum_r[h], c.hum_c[h],
+                                          osynth::dsp::SvfMode::Notch, r);
+            }
+        }
+        bl[i] += m * (l - bl[i]);
+        br[i] += m * (r - br[i]);
+        const float al = fabsf(bl[i]), ar = fabsf(br[i]);
+        const float t = (al > ar) ? al : ar;
+        c.env += ((t > c.env) ? ka : kr) * (t - c.env);
+        if (c.env > peak) peak = c.env;
+    }
+
+    /* Gain computer, in dB, with the same fixed soft knee the compressor
+     * uses — mirrored, because this one acts on what is *under* the
+     * threshold rather than over it. */
+    const float db = 20.0f * log10f(fmaxf(peak, kNrFloorEps));
+    const float over = db - thresh;
+    const uint32_t hold_blocks =
+        (uint32_t)(hold_ms * 0.001f * kSr / (float)frames);
+    if (over > 0.0f) {
+        c.hold = hold_blocks; /* something is being said: re-arm */
+    } else if (c.hold > 0) {
+        c.hold--;
+    }
+
+    float gr = 0.0f;
+    if (c.hold == 0) {
+        const float slope = fmaxf(ratio, 1.0f) - 1.0f;
+        if (over >= 0.5f * kNrKnee) {
+            gr = 0.0f;
+        } else if (over <= -0.5f * kNrKnee) {
+            gr = slope * over;
+        } else {
+            const float t = over - 0.5f * kNrKnee;
+            gr = -slope * t * t / (2.0f * kNrKnee);
+        }
+        if (gr < floor_db) gr = floor_db;
+    }
+    const float target = powf(10.0f, gr * (1.0f / 20.0f));
+
+    /* Pass 2, and `m` folded into the gain exactly as the compressor folds
+     * its mix: at m = 0 both this and the crossfade above are the identity. */
+    const float g0 = 1.0f + m * (c.gain - 1.0f);
+    const float g1 = 1.0f + m * (target - 1.0f);
+    const float gstep = (g1 - g0) / (float)frames;
+    float g = g0;
+    for (size_t i = 0; i < frames; ++i) {
+        g += gstep;
+        bl[i] *= g;
+        br[i] *= g;
+    }
+    c.gain = target;
+}

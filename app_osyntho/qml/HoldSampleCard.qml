@@ -3,7 +3,13 @@ import QtQuick.Controls.Material
 
 import org.osynth.osyntho
 
-// Momentary "hold to sample" button for a freeze parameter (S38).
+// Momentary hold button for a bool parameter (S38; generalised in S39).
+//
+// Two parameters use it, in opposite directions, which is why downValue and
+// upValue exist below: a *freeze* is held by releasing the button (S38's
+// vocoder and buffer captures), while the adaptive NR's *learn* is held by
+// pressing it. The card knows nothing about either; it writes one value on
+// press and the other on release, and shows whichever caption matches.
 //
 // The firmware side of a freeze is a *switch*: 1 holds the buffer, 0 lets it
 // record. That is the right thing to store in a preset and the wrong thing to
@@ -25,9 +31,21 @@ import org.osynth.osyntho
 Rectangle {
     id: card
 
-    // Registered name of the bool freeze parameter, e.g. "buf.freeze".
+    // Registered name of the bool parameter, e.g. "buf.freeze".
     property string paramName: ""
     property string title: ""
+
+    // What the gesture writes. The defaults are the freeze idiom this card
+    // was built for — press releases the buffer, release holds it — and S39's
+    // adaptive-NR `learn` swaps them, because there the held state is the one
+    // that is doing something. Everything below is written in terms of these
+    // two, so neither direction is the special case.
+    property int downValue: 0
+    property int upValue: 1
+    // Button captions, in the three states below. Defaults describe a freeze.
+    property string idleText: "Hold to sample"
+    property string downText: "Recording…"
+    property string activeText: "Live"
     // One line under the button saying what gets captured.
     property string hint: ""
 
@@ -37,8 +55,10 @@ Rectangle {
     // Same trap ParamControl documents for paramMeta(), and the same fix the
     // rest of this app uses: a function plus paramsDiscovered.
     property int paramId: -1
-    // Mirrored from the synth rather than read back on demand, for the same
-    // reason: paramValue() is a call, and paramChanged is what says it moved.
+    // Whether the parameter currently sits at upValue — the resting state of
+    // the gesture, whichever value that is. Mirrored from the synth rather
+    // than read back on demand, for the same reason as paramId above:
+    // paramValue() is a call, and paramChanged is what says it moved.
     property bool frozen: false
 
     readonly property bool available: paramId >= 0
@@ -48,7 +68,7 @@ Rectangle {
         if (id !== paramId)
             paramId = id
         if (paramId >= 0)
-            frozen = Math.round(Synth.paramValue(paramId)) === 1
+            frozen = Math.round(Synth.paramValue(paramId)) === card.upValue
     }
 
     Component.onCompleted: refresh()
@@ -60,7 +80,7 @@ Rectangle {
         // preset load; both arrive here.
         function onParamChanged(id, value) {
             if (id === card.paramId)
-                card.frozen = Math.round(value) === 1
+                card.frozen = Math.round(value) === card.upValue
         }
     }
 
@@ -107,15 +127,16 @@ Rectangle {
             // same parameter, and a preset load can too.
             highlighted: down || !card.frozen
             implicitWidth: 150
-            text: down ? t.t("Recording…")
-                       : (card.frozen ? t.t("Hold to sample") : t.t("Live"))
+            text: down ? t.t(card.downText)
+                       : (card.frozen ? t.t(card.idleText)
+                                      : t.t(card.activeText))
 
-            onPressed: Synth.setParamNow(card.paramId, 0)
-            onReleased: Synth.setParamNow(card.paramId, 1)
+            onPressed: Synth.setParamNow(card.paramId, card.downValue)
+            onReleased: Synth.setParamNow(card.paramId, card.upValue)
             // A press that leaves the button still ends the gesture: without
-            // this the buffer would be left recording forever after a drag-off,
+            // this the held state would outlive the finger after a drag-off,
             // which looks exactly like the button having done nothing.
-            onCanceled: Synth.setParamNow(card.paramId, 1)
+            onCanceled: Synth.setParamNow(card.paramId, card.upValue)
         }
 
         Label {

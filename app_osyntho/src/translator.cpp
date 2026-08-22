@@ -198,6 +198,11 @@ Translator::Translator() {
       "Segure e fale; a vogal fica retida ao soltar.";
   pt["Hold to record into the ring; frozen on release."] =
       "Segure para gravar no buffer; congela ao soltar.";
+  pt["Hold to learn"] = "Segure para aprender";
+  pt["Learning…"] = "Aprendendo…";
+  pt["Learning"] = "Aprendendo";
+  pt["Hold during a silent moment; the room is sampled."] =
+      "Segure em um momento de silêncio; a sala é amostrada.";
 
   // ── Param group titles (ParamGroup.qml, translated centrally) ──────────
   pt["Oscillator 1"] = "Oscilador 1";
@@ -212,6 +217,9 @@ Translator::Translator() {
   pt["Vocoder"] = "Vocoder";  // listed only because the panel title is looked up
   pt["Vocoder capture"] = "Captura do vocoder";
   pt["Buffer capture"] = "Captura do buffer";
+  pt["Adaptive NR"] = "Redução adaptativa";
+  pt["Noise reduction"] = "Redução de ruído";
+  pt["Noise profile"] = "Perfil de ruído";
   pt["Grain cloud"] = "Nuvem de grãos";
   pt["Capture buffer"] = "Buffer de captura";
   pt["Formant env"] = "Env. de formante";

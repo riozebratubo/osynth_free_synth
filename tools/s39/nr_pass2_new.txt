@@ -1,0 +1,27 @@
+    /* Pass 2, and `m` folded into the gain exactly as the compressor folds its
+     * mix: at m = 0 both this and the crossfade above are the identity. */
+    if (from_input) {
+        /* The expander acts on the filtered input alone, so what belongs on
+         * the bus is (g - 1) times it — added, not multiplied, since a
+         * multiply here would duck the synth along with it. Together with
+         * pass 1 the bus receives m * (g * filt(x) - x), which is the input's
+         * contribution replaced by the cleaned one and nothing besides. */
+        float d = m * (c.gain - 1.0f);
+        const float dstep = (m * (target - 1.0f) - d) / (float)frames;
+        for (size_t i = 0; i < frames; ++i) {
+            d += dstep;
+            bl[i] += d * s_nr_src_l[i];
+            br[i] += d * s_nr_src_r[i];
+        }
+    } else {
+        const float g0 = 1.0f + m * (c.gain - 1.0f);
+        const float g1 = 1.0f + m * (target - 1.0f);
+        const float gstep = (g1 - g0) / (float)frames;
+        float g = g0;
+        for (size_t i = 0; i < frames; ++i) {
+            g += gstep;
+            bl[i] *= g;
+            br[i] *= g;
+        }
+    }
+    c.gain = target;

@@ -1,8 +1,9 @@
 /*
- * osynth — master FX bus: drive -> chorus -> flanger -> phaser -> delay ->
- * granular delay -> reverb -> bitcrush -> filter -> EQ -> compressor ->
- * stereo/output (Sessions 10 + 11; bitcrush S17; filter S33; drive, flanger,
- * phaser, EQ, compressor, stereo and the FX LFOs S34).
+ * osynth — master FX bus: adaptive NR -> NR -> vocoder -> drive -> chorus ->
+ * flanger -> phaser -> delay -> granular delay -> reverb -> bitcrush ->
+ * filter -> EQ -> compressor -> stereo/output (Sessions 10 + 11; bitcrush
+ * S17; filter S33; drive, flanger, phaser, EQ, compressor, stereo and the FX
+ * LFOs S34; vocoder S38; the two noise-reduction units S39).
  *
  * The bus is stereo and global (not per voice) and runs on the audio task:
  * main.cpp chains fx_process() after voice_manager_render() in the render
@@ -140,8 +141,8 @@ extern "C" {
 #define FX_PID_FLT_VOWEL  0x0357
 
 /* drive / saturation (S34) — the graph's Shaper, run on the finished mix.
- * First in the chain: dirt belongs before the time effects, for the same
- * reason the master filter is last (a distorted reverb tail reads as a
+ * First of the effects proper: dirt belongs before the time effects, for the
+ * same reason the master filter is last (a distorted reverb tail reads as a
  * mistake, a reverb on a distorted source reads as an effect). */
 #define FX_PID_DRV_ON    0x0365
 #define FX_PID_DRV_MIX   0x0360
@@ -218,8 +219,9 @@ extern "C" {
  * reach the master bus. A tempo-locked filter wobble over a whole track, or
  * tremolo, or auto-pan, were not expressible anywhere. */
 /* Vocoder (S38): the audio input's spectral envelope imposed on the synth
- * bus. First in the chain — it decides what the sound is, so everything after
- * it colours the spoken result. The modulator is whichever device `in.source`
+ * bus. Ahead of every effect — it decides what the sound is, so everything
+ * after it colours the spoken result; the two noise-reduction units (S39) are
+ * the only stages before it. The modulator is whichever device `in.source`
  * names, independent of `in.route`. fx.voc.freeze holds the band envelopes,
  * which is what the app's Hold-to-sample button drives (inverted: recording
  * while held, frozen on release). */
@@ -237,6 +239,107 @@ extern "C" {
 #define FX_PID_VOC_LEVEL   0x03DB
 #define FX_PID_VOC_CARRIER 0x03DC
 #define FX_PID_VOC_FREEZE  0x03DD
+
+/* Noise reduction (S39) — two units at the head of the chain, and the reason
+ * they exist is a use for this instrument that is not musical at all: a P4
+ * build already enumerates on a computer as a UAC2 capture device (the USB
+ * tap, S29) and already has a microphone on it (S37), so it is one cleanup
+ * stage short of being a usable USB microphone. These are that stage.
+ *
+ * The path is the one that was already there and needs no new plumbing: an
+ * input device chosen by `in.source`, mixed into the bus by `in.route` = fx,
+ * through this bus, out over USB. What was missing is everything between "the
+ * microphone works" and "the microphone is worth listening to" — a room's air
+ * conditioning, a desk's rumble, mains hum off an unbalanced lead, and the
+ * hiss a MEMS capsule has at the gain a conversational voice needs.
+ *
+ * Two units rather than one mode switch, because they answer different halves
+ * of that question and fail in different ways:
+ *
+ *   fx.anr  adaptive. A filterbank that learns the *steady* part of whatever
+ *           is arriving and subtracts it, continuously, with nothing to set
+ *           up. It is what takes out fan noise and hiss. It cannot take out a
+ *           slammed door, because a slammed door is not steady.
+ *   fx.nr   fixed. High-pass, mains-hum notches, and a downward expander with
+ *           a hold. Nothing is learned and every number is one the player
+ *           chose — which is exactly why it is the one to reach for when the
+ *           adaptive unit has guessed wrong.
+ *
+ * Their order is anr -> nr and it does not commute. The expander's whole job
+ * is to duck the gaps between phrases, and a ducked gap is a gap with no noise
+ * floor left in it; run the other way round, the estimator would learn that
+ * ducked floor — up to `fx.nr.floor` too low — and then under-subtract by
+ * exactly that much for the whole of the next phrase. An estimator has to see
+ * the floor it is estimating.
+ *
+ * Both sit ahead of the vocoder, which is where a source cleanup belongs but
+ * changes nothing *for* the vocoder: its modulator comes from
+ * audio_io_in_mono(), not from this bus, so it is deaf to everything here.
+ * Cleaning that path too would mean a second instance of the analysis and is
+ * not what these are for.
+ *
+ * Neither is microphone-specific. They are ordinary bus units, so a noisy
+ * sampled loop or a hissy line input gets the same treatment; the microphone
+ * is only the case that made them worth building.
+ *
+ * These two blocks fill 0x03xx. A tenth unit needs a page of its own. */
+
+/* `fx.anr.src` / `fx.nr.src` (S39b) decide what each unit is looking at, and
+ * are the difference between "clean up my microphone" and "put a denoiser
+ * across my instrument". At `bus` — entry 0, so a patch saved before the
+ * control existed still means what it did — the unit processes the finished
+ * mix, which is the right thing for a noisy sampled loop and the wrong thing
+ * for a synth that was never noisy.
+ *
+ * At `input` it processes only what audio_io mixed in. Nothing it does is a
+ * function of the synth beside it and no gain of any kind is applied to that
+ * — the only thing reaching the bus is a term derived from the input alone,
+ * so muting the input leaves the output bit-identical to the unit being off.
+ * That is exact rather than approximate, and it is worth knowing why: both
+ * units are *corrections*. The
+ * adaptive one's band sum is already (g-1) times each band, and the fixed
+ * one's is g*filt(x) - x. Neither ever needed the bus in order to work — only
+ * something to be a difference *from* — so pointing them at the block
+ * audio_io_in_fx_block() hands back and adding the result to the bus replaces
+ * the input's contribution and nothing else.
+ *
+ * `input` needs `in.route` = fx. That is the only position summed into the bus
+ * by the time this stage runs; from `mon` or `dry` there is nothing here yet
+ * to correct, and the unit stays inert rather than inventing a correction for
+ * a signal that arrives later. */
+
+/* Adaptive: a learned noise profile, subtracted per band. `fx.anr.learn` is
+ * momentary: held, the estimator's window drops to 80 ms and its "that is
+ * signal, not noise" test is waived, so a second of it in a quiet room is a
+ * complete profile. That is what the app's Hold-to-learn button drives, and
+ * it is not stored in presets, for the reason fx.voc.freeze is not. */
+#define FX_PID_ANR_ON      0x03E0
+#define FX_PID_ANR_AMOUNT  0x03E1
+#define FX_PID_ANR_FLOOR   0x03E2
+#define FX_PID_ANR_BANDS   0x03E3
+#define FX_PID_ANR_LOW     0x03E4
+#define FX_PID_ANR_HIGH    0x03E5
+#define FX_PID_ANR_ADAPT   0x03E6
+#define FX_PID_ANR_ATTACK  0x03E7
+#define FX_PID_ANR_RELEASE 0x03E8
+#define FX_PID_ANR_LEARN   0x03E9
+#define FX_PID_ANR_SRC     0x03EA
+
+/* Fixed: high-pass, hum notch, downward expander. `fx.nr.floor` is the most
+ * important control here and the one a gate usually does not have — it caps
+ * the attenuation, so the unit *ducks* the gaps instead of chopping them, and
+ * a room that goes absolutely silent between words is the thing that makes a
+ * cheap gate audible as a gate. */
+#define FX_PID_NR_ON      0x03F0
+#define FX_PID_NR_HPF     0x03F1
+#define FX_PID_NR_HUM     0x03F2
+#define FX_PID_NR_THRESH  0x03F3
+#define FX_PID_NR_RATIO   0x03F4
+#define FX_PID_NR_FLOOR   0x03F5
+#define FX_PID_NR_ATTACK  0x03F6
+#define FX_PID_NR_HOLD    0x03F7
+#define FX_PID_NR_RELEASE 0x03F8
+#define FX_PID_NR_SRC     0x03F9
 
 #define FX_PID_LFO1_DEST  0x03C0
 #define FX_PID_LFO1_WAVE  0x03C1

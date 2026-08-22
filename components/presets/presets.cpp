@@ -379,6 +379,12 @@ bool skip_id(uint16_t id) {
          * inside the engine instead, by refusing to honour a freeze until the
          * ring has actually been filled. */
         case FX_PID_VOC_FREEZE:
+        /* The adaptive NR's learn (S39): momentary, and the same class of
+         * control as the freeze above. The Hold-to-learn button leaves it
+         * *off*, so storing it would store nothing useful even when it worked
+         * — but a preset saved with a finger on the button would come back
+         * permanently sampling, which is a unit that never settles. */
+        case FX_PID_ANR_LEARN:
         case PRESET_PID_LOAD:
         case PRESET_PID_SAVE:
         case PRESET_PID_SEQ_LOAD:

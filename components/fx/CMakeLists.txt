@@ -20,7 +20,9 @@ idf_component_register(
     # handed to fx by main.cpp instead of a direct dependency; the bus only
     # wants two scalars (seqarp_bpm, seqarp_beat_in_bar) out of seqarp.
     # audio_io: the vocoder's modulator is the selected audio input (S38),
-    #      read through audio_io_in_mono(). Private like the other two —
-    #      nothing in fx.h exposes it.
+    #      read through audio_io_in_mono(); since S39b the two noise-reduction
+    #      units read audio_io_in_fx_block() as well, to correct the input's
+    #      contribution to the bus without touching the synth beside it.
+    #      Private like the other two — nothing in fx.h exposes either call.
     PRIV_REQUIRES drums seqarp audio_io
 )

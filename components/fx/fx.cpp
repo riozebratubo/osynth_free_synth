@@ -1,13 +1,23 @@
 /*
  * osynth — master FX bus (Sessions 10 + 11; bitcrush S17; filter S33;
- * drive / flanger / phaser / EQ / compressor / stereo / LFOs S34):
+ * drive / flanger / phaser / EQ / compressor / stereo / LFOs S34; vocoder
+ * S38; the two noise-reduction units S39):
  *
- *   drive -> chorus -> flanger -> phaser -> delay -> granular -> reverb
- *         -> bitcrush -> filter -> EQ -> compressor -> stereo/output
+ *   anr -> nr -> vocoder -> drive -> chorus -> flanger -> phaser -> delay
+ *       -> granular -> reverb -> bitcrush -> filter -> EQ -> compressor
+ *       -> stereo/output
  *
  * That order is the whole design of the bus, so it is worth stating why:
  *
- *  - Drive is first. Saturation belongs on the source, not on the tails;
+ *  - The noise reduction is first, and anr before nr, because it is a
+ *    *source* cleanup rather than an effect: nothing below it should be
+ *    asked to work on top of a room's air conditioning, and an estimator
+ *    cannot learn a noise floor that a gate downstream has already ducked
+ *    away. The full argument is above FX_PID_ANR_ON in fx.h.
+ *  - The vocoder is next, because it decides what the sound *is*, so
+ *    everything after it colours the spoken result rather than the carrier.
+ *  - Drive leads the effects proper. Saturation belongs on the source, not
+ *    on the tails;
  *    distorting a reverb reads as a fault, reverb on a distorted source
  *    reads as an effect. (Same argument S33 used to put the filter last.)
  *  - The three modulated-comb effects sit together, cheapest first, and
@@ -145,6 +155,23 @@ constexpr int kVocBandsMax = 16;
 constexpr int kVocBandsMax = 10;
 #endif
 constexpr int kVocBandsMin = 4;
+/* Adaptive noise reduction (S39). Two SVFs per band per sample — one per
+ * channel — plus a block-rate follower, so the ceiling is a CPU budget like
+ * the vocoder's above and gated on the same PSRAM proxy for "the bigger
+ * chip". The default is deliberately below the ceiling: past about a dozen
+ * bands the profile gets *finer* than the noise it is describing, and a
+ * finer profile mostly buys the artefact this class of algorithm is known
+ * for — isolated bands opening and closing on their own, which sounds like
+ * wind chimes in the background. */
+#if CONFIG_SPIRAM
+constexpr int kAnrBandsMax = 16;
+constexpr int kAnrBandsDef = 12;
+#else
+constexpr int kAnrBandsMax = 10;
+constexpr int kAnrBandsDef = 8;
+#endif
+constexpr int kAnrBandsMin = 4;
+
 
 /* Flanger (S34): base delay plus the sweep it rides on. Tiny next to the
  * others — ~26 ms stereo is 5 KB — which is why it gets its own line instead
@@ -167,6 +194,10 @@ constexpr int kPhsStagesMax = 12; /* allpass sections per channel */
  * is what puts the bypass at the top-left of the card instead of after the
  * knobs it governs. */
 enum PIdx {
+    ANR_ON, ANR_SRC, ANR_AMOUNT, ANR_FLOOR, ANR_BANDS, ANR_LOW, ANR_HIGH,
+    ANR_ADAPT, ANR_ATTACK, ANR_RELEASE, ANR_LEARN,
+    NR_ON, NR_SRC, NR_HPF, NR_HUM, NR_THRESH, NR_RATIO, NR_FLOOR, NR_ATTACK,
+    NR_HOLD, NR_RELEASE,
     VOC_ON, VOC_MIX, VOC_BANDS, VOC_LOW, VOC_HIGH, VOC_Q, VOC_ATTACK,
     VOC_RELEASE, VOC_SHIFT, VOC_SIB, VOC_GATE, VOC_LEVEL, VOC_CARRIER,
     VOC_FREEZE,
@@ -204,6 +235,22 @@ const char* const kFltTypes[] = {"svf 12", "svf 24", "ladder", "dual", "vowel"};
  * "tube" is appended: it biases the input before the curve, so it generates
  * the even harmonics the symmetric shapers cannot. */
 const char* const kDrvModes[] = {"tanh", "fold", "clip", "tube"};
+
+/* What a noise-reduction unit is looking at (S39b). Shared by both units —
+ * one list, one meaning — and append-only like every other enum here, with
+ * entry 0 the behaviour they had before the control existed.
+ *
+ * `input` is the answer to "clean my microphone without putting a denoiser
+ * across my synth": the unit runs on the block audio_io mixed in at the fx
+ * position and adds only the difference back — so nothing reaching the bus is
+ * a function of anything but the input. It needs `in.route` = fx, and
+ * is inert otherwise — the reasoning is above FX_PID_ANR_SRC in fx.h. */
+const char* const kNrSrcs[] = {"bus", "input"};
+
+/* Mains hum (S39). Append-only, and the two entries are regions of the world
+ * rather than a frequency knob: 50 and 60 Hz is the whole list, nobody is
+ * hunting for 53, and a notch that can be mistuned is a notch that will be. */
+const char* const kNrHum[] = {"off", "50 Hz", "60 Hz"};
 
 /* Vocoder carrier (S38). Append-only. `noise` alone is what makes a whisper
  * or an unpitched consonant work — a band bank can only shape what it is
@@ -267,6 +314,8 @@ constexpr int kLfoSyncCount = count_of(kLfoSyncNames);
 constexpr int kLfoWaveCount = count_of(kLfoWaves);
 constexpr int kDrvModeCount = count_of(kDrvModes);
 constexpr int kCompKeyCount = count_of(kCompKeys);
+constexpr int kNrHumCount = count_of(kNrHum);
+constexpr int kNrSrcCount = count_of(kNrSrcs);
 constexpr int kRevAlgoCount = count_of(kRevAlgos);
 enum RevAlgo { kAlgoFreeverb = 0, kAlgoWet = 1, kAlgoMVerb = 2, kAlgoDusk = 3 };
 
@@ -370,6 +419,48 @@ static_assert(enum_bytes(kLfoDests, kLfoDestCount) <= kLfoDestBudget,
               "app would silently show a truncated list");
 
 const ParamDesc kParams[P_COUNT] = {
+    {FX_PID_ANR_ON, "fx.anr.on", ParamType::Bool, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0},
+    {FX_PID_ANR_SRC, "fx.anr.src", ParamType::Enum, ParamCurve::Linear,
+     0.0f, (float)(kNrSrcCount - 1), 0.0f /* bus */, kNrSrcs, kNrSrcCount},
+    {FX_PID_ANR_AMOUNT, "fx.anr.amount", ParamType::Float, ParamCurve::Linear,
+     0.0f, 1.0f, 0.6f, nullptr, 0}, /* 1 = subtract 3x the estimated floor */
+    {FX_PID_ANR_FLOOR, "fx.anr.floor", ParamType::Float, ParamCurve::Linear,
+     -48.0f, 0.0f, -20.0f, nullptr, 0}, /* dB, the deepest a band may be cut */
+    {FX_PID_ANR_BANDS, "fx.anr.bands", ParamType::Int, ParamCurve::Linear,
+     (float)kAnrBandsMin, (float)kAnrBandsMax, (float)kAnrBandsDef, nullptr, 0},
+    {FX_PID_ANR_LOW, "fx.anr.low", ParamType::Float, ParamCurve::Exp,
+     40.0f, 400.0f, 120.0f, nullptr, 0},      /* first crossover, Hz */
+    {FX_PID_ANR_HIGH, "fx.anr.high", ParamType::Float, ParamCurve::Exp,
+     2000.0f, 16000.0f, 9000.0f, nullptr, 0}, /* last crossover, Hz */
+    {FX_PID_ANR_ADAPT, "fx.anr.adapt", ParamType::Float, ParamCurve::Exp,
+     0.5f, 60.0f, 8.0f, nullptr, 0},   /* s — how fast the floor may rise */
+    {FX_PID_ANR_ATTACK, "fx.anr.attack", ParamType::Float, ParamCurve::Exp,
+     1.0f, 100.0f, 5.0f, nullptr, 0},    /* ms — a band reopening */
+    {FX_PID_ANR_RELEASE, "fx.anr.release", ParamType::Float, ParamCurve::Exp,
+     5.0f, 1000.0f, 150.0f, nullptr, 0}, /* ms — a band closing */
+    {FX_PID_ANR_LEARN, "fx.anr.learn", ParamType::Bool, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0},
+    {FX_PID_NR_ON, "fx.nr.on", ParamType::Bool, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0},
+    {FX_PID_NR_SRC, "fx.nr.src", ParamType::Enum, ParamCurve::Linear,
+     0.0f, (float)(kNrSrcCount - 1), 0.0f /* bus */, kNrSrcs, kNrSrcCount},
+    {FX_PID_NR_HPF, "fx.nr.hpf", ParamType::Float, ParamCurve::Exp,
+     20.0f, 400.0f, 80.0f, nullptr, 0}, /* the registered minimum is the bypass */
+    {FX_PID_NR_HUM, "fx.nr.hum", ParamType::Enum, ParamCurve::Linear,
+     0.0f, (float)(kNrHumCount - 1), 0.0f, kNrHum, kNrHumCount},
+    {FX_PID_NR_THRESH, "fx.nr.thresh", ParamType::Float, ParamCurve::Linear,
+     -80.0f, 0.0f, -45.0f, nullptr, 0}, /* dB, peak */
+    {FX_PID_NR_RATIO, "fx.nr.ratio", ParamType::Float, ParamCurve::Exp,
+     1.0f, 20.0f, 4.0f, nullptr, 0},    /* downward expansion below thresh */
+    {FX_PID_NR_FLOOR, "fx.nr.floor", ParamType::Float, ParamCurve::Linear,
+     -60.0f, 0.0f, -24.0f, nullptr, 0}, /* dB: duck this far and no further */
+    {FX_PID_NR_ATTACK, "fx.nr.attack", ParamType::Float, ParamCurve::Exp,
+     1.0f, 100.0f, 3.0f, nullptr, 0},   /* ms — opening */
+    {FX_PID_NR_HOLD, "fx.nr.hold", ParamType::Float, ParamCurve::Linear,
+     0.0f, 1000.0f, 150.0f, nullptr, 0}, /* ms; 0 is a real setting, so linear */
+    {FX_PID_NR_RELEASE, "fx.nr.release", ParamType::Float, ParamCurve::Exp,
+     5.0f, 1000.0f, 200.0f, nullptr, 0}, /* ms — closing */
     {FX_PID_VOC_ON, "fx.voc.on", ParamType::Bool, ParamCurve::Linear,
      0.0f, 1.0f, 0.0f, nullptr, 0},
     {FX_PID_VOC_MIX, "fx.voc.mix", ParamType::Float, ParamCurve::Linear,
@@ -822,6 +913,593 @@ inline MixGains mix_gains(float m, bool comp, float makeup) {
     return {sqrtf(fmaxf(0.0f, 1.0f - m)), sqrtf(m) * makeup};
 }
 
+/* ---- adaptive noise reduction (S39): subtract whatever never stops ----
+ *
+ * A per-band spectral subtractor. The bus is split into `bands` sections;
+ * each keeps an estimate of its own *steady* level, and each is attenuated by
+ * however much of what is currently in it looks like that estimate. Speech,
+ * notes and transients move; a fan, a hiss floor and a spinning disk do not,
+ * and that difference is the entire algorithm.
+ *
+ * Reconstruction is by *residual*, not by summing the bank back up:
+ *
+ *     y = x + sum_k (g_k - 1) * band_k(x)
+ *
+ * which buys the one property that matters for a unit that spends most of its
+ * life doing nothing: with every g_k at 1 the output is the input, sample for
+ * sample — no filterbank colouration, no phase smear to explain away. A bank
+ * summed the ordinary way is only approximately flat, and "approximately
+ * flat" is an audible dulling that would sit on the patch whether or not
+ * there was any noise to remove. The price is at the other end — the deepest
+ * achievable cut is bounded by how well the bank sums back — and that end is
+ * capped by `fx.anr.floor` anyway, which no useful setting takes past -30 dB.
+ *
+ * Band shapes: the first is a lowpass and the last a highpass, both
+ * Butterworth, so `low` and `high` are crossovers and not centres. That is
+ * what makes the bank cover the whole spectrum, and it matters more here than
+ * anywhere else in this file: rumble under `low` and hiss over `high` are
+ * precisely the two places noise lives, and a bank of bandpasses alone would
+ * have left both of them untouched. Everything between is a *unity-peak*
+ * bandpass — BpN, not Bp, because the residual form adds each band back at
+ * its own gain and a plain Bp peaks at Q, which would subtract two and a half
+ * times what it measured.
+ *
+ * ---- the estimator ----
+ *
+ * A sliding-window minimum, in two buckets held one window each. The floor of
+ * a band is its minimum over a few seconds, not its average: an average
+ * includes the speech, the minimum does not. `fx.anr.adapt` is the window.
+ *
+ * Two things guard it. They were written for `src` = bus, where a held pad
+ * looks exactly like a fan, and they are not dropped when the unit is pointed
+ * at the input instead: a sung note, a bowed string and a guitar drone are all
+ * steady for longer than a window, and a denoiser that learns one removes it.
+ * The source changes what is at stake, not whether the test is right:
+ *
+ *   - a band is offered to the bucket only while it is within
+ *     kAnrSignalRatio of the current estimate. Above that it is signal, and
+ *     signal has no business in a noise profile.
+ *   - if two whole windows go by with nothing offered — something loud has
+ *     been sitting in that band the entire time — the estimate may climb
+ *     toward the raw minimum, by no more than kAnrCreep per window. Without
+ *     an escape the unit locks out completely on any input that starts loud;
+ *     with an unbounded one, a long pad is learned and fades away under the
+ *     player's hands. Bounded, a pad 40 dB up takes the better part of a
+ *     minute to be mistaken for noise, while a floor that genuinely rises
+ *     6 dB is tracked in one window.
+ *
+ * The estimate carries kAnrBias, because the minimum of a fluctuating noise
+ * sits below its average and subtracting the minimum would leave most of the
+ * noise behind. That is the classic minimum-statistics bias correction, at a
+ * fixed factor rather than the derived one: the derivation needs the variance
+ * of the estimator, and one number tuned by ear is worth more here than three
+ * that are exactly right about a Gaussian assumption the input does not obey.
+ *
+ * Nothing is subtracted from a band until a window has closed over it, and a
+ * band is not primed at all until something turns up in it. The unit listens
+ * for `adapt` seconds after being switched on and only then starts working,
+ * which is the difference between switching it on mid-sentence and having the
+ * sentence disappear; the per-band half of that is what makes switching it on
+ * over a *silent* bus — the usual case, since that is when anyone sets this up
+ * — behave the same way instead of priming every estimate to zero and then
+ * rejecting every real signal for being too far above it. `fx.anr.learn` is the short cut: held, the window drops
+ * to kAnrLearnMs and the offer test is waived, so a second of held button in
+ * a quiet room is a complete profile.
+ *
+ * ---- rates ----
+ *
+ * Everything except the filters runs once per block: one mean-|x| accumulator
+ * per band, then the estimate, the gain and its attack/release, then a linear
+ * ramp of (g - 1) across the *following* block. Same shape as the compressor,
+ * same reason — the divides stay out of the sample loop — and the same
+ * consequence, that gain movement lands on a 1.33 ms grid, which is why
+ * `fx.anr.attack` has a 1 ms floor. The one-block lag is deliberate: the
+ * alternative is running the whole bank twice to look 1.33 ms further into a
+ * noise floor that is by definition not changing.
+ */
+
+constexpr float kAnrSignalRatio = 4.0f; /* +12 dB over the estimate is signal */
+constexpr float kAnrBias = 1.5f;        /* minimum -> average, see above */
+constexpr float kAnrCreep = 2.0f;       /* ceiling on a locked-out band's climb */
+constexpr float kAnrLearnMs = 80.0f;    /* the window while `learn` is held */
+constexpr float kAnrOversub = 3.0f;     /* what `amount` = 1 subtracts */
+constexpr float kAnrEndK = 1.41421356f; /* Butterworth: the two end bands */
+constexpr float kAnrHuge = 1e30f;       /* "this bucket took nothing" */
+constexpr float kAnrSeed = 1e-6f;       /* keeps the offer test alive at zero */
+constexpr float kAnrEps = 1e-7f;      /* under this a band is empty, not quiet */
+
+struct AnrBand {
+    osynth::dsp::Svf l, r;
+    osynth::dsp::SvfCoef c;
+    osynth::dsp::SvfMode mode = osynth::dsp::SvfMode::BpN;
+    float acc = 0.0f;      /* sum |band| over the block, both channels */
+    float noise = 0.0f;    /* the estimate, biased, in the units of acc */
+    float cur = kAnrHuge;  /* this window's offered minimum */
+    float prev = kAnrHuge; /* the previous window's */
+    float raw = kAnrHuge;  /* this window's minimum, offered or not */
+    float g = 1.0f;        /* smoothed gain, block boundary */
+    float d = 0.0f;        /* (g - 1), ramped across the block */
+    float dstep = 0.0f;
+    /* Per band, not per unit. A band with nothing in it has nothing to
+     * estimate from, and priming it anyway from a silent bus is what used to
+     * wedge the whole unit — see the estimator note above. */
+    bool primed = false;  /* the estimate holds something */
+    bool settled = false; /* ...and a window has closed over it */
+};
+
+struct AnrFx {
+    AnrBand b[kAnrBandsMax];
+    int n = 0;
+    /* Doubles as the "has run since the last reset" flag: -1 both requests a
+     * coefficient build and says the state below is already clean. */
+    int c_bands = -1;
+    float c_low = 0.0f, c_high = 0.0f;
+    uint32_t win_cnt = 0;
+    osynth::dsp::Smooth s_amount, s_floor;
+    UnitState u;
+};
+
+/* One block of the input, stereo, exactly as audio_io mixed it into the bus
+ * (S39b). Shared by both units because neither holds it across a call: each
+ * fills it, uses it and is done, and the two run one after the other on the
+ * audio task. Live only inside anr_process() and nr_process(). */
+float s_nr_src_l[SYNTH_BLOCK_SIZE];
+float s_nr_src_r[SYNTH_BLOCK_SIZE];
+
+AnrFx s_anr;
+
+void anr_rebuild(AnrFx& a, int bands, float low, float high) {
+    if (bands < kAnrBandsMin) bands = kAnrBandsMin;
+    if (bands > kAnrBandsMax) bands = kAnrBandsMax;
+    /* Two crossovers with a couple of octaves between them; below this the
+     * ratio arithmetic divides by ~0. */
+    if (high < low * 4.0f) high = low * 4.0f;
+
+    const float ratio = powf(high / low, 1.0f / (float)(bands - 1));
+    /* Adjacent -3 dB skirts landing on their neighbours' centres — the same
+     * constant-Q figure the vocoder's bank uses, for the same reason: it is
+     * the spacing at which a bank sums back to something flat. */
+    const float k = (ratio - 1.0f) / sqrtf(ratio);
+    float f = low;
+    for (int i = 0; i < bands; ++i) {
+        const bool end = (i == 0) || (i == bands - 1);
+        a.b[i].c = osynth::dsp::svf_coef_k(f, end ? kAnrEndK : k, kSr);
+        a.b[i].mode = (i == 0) ? osynth::dsp::SvfMode::Lp
+                      : (i == bands - 1) ? osynth::dsp::SvfMode::Hp
+                                         : osynth::dsp::SvfMode::BpN;
+        f *= ratio;
+    }
+    a.n = bands;
+}
+
+void SYNTH_RENDER_IRAM anr_process(float* __restrict__ bl,
+                                   float* __restrict__ br, size_t frames) {
+    AnrFx& a = s_anr;
+    const float m = unit_gate(a.u, pv(ANR_ON), nullptr, 0);
+    if (m < 0.0f) {
+        /* Off: drop the banks and the profile, once, on the way down. A
+         * profile describes a room, and the room it is switched back on in is
+         * the only one worth describing. */
+        if (a.c_bands >= 0) {
+            for (int k = 0; k < kAnrBandsMax; ++k) a.b[k] = AnrBand{};
+            a.c_bands = -1;
+            a.win_cnt = 0;
+        }
+        return;
+    }
+
+    const int bands = (int)pv(ANR_BANDS);
+    const float low = pvm(ANR_LOW);
+    const float high = pvm(ANR_HIGH);
+    if (bands != a.c_bands || low != a.c_low || high != a.c_high) {
+        /* A moved crossover leaves every estimate describing a band that no
+         * longer exists, so the profile goes with the coefficients rather
+         * than being carried across to quietly mean something else. */
+        for (int k = 0; k < kAnrBandsMax; ++k) {
+            a.b[k].noise = 0.0f;
+            a.b[k].cur = a.b[k].prev = a.b[k].raw = kAnrHuge;
+            a.b[k].primed = false;
+            a.b[k].settled = false;
+        }
+        a.win_cnt = 0;
+        anr_rebuild(a, bands, low, high);
+        a.c_bands = bands;
+        a.c_low = low;
+        a.c_high = high;
+    }
+    const int n = a.n;
+
+    const float amount = osynth::dsp::smooth_lin(a.s_amount, pvm(ANR_AMOUNT));
+    const float gmin = powf(
+        10.0f,
+        osynth::dsp::smooth_lin(a.s_floor, pvm(ANR_FLOOR)) * (1.0f / 20.0f));
+    const float sub = amount * kAnrOversub;
+
+    /* One block is the clock for everything below the filters. */
+    const float blk_s = (float)frames / kSr;
+    const float ka =
+        1.0f - expf(-blk_s / fmaxf(pvm(ANR_ATTACK) * 0.001f, 1e-4f));
+    const float kr =
+        1.0f - expf(-blk_s / fmaxf(pvm(ANR_RELEASE) * 0.001f, 1e-4f));
+
+    const bool learn = pv(ANR_LEARN) >= 0.5f;
+    const float win_s = learn ? (kAnrLearnMs * 0.001f) : pvm(ANR_ADAPT);
+    uint32_t win = (uint32_t)(win_s / blk_s);
+    if (win < 1) win = 1;
+
+    /* What this unit is looking at (S39b). In `bus` mode these alias bl/br,
+     * which is deliberate and is why they are not themselves __restrict__: a
+     * pointer *based on* a restrict-qualified one is allowed to read what that
+     * one writes. In `input` mode they are the scratch, and the two objects
+     * are genuinely disjoint. */
+    const float* sl = bl;
+    const float* sr = br;
+    bool live = true;
+    if ((int)pv(ANR_SRC) == 1) {
+        live = frames <= SYNTH_BLOCK_SIZE &&
+               audio_io_in_fx_block(s_nr_src_l, s_nr_src_r, frames);
+        sl = s_nr_src_l;
+        sr = s_nr_src_r;
+    }
+
+    /* The bank, and the correction it earned last block. The source sample is
+     * read into a local first: every band has to analyse the *input*, not what
+     * the bands ahead of it have already been subtracted from. */
+    if (live) {
+        for (size_t i = 0; i < frames; ++i) {
+            const float xl = sl[i], xr = sr[i];
+            float cl = 0.0f, cr = 0.0f;
+            for (int k = 0; k < n; ++k) {
+                AnrBand& b = a.b[k];
+                const float yl = osynth::dsp::svf_next(b.l, b.c, b.mode, xl);
+                const float yr = osynth::dsp::svf_next(b.r, b.c, b.mode, xr);
+                b.acc += fabsf(yl) + fabsf(yr);
+                cl += b.d * yl;
+                cr += b.d * yr;
+                b.d += b.dstep;
+            }
+            /* The band sum *is* the correction — (g - 1) times each band — so
+             * this one line is both "replace the bus" and "replace only the
+             * input's contribution to it". Which of the two it does was
+             * settled above, by where xl came from. */
+            bl[i] += m * cl;
+            br[i] += m * cr;
+        }
+    } else {
+        /* `input` with nothing arriving. No correction to add, and the banks
+         * are dropped so a source that comes back does not meet state charged
+         * before it went away. The per-band pass below still runs, over an
+         * accumulator of zero, which is what unprimes the estimates. */
+        for (int k = 0; k < n; ++k) {
+            a.b[k].l = osynth::dsp::Svf{};
+            a.b[k].r = osynth::dsp::Svf{};
+            a.b[k].d = 0.0f;
+        }
+    }
+
+    const bool boundary = (++a.win_cnt >= win);
+    if (boundary) a.win_cnt = 0;
+
+    const float inv = 1.0f / (2.0f * (float)frames);
+    for (int k = 0; k < n; ++k) {
+        AnrBand& b = a.b[k];
+        const float mag = b.acc * inv;
+        b.acc = 0.0f;
+
+        if (!b.primed) {
+            /* Seeded from whatever is there, loud or not — the offer test
+             * below needs a non-zero estimate to be a test at all, and the
+             * first window to close replaces this with a real minimum. But
+             * only from *something*: an empty band is not a quiet one, and
+             * an estimate of zero rejects every signal that follows it. */
+            if (mag > kAnrEps) {
+                b.noise = mag * kAnrBias;
+                b.cur = b.prev = b.raw = mag;
+                b.primed = true;
+            }
+        } else {
+            if (mag < b.raw) b.raw = mag;
+            if (learn || mag < b.noise * kAnrSignalRatio + kAnrSeed) {
+                if (mag < b.cur) b.cur = mag;
+            }
+            if (boundary) {
+                if (b.cur < kAnrHuge || b.prev < kAnrHuge) {
+                    b.noise = fminf(b.cur, b.prev) * kAnrBias;
+                } else {
+                    /* Two windows with nothing plausible in either. Climb,
+                     * but by no more than kAnrCreep — see the estimator note
+                     * above. */
+                    b.noise = fminf(b.raw * kAnrBias, b.noise * kAnrCreep);
+                }
+                b.prev = b.cur;
+                b.cur = kAnrHuge;
+                b.raw = kAnrHuge;
+                /* A window that closed on silence did not measure a floor,
+                 * it measured the absence of one. Throwing it away and
+                 * re-priming is the difference between an input that arrives
+                 * late being cleaned up and being ignored forever. */
+                if (b.noise <= kAnrEps) {
+                    b.primed = false;
+                    b.settled = false;
+                } else {
+                    b.settled = true;
+                }
+            }
+        }
+
+        /* Wiener-ish: what fraction of this band is not accounted for by the
+         * estimate. Floored, because a band taken to silence is what makes
+         * the residual noise sound like wind chimes rather than like a room;
+         * leaving 20 dB of it in place is what a listener hears as "quiet". */
+        float g = 1.0f;
+        if (b.settled && mag > kAnrEps) {
+            g = (mag - sub * b.noise) / mag;
+            if (g < gmin) g = gmin;
+            else if (g > 1.0f) g = 1.0f;
+        }
+        b.g += ((g > b.g) ? ka : kr) * (g - b.g);
+        b.dstep = (b.g - 1.0f - b.d) / (float)frames;
+    }
+}
+
+/* ---- noise reduction (S39): high-pass, hum notch, downward expander ----
+ *
+ * The fixed half of the pair, and the one that behaves the way the DSP inside
+ * a USB microphone behaves: three stages, no learning, every number chosen by
+ * the player. It is what the adaptive unit above cannot be — predictable —
+ * and that is its entire job description.
+ *
+ *   fx.nr.hpf     a Butterworth high-pass. Desk rumble, footfalls, the low
+ *                 end of a laptop fan, and the thump of a hand landing on the
+ *                 same table as the microphone. The registered minimum (20 Hz)
+ *                 *is* the bypass: below audibility there is nothing for a
+ *                 two-pole to remove, so the stage is skipped outright rather
+ *                 than run at a setting that rounds to unity — the same
+ *                 convention fx.rev.tone uses at the other end of the range.
+ *   fx.nr.hum     notches at the mains frequency and its first two harmonics.
+ *                 Q of 20, which is narrow enough to leave a bass line alone
+ *                 and deep enough to take out what an unbalanced lead picks
+ *                 up from a wall wart. Off by default: a notch nobody needs
+ *                 is a hole in the spectrum nobody asked for.
+ *   the expander  everything below fx.nr.thresh is pushed down at
+ *                 fx.nr.ratio, no further than fx.nr.floor, and not until
+ *                 fx.nr.hold has run out.
+ *
+ * `floor` is the control that separates this from a gate, and it is the one
+ * worth understanding. A gate closes; a room that goes absolutely silent
+ * between words does not sound like a quiet room, it sounds like a broken
+ * connection, and the moment it reopens the noise arrives as an audible
+ * *swell*. Capping the attenuation at -24 dB leaves the room present and
+ * simply distant, which is what "quiet" sounds like to a listener. Take
+ * `floor` to -60 dB and this is a gate again, deliberately.
+ *
+ * `hold` is the other half of that. Speech ends in unvoiced consonants at a
+ * fraction of the energy of the vowel before them, and an expander with no
+ * hold eats every one of them — the classic word-ending chop. A hold of
+ * 150 ms keeps the unit open across it and across the gaps *inside* a phrase,
+ * which are shorter than the gaps between phrases by a wide enough margin for
+ * one number to tell them apart.
+ *
+ * The detector runs on the *filtered* signal, which is why the filters are
+ * first: a footfall is nearly all energy below 80 Hz, and a gate that opens
+ * on it has opened for something nobody can hear. Peak, per sample, with the
+ * gain computed once per block from the block's peak and ramped across the
+ * next one — the compressor's structure exactly, including the reason for
+ * fx.nr.attack's 1 ms floor (below the block period it would be a promise the
+ * structure cannot keep).
+ *
+ * Stereo, one detector: the two channels share a gain because a microphone
+ * that ducks one side and not the other is a microphone with a hole in the
+ * middle of it. That is also why the detector takes the larger of the two
+ * rather than their sum.
+ */
+
+constexpr int kNrHumHarmonics = 3;
+constexpr float kNrHumK = 0.05f;        /* Q = 20 */
+constexpr float kNrHpfOff = 20.0f;      /* the registered minimum is the bypass */
+constexpr float kNrHpK = 1.41421356f;   /* Butterworth */
+constexpr float kNrKnee = 6.0f;         /* dB, fixed, as on the compressor */
+constexpr float kNrFloorEps = 1e-6f;
+
+struct NrFx {
+    osynth::dsp::Svf hp_l, hp_r;
+    osynth::dsp::SvfCoef hp_c;
+    osynth::dsp::Svf hum_l[kNrHumHarmonics], hum_r[kNrHumHarmonics];
+    osynth::dsp::SvfCoef hum_c[kNrHumHarmonics];
+    int c_hum = -1;    /* the hum coefficients cost three tanf to build */
+    float env = 0.0f;  /* detector */
+    float gain = 1.0f; /* smoothed, block boundary */
+    uint32_t hold = 0; /* blocks of hold left */
+    osynth::dsp::Smooth s_hpf, s_thresh, s_ratio, s_floor, s_atk, s_hold, s_rel;
+    UnitState u;
+};
+
+NrFx s_nr;
+
+void SYNTH_RENDER_IRAM nr_process(float* __restrict__ bl,
+                                  float* __restrict__ br, size_t frames) {
+    NrFx& c = s_nr;
+    const float m = unit_gate(c.u, pv(NR_ON), nullptr, 0);
+    if (m < 0.0f) {
+        /* Off: drop the filter states and reopen the expander, so switching
+         * back on cannot ring or arrive mid-duck. */
+        c.hp_l = c.hp_r = osynth::dsp::Svf{};
+        for (int h = 0; h < kNrHumHarmonics; ++h) {
+            c.hum_l[h] = osynth::dsp::Svf{};
+            c.hum_r[h] = osynth::dsp::Svf{};
+        }
+        c.env = 0.0f;
+        c.gain = 1.0f;
+        c.hold = 0;
+        return;
+    }
+
+    /* What this unit is looking at (S39b); the note in anr_process() covers
+     * why these are not __restrict__. */
+    const bool from_input = ((int)pv(NR_SRC) == 1);
+    const float* sl = bl;
+    const float* sr = br;
+    if (from_input) {
+        if (frames > SYNTH_BLOCK_SIZE ||
+            !audio_io_in_fx_block(s_nr_src_l, s_nr_src_r, frames)) {
+            /* Nothing arriving, so nothing to correct. The filters and the
+             * detector are dropped rather than left charged: an input that
+             * comes back should meet an open expander and clean integrators,
+             * not the tail of the last thing it said. */
+            c.hp_l = c.hp_r = osynth::dsp::Svf{};
+            for (int h = 0; h < kNrHumHarmonics; ++h) {
+                c.hum_l[h] = osynth::dsp::Svf{};
+                c.hum_r[h] = osynth::dsp::Svf{};
+            }
+            c.env = 0.0f;
+            c.gain = 1.0f;
+            c.hold = 0;
+            return;
+        }
+        sl = s_nr_src_l;
+        sr = s_nr_src_r;
+    }
+
+    const float hpf = osynth::dsp::smooth_exp(c.s_hpf, pvm(NR_HPF));
+    const bool use_hp = hpf > kNrHpfOff * 1.02f;
+    if (use_hp) {
+        c.hp_c = osynth::dsp::svf_coef_k(hpf, kNrHpK, kSr);
+    } else {
+        /* Bypassed, and held clean rather than merely unread: a sweep back up
+         * off the minimum would otherwise re-engage the filter on top of
+         * whatever its integrators were holding when it went out. */
+        c.hp_l = c.hp_r = osynth::dsp::Svf{};
+    }
+
+    const int hum = (int)pv(NR_HUM);
+    if (hum != c.c_hum) {
+        c.c_hum = hum;
+        /* New coefficients describe a different filter, so the state charged
+         * at the old frequency is not this one's — carried across, it rings
+         * out as a beat instead of settling into a null. */
+        for (int h = 0; h < kNrHumHarmonics; ++h) {
+            c.hum_l[h] = osynth::dsp::Svf{};
+            c.hum_r[h] = osynth::dsp::Svf{};
+        }
+        if (hum > 0) {
+            const float f0 = (hum == 1) ? 50.0f : 60.0f;
+            for (int h = 0; h < kNrHumHarmonics; ++h) {
+                c.hum_c[h] =
+                    osynth::dsp::svf_coef_k(f0 * (float)(h + 1), kNrHumK, kSr);
+            }
+        }
+    }
+
+    const float thresh = osynth::dsp::smooth_lin(c.s_thresh, pvm(NR_THRESH));
+    const float ratio = osynth::dsp::smooth_exp(c.s_ratio, pvm(NR_RATIO));
+    const float floor_db = osynth::dsp::smooth_lin(c.s_floor, pvm(NR_FLOOR));
+    const float atk_ms = osynth::dsp::smooth_exp(c.s_atk, pvm(NR_ATTACK));
+    const float rel_ms = osynth::dsp::smooth_exp(c.s_rel, pvm(NR_RELEASE));
+    const float hold_ms = osynth::dsp::smooth_lin(c.s_hold, pvm(NR_HOLD));
+
+    const float ka = 1.0f - expf(-1.0f / (atk_ms * 0.001f * kSr));
+    const float kr = 1.0f - expf(-1.0f / (rel_ms * 0.001f * kSr));
+
+    /* Pass 1: the filters, and the detector on what leaves them. What goes on
+     * the bus is the filters' *difference*: in `bus` mode that is the familiar
+     * dry/wet crossfade, and in `input` mode it replaces the input's
+     * contribution and touches nothing else. */
+    float peak = 0.0f;
+    for (size_t i = 0; i < frames; ++i) {
+        const float xl = sl[i], xr = sr[i];
+        float l = xl, r = xr;
+        if (use_hp) {
+            l = osynth::dsp::svf_next(c.hp_l, c.hp_c, osynth::dsp::SvfMode::Hp,
+                                      l);
+            r = osynth::dsp::svf_next(c.hp_r, c.hp_c, osynth::dsp::SvfMode::Hp,
+                                      r);
+        }
+        if (hum > 0) {
+            for (int h = 0; h < kNrHumHarmonics; ++h) {
+                l = osynth::dsp::svf_next(c.hum_l[h], c.hum_c[h],
+                                          osynth::dsp::SvfMode::Notch, l);
+                r = osynth::dsp::svf_next(c.hum_r[h], c.hum_c[h],
+                                          osynth::dsp::SvfMode::Notch, r);
+            }
+        }
+        /* Kept only where pass 2 needs it back: there the expander's share of
+         * the correction is a multiple of the filtered *input*, not of the
+         * bus. Overwriting the scratch is safe — xl was read out of it. */
+        if (from_input) {
+            s_nr_src_l[i] = l;
+            s_nr_src_r[i] = r;
+        }
+        bl[i] += m * (l - xl);
+        br[i] += m * (r - xr);
+        /* Detected on what the unit is *looking at* rather than on the bus: in
+         * `input` mode a synth beside it must not be able to hold the expander
+         * open, and in `bus` mode the two are the same signal once the
+         * crossfade is through. Worth knowing which level the threshold is in
+         * terms of — the input as it arrives on the bus, i.e. after in.gain,
+         * which is the one the master meter shows. */
+        const float al = fabsf(l), ar = fabsf(r);
+        const float t = (al > ar) ? al : ar;
+        c.env += ((t > c.env) ? ka : kr) * (t - c.env);
+        if (c.env > peak) peak = c.env;
+    }
+
+    /* Gain computer, in dB, with the same fixed soft knee the compressor
+     * uses — mirrored, because this one acts on what is *under* the
+     * threshold rather than over it. */
+    const float db = 20.0f * log10f(fmaxf(peak, kNrFloorEps));
+    const float over = db - thresh;
+    const uint32_t hold_blocks =
+        (uint32_t)(hold_ms * 0.001f * kSr / (float)frames);
+    if (over > 0.0f) {
+        c.hold = hold_blocks; /* something is being said: re-arm */
+    } else if (c.hold > 0) {
+        c.hold--;
+    }
+
+    float gr = 0.0f;
+    if (c.hold == 0) {
+        const float slope = fmaxf(ratio, 1.0f) - 1.0f;
+        if (over >= 0.5f * kNrKnee) {
+            gr = 0.0f;
+        } else if (over <= -0.5f * kNrKnee) {
+            gr = slope * over;
+        } else {
+            const float t = over - 0.5f * kNrKnee;
+            gr = -slope * t * t / (2.0f * kNrKnee);
+        }
+        if (gr < floor_db) gr = floor_db;
+    }
+    const float target = powf(10.0f, gr * (1.0f / 20.0f));
+
+    /* Pass 2, and `m` folded into the gain exactly as the compressor folds its
+     * mix: at m = 0 both this and the crossfade above are the identity. */
+    if (from_input) {
+        /* The expander acts on the filtered input alone, so what belongs on
+         * the bus is (g - 1) times it — added, not multiplied, since a
+         * multiply here would duck the synth along with it. Together with
+         * pass 1 the bus receives m * (g * filt(x) - x), which is the input's
+         * contribution replaced by the cleaned one and nothing besides. */
+        float d = m * (c.gain - 1.0f);
+        const float dstep = (m * (target - 1.0f) - d) / (float)frames;
+        for (size_t i = 0; i < frames; ++i) {
+            d += dstep;
+            bl[i] += d * s_nr_src_l[i];
+            br[i] += d * s_nr_src_r[i];
+        }
+    } else {
+        const float g0 = 1.0f + m * (c.gain - 1.0f);
+        const float g1 = 1.0f + m * (target - 1.0f);
+        const float gstep = (g1 - g0) / (float)frames;
+        float g = g0;
+        for (size_t i = 0; i < frames; ++i) {
+            g += gstep;
+            bl[i] *= g;
+            br[i] *= g;
+        }
+    }
+    c.gain = target;
+}
+
 /* ---- vocoder (S38): the input's spectrum imposed on the synth bus ----
  *
  * A classic analysis/synthesis vocoder, and the first unit on this bus whose
@@ -831,10 +1509,11 @@ inline MixGains mix_gains(float m, bool comp, float makeup) {
  * envelope follower that multiplies its carrier partner, and the products are
  * summed. Say a vowel and the synth says it.
  *
- * First in the chain, deliberately. The vocoder decides what the sound *is*,
- * so everything after it — drive, chorus, delay, reverb — colours the spoken
- * result rather than the raw carrier, which is what a reverb on a vocoder is
- * supposed to do. `fx.voc.mix` therefore crossfades against the untouched
+ * Ahead of every effect, deliberately — only the two noise-reduction units
+ * (S39) come before it, and those clean the carrier rather than shape it.
+ * The vocoder decides what the sound *is*, so everything after it — drive,
+ * chorus, delay, reverb — colours the spoken result rather than the raw
+ * carrier, which is what a reverb on a vocoder is supposed to do. `fx.voc.mix` therefore crossfades against the untouched
  * synth, which is also the clearest thing for it to mean.
  *
  * The carrier is the bus summed to mono, and the wet goes out to both
@@ -1073,7 +1752,9 @@ void SYNTH_RENDER_IRAM vocoder_process(float* __restrict__ bl,
 /* ---- drive: waveshaper on the finished mix (S34) ----
  *
  * The graph's Shaper node, moved to where it can reach the drums and the
- * looper. First in the chain, for the reason at the top of this file.
+ * looper. First of the effects proper — the noise reduction and the vocoder
+ * ahead of it are a cleanup and a source, not effects — for the reason at
+ * the top of this file.
  *
  * `drive` is peak-compensated the same way the Shaper compensates it, so
  * turning it up changes the timbre and not the level — otherwise the control
@@ -2652,8 +3333,9 @@ esp_err_t fx_init(void) {
 
     s_up = true;
     ESP_LOGI(TAG,
-             "fx bus up: vocoder -> drive -> chorus -> flanger -> phaser -> delay -> "
-             "granular -> reverb -> crush -> filter -> eq -> comp -> stereo, "
+             "fx bus up: anr -> nr -> vocoder -> drive -> chorus -> flanger -> "
+             "phaser -> delay -> granular -> reverb -> crush -> filter -> eq "
+             "-> comp -> stereo, "
              "%u params, "
              "delay max %.2f s, %d grains / %.2f s window, buffers %u KB "
              "PSRAM + %u KB internal",
@@ -2669,6 +3351,8 @@ void SYNTH_RENDER_IRAM fx_process(float* l, float* r, size_t frames) {
      * consumes what this writes. */
     lfo_update(frames);
 
+    anr_process(l, r, frames);
+    nr_process(l, r, frames);
     vocoder_process(l, r, frames);
     drive_process(l, r, frames);
     chorus_process(l, r, frames);

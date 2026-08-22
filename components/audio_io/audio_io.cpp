@@ -642,6 +642,25 @@ bool SYNTH_RENDER_IRAM audio_io_in_mono(float* dst, size_t frames) {
     return true;
 }
 
+/* mix_in() into a cleared pair of buffers rather than a second copy of its
+ * arithmetic: the value of this function is that it agrees with what was
+ * actually mixed, and two expressions that have to agree are one expression
+ * with a copy of it somewhere else. */
+bool SYNTH_RENDER_IRAM audio_io_in_fx_block(float* l, float* r, size_t frames) {
+    if (!s_in_ok || l == nullptr || r == nullptr) return false;
+    if (frames > SYNTH_BLOCK_SIZE) frames = SYNTH_BLOCK_SIZE;
+    /* Nothing was added at this position, so there is nothing to correct.
+     * Reported rather than answered with a block of zeros: a caller that
+     * corrected a silent block would still be running its filters on it, and
+     * would have no way to tell "the input is quiet" from "the input is not
+     * here". */
+    if (s_in_g[kInFx] <= kInSilent) return false;
+    memset(l, 0, frames * sizeof(float));
+    memset(r, 0, frames * sizeof(float));
+    mix_in(kInFx, l, r, frames);
+    return true;
+}
+
 const int16_t* SYNTH_RENDER_IRAM audio_io_line_in_block(void) {
     /* NULL rather than a buffer of stale samples when the capture is not
      * running: s_cap is only refilled by audio_in_capture(), which returns
@@ -673,6 +692,7 @@ void audio_io_line_in_dry(float*, float*, size_t) {}
 void audio_io_line_in_mon(float*, float*, size_t) {}
 const int16_t* audio_io_line_in_block(void) { return nullptr; }
 bool audio_io_in_mono(float*, size_t) { return false; }
+bool audio_io_in_fx_block(float*, float*, size_t) { return false; }
 
 #endif /* SYNTH_ENABLE_AUDIO_IN */
 

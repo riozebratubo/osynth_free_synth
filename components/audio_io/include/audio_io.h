@@ -217,6 +217,35 @@ const int16_t* audio_io_line_in_block(void);
  * gain of its own rather than assume this arrives near unity. */
 bool audio_io_in_mono(float* dst, size_t frames);
 
+/* The input exactly as audio_io_line_in_fx() mixed it into the bus this block,
+ * written into `l` and `r` — overwritten, not accumulated. Returns false, and
+ * leaves both untouched, when this build has no input, the RX half never came
+ * up, or the fx position is silent. Both buffers must hold at least `frames`
+ * floats, `frames` may not exceed SYNTH_BLOCK_SIZE, and the block is valid
+ * only for the current one. Audio task only.
+ *
+ * This exists for one caller shape, and the shape is worth stating because it
+ * is not the one the three stages above have: a *bus* unit that wants to
+ * process the input alone and leave the synth beside it untouched — S39's two
+ * noise-reduction units, whose whole point is cleaning a microphone without
+ * putting a denoiser across the instrument. By the time the FX bus runs the
+ * input has already been summed in, so such a unit cannot pull it back out.
+ * It can, though, reproduce the exact block that was added, run its DSP on
+ * that, and add the *difference* to the bus — which lands the same result and
+ * needs no second mix point.
+ *
+ * The fx position and not a choice of the three, because it is the only one
+ * already summed when the FX bus runs. `mon` and `dry` join afterwards, so
+ * there is nothing on the bus to correct there: a caller gets false and should
+ * do nothing rather than correct a signal that has not arrived.
+ *
+ * Follows `in.route`, `in.gain`, `in.source` and `in.micgain` down to the last
+ * multiply — the opposite of audio_io_in_mono() above, which deliberately
+ * ignores the first two. The difference is what each is for: that one names a
+ * source to listen to, this one reproduces a mix that already happened, and a
+ * correction that does not match what it is correcting is worse than none. */
+bool audio_io_in_fx_block(float* l, float* r, size_t frames);
+
 /* Picks and starts the output sink, then starts the audio task.
  * `render` may be NULL (silence). Falls back to the null sink (no output,
  * timer pacing) if the hardware sink fails to start. */

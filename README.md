@@ -88,12 +88,13 @@ stopped.
 
 ### ✨ Modulation and FX
 
-- **FX bus:** drive → chorus → flanger → phaser → delay → granular delay →
-  reverb → bitcrush → filter → EQ → compressor → stereo/output. Every unit has
-  its own enable switch and is skipped outright while it is off — or while its
-  mix is 0 — so the ones you aren't using are free. The switch is a real
-  bypass: it keeps every setting, so you can A/B an effect without losing the
-  sound you were comparing against.
+- **FX bus:** adaptive noise reduction → noise reduction → vocoder → drive →
+  chorus → flanger → phaser → delay → granular delay → reverb → bitcrush →
+  filter → EQ → compressor → stereo/output. Every unit has its own enable
+  switch and is skipped outright while it is off — or while its mix is 0 — so
+  the ones you aren't using are free. The switch is a real bypass: it keeps
+  every setting, so you can A/B an effect without losing the sound you were
+  comparing against.
 - **Four reverb algorithms** behind one unit, with shared pre-delay, tone and
   width around all of them: the original **freeverb**, plus ports of three
   open-source plugins — **WetReverb** (half-rate Schroeder bank, 80s digital
@@ -104,6 +105,17 @@ stopped.
   drum slot's trigger for the pumping that a groovebox is bought for. It sits
   late enough in the chain to catch the reverb tail, which is what makes a
   duck read as a duck.
+- **Two noise reducers**, at the head of the bus, which is what makes the
+  thing usable as a **USB microphone**: an *adaptive* one that learns the
+  steady part of a room — fans, hiss, a spinning disk — over a few seconds and
+  subtracts it per band, with a Hold-to-learn button for when you would rather
+  sample the room now; and a *fixed* one with the chain a USB microphone has
+  inside it — rumble high-pass, 50/60 Hz hum notches, and a downward expander
+  with a hold and a floor, so the gaps between words go quiet instead of going
+  dead. Either can be pointed at the **input alone** instead of the bus, which
+  is what keeps a denoiser off an instrument that was never noisy: the unit
+  corrects only what came in through the jack, and the synth beside it comes
+  out unchanged.
 - **Tempo sync** — the delay locks to a note division (1/8, 1/8., 1/8T…) and
   follows an external MIDI clock, not just the internal tempo.
 - **2 FX LFOs**, free or locked to anything from 8 bars to 1/32, reaching 27
@@ -118,7 +130,10 @@ stopped.
 ### 🔌 Connectivity
 
 - **USB Audio (UAC2) + USB MIDI** as one composite device — record the synth
-  straight into a DAW *(ESP32-S3)*
+  straight into a DAW *(ESP32-S3 and ESP32-P4)*. With a microphone on the
+  input and the noise reduction above, the same interface is a usable USB
+  microphone: route the input through the FX bus and the computer sees one
+  cleaned-up capture device.
 - **USB MIDI host** — or turn the same port around and plug a USB MIDI
   controller straight into the synth, hub and several controllers included.
   One socket, one role: pick it in the app and the synth restarts into it.

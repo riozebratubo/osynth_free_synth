@@ -1,0 +1,49 @@
+    /* What this unit is looking at (S39b). In `bus` mode these alias bl/br,
+     * which is deliberate and is why they are not themselves __restrict__: a
+     * pointer *based on* a restrict-qualified one is allowed to read what that
+     * one writes. In `input` mode they are the scratch, and the two objects
+     * are genuinely disjoint. */
+    const float* sl = bl;
+    const float* sr = br;
+    bool live = true;
+    if ((int)pv(ANR_SRC) == 1) {
+        live = frames <= SYNTH_BLOCK_SIZE &&
+               audio_io_in_fx_block(s_nr_src_l, s_nr_src_r, frames);
+        sl = s_nr_src_l;
+        sr = s_nr_src_r;
+    }
+
+    /* The bank, and the correction it earned last block. The source sample is
+     * read into a local first: every band has to analyse the *input*, not what
+     * the bands ahead of it have already been subtracted from. */
+    if (live) {
+        for (size_t i = 0; i < frames; ++i) {
+            const float xl = sl[i], xr = sr[i];
+            float cl = 0.0f, cr = 0.0f;
+            for (int k = 0; k < n; ++k) {
+                AnrBand& b = a.b[k];
+                const float yl = osynth::dsp::svf_next(b.l, b.c, b.mode, xl);
+                const float yr = osynth::dsp::svf_next(b.r, b.c, b.mode, xr);
+                b.acc += fabsf(yl) + fabsf(yr);
+                cl += b.d * yl;
+                cr += b.d * yr;
+                b.d += b.dstep;
+            }
+            /* The band sum *is* the correction — (g - 1) times each band — so
+             * this one line is both "replace the bus" and "replace only the
+             * input's contribution to it". Which of the two it does was
+             * settled above, by where xl came from. */
+            bl[i] += m * cl;
+            br[i] += m * cr;
+        }
+    } else {
+        /* `input` with nothing arriving. No correction to add, and the banks
+         * are dropped so a source that comes back does not meet state charged
+         * before it went away. The per-band pass below still runs, over an
+         * accumulator of zero, which is what unprimes the estimates. */
+        for (int k = 0; k < n; ++k) {
+            a.b[k].l = osynth::dsp::Svf{};
+            a.b[k].r = osynth::dsp::Svf{};
+            a.b[k].d = 0.0f;
+        }
+    }
