@@ -272,17 +272,14 @@ none of these three agree on which pins are free.
 | **USB MIDI host** | ✅ same socket, `usb.mode` | ✅ same socket, `usb.mode` | ✅ same socket, `usb.mode` |
 | **Audio out** | I2S → ES8388 *(default)* or PCM5102A | I2S → external ES8388 or PCM5102A | I2S → PCM5102A or ES8388, on the header |
 | **Line in** | ✅ full duplex on the DAC's port | ✅ full duplex on the DAC's port | ✅ full duplex on the DAC's port |
-| **Mic in** | ✅ MEMS on the 2nd I2S port *(off by default)* | external MEMS ✅ · the **on-board mic is an ES8311 preamp and is not yet working** | ✅ external MEMS on the 2nd I2S port |
+| **Mic in** | ✅ MEMS on the 2nd I2S port *(off by default)* | ✅ onboard mic and external MEMS | ✅ external MEMS on the 2nd I2S port |
 | **SD card** | ✅ SPI on the FSPI pins — looper store on by default | on-board socket, but wired for SDMMC: needs the SPI remap in `sdkconfig.defaults.esp32p4` *(unverified)* | none on board — wire one to free pins |
-| **Looper** | 8 tracks, 160 s | 8 tracks, 160 s | 8 tracks, 160 s |
+| **Looper** | 8 tracks, 160s on internal flash, no limit on sd card | 8 tracks, 600s on internal flash, no limit on sd card | 8 tracks, 600s on internal flash, no limit on sd card |
 | **Sequencer** | 8 trk × 256 steps × 8 patterns | 8 trk × 256 steps × 8 patterns | 8 trk × 256 steps × 8 patterns |
 | **Also on board** | 2× USB-C (native + UART bridge), RGB LED, wide headers | RJ45 Ethernet, 3× USB-C, micro-SD, MIPI DSI + CSI, ES8311 + speaker amp | USB-C, MIPI DSI + CSI FPCs, on-board mic pad, castellated + through-hole pins |
-| **Watch out for** | GPIO33–37 are the octal PSRAM; GPIO0/3/45/46 are straps; GPIO19/20 are the USB PHY | **GPIO45/46/47 do not drive on this carrier** — they read 0.6 V and cost a week to find. The header brings out only GPIO1–5, 20, 32, 33 + the ES_I2C pads, and GPIO14–19/54 are the SDIO link to the C6 | the shipped P4 pin defaults are written for the Guition carrier, so re-derive every row from this board's schematic |
+| **Watch out for** | GPIO33–37 are the octal PSRAM; GPIO0/3/45/46 are straps; GPIO19/20 are the USB PHY | **GPIO45/46/47 do not drive on this carrier** — they read 0.6 V and have cost a week to find. The header brings out only GPIO1–5, 20, 32, 33 + the ES_I2C pads, and GPIO14–19/54 are the SDIO link to the C6 | the shipped P4 pin defaults are written for the Guition carrier, so re-derive every row from this board's schematic |
 
-The **classic ESP32** devkit (4 MB flash, no PSRAM assumed) has no photo here
-because there is nothing board-specific about it: audio comes out of the
-internal 8-bit DAC or an I2S module, control is BLE or DIN MIDI, and the
-counts shrink as in the table above.
+The **classic ESP32** devkit (4 MB flash, no PSRAM assumed) is also supported. Some features are not supported in this build, though.
 
 On both P4 boards the C6 must be flashed with the **matching** ESP-Hosted
 co-processor firmware — host and slave are versioned independently, and
