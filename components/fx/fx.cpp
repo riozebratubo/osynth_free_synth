@@ -656,23 +656,61 @@ const ParamDesc kParams[P_COUNT] = {
     {FX_PID_FLG_SPREAD, "fx.flg.spread", ParamType::Float, ParamCurve::Linear,
      0.0f, 0.5f, 0.25f, nullptr, 0},
 
-    /* ---- 3-band EQ (S34) ---- */
+    /* ---- 3-band EQ (S34; re-voiced S40) ----
+     *
+     * The shelf corner frequencies are the thing to get right here, and the
+     * S34 numbers had them wrong in a way that read as "the EQ does nothing".
+     * An RBJ shelf reaches *half* its gain (in dB) at f0 and its full gain
+     * about two octaves past it, so where the knob points is not where the
+     * boost lands:
+     *
+     *   lofreq 120, +12 dB  ->  +6.0 dB at 120 Hz, +0.8 dB at 250, ~0 by 500,
+     *                           i.e. the whole lift is under 60 Hz, which is
+     *                           under everything a phone, a laptop or the
+     *                           ES8311 speaker can reproduce. The old 40 Hz
+     *                           floor was worse still: it does nothing at all
+     *                           on any of them.
+     *   hifreq 6000, +12 dB ->  +2.1 dB at 4 kHz but +10.8 at 10 k and +12 at
+     *                           16 k. That octave holds no instrument content
+     *                           and does hold the int16 quantization hash of
+     *                           the reverb and granular lines immediately
+     *                           upstream, so the control read as a noise knob.
+     *
+     * Re-centred so the audible half of each shelf lands on the knob:
+     * lofreq 250 puts +12 dB at +11.2 dB where 120 Hz actually is, and
+     * hifreq 3000 puts the lift on presence (+8.9 dB at 4 k) rather than on
+     * air. The ends still reach the old extremes — 60 Hz and 12 kHz are past
+     * where either shelf has anything left to move.
+     *
+     * Gains are +/-12 rather than +/-18. Three reasons, in order: 36 dB across
+     * an 84 px dial is ~1.5 dB per pixel, which is why the mid stepped rather
+     * than swept; +18 dB into a bell at Q 6 is a resonance, not a correction,
+     * and this unit is the corrective one (the S33 filter is the performance
+     * one); and the boost is real gain arriving at the output soft clip two
+     * stages later. Nothing musical is lost — a master EQ asked for more than
+     * 12 dB is fixing something that wants fixing upstream.
+     *
+     * Note for existing patches: presets store sparsely, so every patch that
+     * never touched the EQ silently inherits the new lofreq/hifreq defaults.
+     * That is the intent — those patches were carrying shelves that did
+     * nothing — but it does mean a patch A/B'd across this change is not
+     * comparing the same instrument. Stored gains beyond +/-12 dB clamp. */
     {FX_PID_EQ_ON, "fx.eq.on", ParamType::Bool, ParamCurve::Linear,
      0.0f, 1.0f, 0.0f, nullptr, 0},
     {FX_PID_EQ_LOW, "fx.eq.low", ParamType::Float, ParamCurve::Linear,
-     -18.0f, 18.0f, 0.0f, nullptr, 0}, /* dB, low shelf */
+     -12.0f, 12.0f, 0.0f, nullptr, 0}, /* dB, low shelf */
     {FX_PID_EQ_LOFREQ, "fx.eq.lofreq", ParamType::Float, ParamCurve::Exp,
-     40.0f, 500.0f, 120.0f, nullptr, 0},
+     60.0f, 800.0f, 250.0f, nullptr, 0},
     {FX_PID_EQ_MID, "fx.eq.mid", ParamType::Float, ParamCurve::Linear,
-     -18.0f, 18.0f, 0.0f, nullptr, 0}, /* dB, peaking bell */
+     -12.0f, 12.0f, 0.0f, nullptr, 0}, /* dB, peaking bell */
     {FX_PID_EQ_MIDFREQ, "fx.eq.midfreq", ParamType::Float, ParamCurve::Exp,
      200.0f, 6000.0f, 1000.0f, nullptr, 0},
     {FX_PID_EQ_MIDQ, "fx.eq.midq", ParamType::Float, ParamCurve::Exp,
      0.3f, 6.0f, 1.0f, nullptr, 0},
     {FX_PID_EQ_HIGH, "fx.eq.high", ParamType::Float, ParamCurve::Linear,
-     -18.0f, 18.0f, 0.0f, nullptr, 0}, /* dB, high shelf */
+     -12.0f, 12.0f, 0.0f, nullptr, 0}, /* dB, high shelf */
     {FX_PID_EQ_HIFREQ, "fx.eq.hifreq", ParamType::Float, ParamCurve::Exp,
-     1500.0f, 16000.0f, 6000.0f, nullptr, 0},
+     1200.0f, 12000.0f, 3000.0f, nullptr, 0},
 
     /* ---- compressor (S34) ---- */
     {FX_PID_COMP_ON, "fx.comp.on", ParamType::Bool, ParamCurve::Linear,
