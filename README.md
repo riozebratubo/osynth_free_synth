@@ -1,14 +1,15 @@
 # osynth
 
-**A full groovebox on a microcontroller.** Four synth engines, a real sampled
-drum kit, an 8-track multitrack sequencer and an 8-track looper — running on
-an ESP32S3 (or ESP32) and played from your phone (or Windows, Mac, Linux) over 
-Bluetooth.
+**A full groovebox on a microcontroller.** Six synth engines, a real sampled
+drum kit, an 8-track multitrack sequencer, an 8-track looper and a stereo
+audio input — running on an ESP32-P4, an ESP32-S3 (or a classic ESP32) and
+played from your phone (or Windows, Mac, Linux) over Bluetooth.
 
 ```
-  4 engines · 8 voices · 12 effects · 8×256-step sequencer
-  16-slot drum kit · 8-track looper max 160s · USB audio + MIDI · BLE app
-  presets + sequencer + looper persists · powers on where you left off
+  6 engines · 8 voices · 14 effects · 8×256-step sequencer
+  16-slot drum kit · 8-track looper max 160s · line + mic in
+  USB audio + MIDI · USB MIDI host · BLE app
+  everything persists · powers on where you left off
 ```
 
 ![Osyntho app screenshots](screenshots/screenshots.gif)
@@ -17,7 +18,7 @@ Bluetooth.
 
 ## What it does
 
-### 🎹 Four synth engines, hot-swappable
+### 🎹 Six synth engines, hot-swappable
 
 | Engine | What it is |
 | --- | --- |
@@ -25,9 +26,19 @@ Bluetooth.
 | **FM** | 2-operator × 2 phase modulation, per-pair index envelopes and feedback. DX-style e-pianos, bells, growling basses. |
 | **Wavetable** | 4 morphing table sets × 8 frames × 8 band-limited mips — basic, hard-sync, vocal formants, FM. No aliasing by construction. |
 | **Additive** | 16 sine partials with drawbars, spectral tilt, even/odd balance and inharmonicity. A filter sweep with no filter — and now a filter on top of it. |
+| **Granular** | A cloud of short windowed grains per voice, scheduled sample-accurately. Grains hold either an oscillator burst — FOF/pulsar synthesis, where the grain *rate* carries the pitch and the grain's own frequency is a formant that moves independently of it — or a window onto the **audio input**, transposed by the key, scattered, played backwards, or frozen into a fixed sample. |
+| **Modular** | Not a fixed chain at all: a 12-node graph you patch with cables in the app. Oscillators, noise, every filter topology, VCAs, mixers, shapers, ring mod, envelopes, LFOs, sample-and-hold, MIDI sources and the line input. |
 
 Switch engines mid-chord — the voice bus fades over ~10 ms, so it never
 clicks and never leaves a note stuck.
+
+The modular engine is compiled, not interpreted: an accepted edit runs a
+cycle check, a topological sort, live-range buffer reuse and in-place
+rewriting on the control task, and the audio task renders a flat plan.
+Orphaned nodes are dropped, control-rate nodes cost one float per block
+instead of one per sample, and a **cost budget** prices the patch before you
+hear it — which is why each heavy filter topology is its own node kind
+rather than a `type` knob inside one.
 
 ### 🎛️ One filter family, everywhere
 
@@ -39,8 +50,8 @@ squared stages), **Moog ladder** with saturated feedback, **dual/spread**
 with a **drive** that saturates the resonant integrator rather than just
 the output.
 
-All four engines have one. The modular graph gets each heavy topology as
-its own node, so the patch budget can price it honestly. And the master FX
+Every fixed engine has one, and the modular graph gets each heavy topology
+as its own node, so the patch budget can price it honestly. And the master FX
 bus has one too — the only filter here that reaches the drums and the
 looper, which is what makes a whole-track build-up possible. Every one of
 them has an on/off switch that skips the work when it is off.
@@ -85,6 +96,30 @@ bleed into the take. Save and load whole loop sets to flash or SD.
 A new take can **sync to the sequencer's downbeat** or run a **count-in**
 first — on a clock that free-runs, so it works even with the sequencer
 stopped.
+
+### 🎤 Audio in — line, microphone, or both
+
+A stereo **line input** on the *same* I2S port as the output. The S3's and
+P4's I2S controllers are full duplex, so a TX and an RX channel from one
+`i2s_new_channel()` share BCLK and WS: the ADC hangs off clock lines the
+output already drives, and capture is sample-locked to playback by
+construction. Nothing drifts and nothing is ever resampled. A discrete
+PCM1808 or an **ES8388** codec provides it — the codec adds an analogue PGA
+(0…+24 dB) and a headphone driver on the way out.
+
+A **microphone input** beside it on a second I2S controller, for a digital
+MEMS part (INMP441, ICS-43434, SPH0645). Sharing the output port's clocks
+costs one pin and stays sample-locked; giving it a clock pair of its own
+costs three. `in.source` picks line, mic, or both.
+
+`in.route` decides where it joins the render chain, and that one enum is
+what makes this a studio input rather than a monitor: **`mon`** mixes in
+*after* the looper's record tap — heard but never printed into a take —
+while **`fx`** and **`dry`** mix in before it. So a microphone can run
+through the noise reduction, the vocoder and the compressor, be recorded
+into the looper, be granulated by the granular engine, be patched as a
+`LineIn` node in the modular graph, or go straight out to the computer over
+USB — and the synth playing beside it is untouched either way.
 
 ### ✨ Modulation and FX
 
@@ -164,7 +199,13 @@ parameter at runtime, so it fits whatever firmware you flashed.
 - Drum mixer with audition pads, plus a **4×4 velocity-sensitive pad grid**
   next to a 2-octave on-screen keyboard
 - Curated pages per engine, mod-matrix editor, FX, looper, preset browser
-- A patch library stored locally on the app
+- A **cable-patching canvas** for the modular engine — drop nodes, draw
+  cables, and watch the cost budget as you build
+- An input page for the line/mic source, routing, gain and the two noise
+  reducers
+- A patch library stored locally on the app, with the modular graph saved
+  alongside the parameters
+- English and Brazilian Portuguese
 
 ---
 
@@ -178,12 +219,13 @@ idf.py set-target esp32s3      # or: esp32, esp32p4
 idf.py build flash monitor
 ```
 
-Plug the S3's native USB port into a computer and it enumerates as an audio
-interface *and* a MIDI port. Or switch that port to host mode on the app's
-**osynth** page and plug a MIDI controller into it instead. Or pair with the
-app over BLE. Or wire a DIN socket and play it from hardware. The heartbeat
-log line is the health check — `underruns` should stay at 0, and in host mode
-it reports how many controllers the bus found.
+Plug the board's native USB port — the S3's "USB" socket, the P4's OTG socket
+— into a computer and it enumerates as an audio interface *and* a MIDI port.
+(Flash and monitor over the *other* port, the UART bridge.) Or switch that
+port to host mode on the app's **osynth** page and plug a MIDI controller into
+it instead. Or pair with the app over BLE. Or wire a DIN socket and play it
+from hardware. The heartbeat log line is the health check — `underruns` should
+stay at 0, and in host mode it reports how many controllers the bus found.
 
 > The kit step is optional: with no image present the build still links and
 > the drum bus is simply silent.
@@ -198,6 +240,10 @@ it reports how many controllers the bus found.
 | Looper | ✅ 8 tracks | ✅ 8 tracks | — *(needs PSRAM)* |
 | Sequencer | 8 trk × 8 patterns | 8 trk × 8 patterns | 4 trk × 2 patterns |
 | Drum kit | ✅ + SD kits | ✅ + SD kits | ✅ ROM kit |
+| Line in | ✅ full duplex | ✅ full duplex | — |
+| Mic in | ✅ | ✅ *(on by default)* | — |
+| Modular engine | ✅ | ✅ | — *(off by default)* |
+| Granular engine | ✅ | ✅ | ✅ *(synth grains only)* |
 | Clock | 240 MHz Xtensa | 360 MHz RISC-V *(400 on rev ≥3.0)* | 240 MHz Xtensa |
 | Everything else | ✅ | ✅ | ✅ |
 
@@ -208,10 +254,50 @@ controller on a companion ESP32-C6 over ESP-Hosted. See
 Capabilities are derived from the chip: undeclared modules are never compiled in,
 and a scaled-down build keeps **every** per-step feature — only the counts shrink.
 
+## The hardware
+
+These are the boards osynth is known to run on, and the ones the pin defaults
+in [`PINMAP.md`](PINMAP.md) are written for. Any board with the same silicon
+works — but check every pin against your own schematic before wiring, because
+none of these three agree on which pins are free.
+
+| | <img src="images/hardware/ESP32-S3-devkit.jpg" width="230" alt="ESP32-S3-DevKitC-1"> | <img src="images/hardware/JC-ESP32P4-M3-DEV-ESP32-P4.jpg" width="230" alt="Guition JC-ESP32P4-M3-DEV"> | <img src="images/hardware/ESP32-P4-WIFI6-1.jpg" width="230" alt="Waveshare ESP32-P4-WIFI6"> |
+| --- | --- | --- | --- |
+| **Board** | **ESP32-S3-DevKitC-1**<br>*the primary target* | **Guition JC-ESP32P4-M3-DEV**<br>*P4 + C6 on one module* | **Waveshare ESP32-P4-WIFI6**<br>*P4 + C6-MINI-1* |
+| **Chip** | ESP32-S3 · 2× Xtensa LX7 + FPU | ESP32-P4NRW32 · 2× RISC-V + FPU | ESP32-P4 · 2× RISC-V + FPU |
+| **Clock** | 240 MHz | 360 MHz | 360 MHz |
+| **Flash + PSRAM** | 8–16 MB + 8 MB octal | 16 MB + 32 MB hex @ 200 MHz | 16 MB + 32 MB hex *(N16R32 class)* |
+| **BLE** | on-die | on-module C6 over ESP-Hosted | on-module C6 over ESP-Hosted |
+| **USB audio + MIDI** | ✅ native OTG, full speed | ✅ OTG high speed | ✅ OTG high speed |
+| **USB MIDI host** | ✅ same socket, `usb.mode` | ✅ same socket, `usb.mode` | ✅ same socket, `usb.mode` |
+| **Audio out** | I2S → ES8388 *(default)* or PCM5102A | I2S → external ES8388 or PCM5102A | I2S → PCM5102A or ES8388, on the header |
+| **Line in** | ✅ full duplex on the DAC's port | ✅ full duplex on the DAC's port | ✅ full duplex on the DAC's port |
+| **Mic in** | ✅ MEMS on the 2nd I2S port *(off by default)* | external MEMS ✅ · the **on-board mic is an ES8311 preamp and is not yet working** | ✅ external MEMS on the 2nd I2S port |
+| **SD card** | ✅ SPI on the FSPI pins — looper store on by default | on-board socket, but wired for SDMMC: needs the SPI remap in `sdkconfig.defaults.esp32p4` *(unverified)* | none on board — wire one to free pins |
+| **Looper** | 8 tracks, 160 s | 8 tracks, 160 s | 8 tracks, 160 s |
+| **Sequencer** | 8 trk × 256 steps × 8 patterns | 8 trk × 256 steps × 8 patterns | 8 trk × 256 steps × 8 patterns |
+| **Also on board** | 2× USB-C (native + UART bridge), RGB LED, wide headers | RJ45 Ethernet, 3× USB-C, micro-SD, MIPI DSI + CSI, ES8311 + speaker amp | USB-C, MIPI DSI + CSI FPCs, on-board mic pad, castellated + through-hole pins |
+| **Watch out for** | GPIO33–37 are the octal PSRAM; GPIO0/3/45/46 are straps; GPIO19/20 are the USB PHY | **GPIO45/46/47 do not drive on this carrier** — they read 0.6 V and cost a week to find. The header brings out only GPIO1–5, 20, 32, 33 + the ES_I2C pads, and GPIO14–19/54 are the SDIO link to the C6 | the shipped P4 pin defaults are written for the Guition carrier, so re-derive every row from this board's schematic |
+
+The **classic ESP32** devkit (4 MB flash, no PSRAM assumed) has no photo here
+because there is nothing board-specific about it: audio comes out of the
+internal 8-bit DAC or an I2S module, control is BLE or DIN MIDI, and the
+counts shrink as in the table above.
+
+On both P4 boards the C6 must be flashed with the **matching** ESP-Hosted
+co-processor firmware — host and slave are versioned independently, and
+`ble_ctrl` logs the co-processor version at boot so a mismatch is visible
+before it is mysterious. Every step of that bring-up degrades rather than
+panics: a companion that does not answer still leaves a synth with working
+USB audio and USB MIDI.
+
+Wiring tables, straps, levels and the reasoning behind each pin:
+[`PINMAP.md`](PINMAP.md).
+
 ---
 
-<sub>ESP-IDF v5.3+ · C++17 · ~16k lines of firmware · 48 kHz, 64-sample
-blocks, render path in IRAM</sub>
+<sub>ESP-IDF v5.3+ · C++17 · ~40k lines of firmware + ~66k lines of app ·
+48 kHz, 64-sample blocks, render path in IRAM</sub>
 
 ## Licence
 
