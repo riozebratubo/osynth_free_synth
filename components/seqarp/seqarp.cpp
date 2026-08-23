@@ -132,6 +132,11 @@ struct HeldNote {
     uint8_t note;
     uint8_t vel;
     bool down; /* key physically held (false = kept latched by arp.hold) */
+    /* This note reached the tap already expanded by chord mode (S41), i.e.
+     * the list is a chord's tones rather than played keys. A step played out
+     * of one is routed back as final, so chord mode does not expand it a
+     * second time — see midi.h's note-tap `src`. */
+    bool from_chord;
 };
 HeldNote s_held[kMaxHeld];
 int s_held_count = 0;
@@ -220,6 +225,10 @@ uint32_t s_rev_prev = 0xFFFFFFFFu;
 struct Pending {
     uint8_t note;
     int16_t ticks; /* emits the note-off when it reaches 0 */
+    /* Carried from the note-on: a release has to take the same route the
+     * press did, or a final note's note-off would be offered to chord mode
+     * and would match — and release — a chord the player is still holding. */
+    bool final;
 };
 Pending s_pend[kMaxPending];
 int s_pend_count = 0;
@@ -235,19 +244,25 @@ inline uint32_t rng_next() {
 
 /* ---- arpeggiator note emission (seq_clk task only) ---- */
 
-inline void emit_on(uint8_t note, uint8_t vel) {
-    midi_route_channel_message(0x90, note, vel);
+/* `final` means the note needs no further expansion: it came out of chord
+ * mode already, so the router must play it as written. False lets chord mode
+ * turn the step into a block chord, which is what the post-arp routing is. */
+inline void emit_on(uint8_t note, uint8_t vel, bool final) {
+    midi_route_note(0x90, note, vel, !final);
 }
-inline void emit_off(uint8_t note) { midi_route_channel_message(0x80, note, 0); }
+inline void emit_off(uint8_t note, bool final) {
+    midi_route_note(0x80, note, 0, !final);
+}
 
-void pend_push(uint8_t note, int gate_ticks) {
+void pend_push(uint8_t note, int gate_ticks, bool final) {
     if (s_pend_count == kMaxPending) { /* never leak a note-off */
-        emit_off(s_pend[0].note);
+        emit_off(s_pend[0].note, s_pend[0].final);
         for (int i = 1; i < kMaxPending; ++i) s_pend[i - 1] = s_pend[i];
         --s_pend_count;
     }
     s_pend[s_pend_count].note = note;
     s_pend[s_pend_count].ticks = (int16_t)gate_ticks;
+    s_pend[s_pend_count].final = final;
     ++s_pend_count;
 }
 
@@ -255,7 +270,7 @@ void pend_tick() {
     int w = 0;
     for (int i = 0; i < s_pend_count; ++i) {
         if (--s_pend[i].ticks <= 0) {
-            emit_off(s_pend[i].note);
+            emit_off(s_pend[i].note, s_pend[i].final);
         } else {
             s_pend[w++] = s_pend[i];
         }
@@ -264,7 +279,9 @@ void pend_tick() {
 }
 
 void pend_flush() {
-    for (int i = 0; i < s_pend_count; ++i) emit_off(s_pend[i].note);
+    for (int i = 0; i < s_pend_count; ++i) {
+        emit_off(s_pend[i].note, s_pend[i].final);
+    }
     s_pend_count = 0;
 }
 
@@ -282,28 +299,41 @@ int cur_gate_ticks(int step_ticks) {
     return g;
 }
 
-void sort_pairs(uint8_t* notes, uint8_t* vels, int n) {
+/* Insertion sort by note, carrying the parallel arrays with it. `flags` is
+ * the S41 from_chord bit; it is indexed by the same `i` the emission uses, so
+ * leaving it behind would hand a step the routing of whatever note happened to
+ * land in its slot. */
+void sort_triples(uint8_t* notes, uint8_t* vels, bool* flags, int n) {
     for (int i = 1; i < n; ++i) {
         const uint8_t nt = notes[i], vl = vels[i];
+        const bool fl = flags[i];
         int j = i - 1;
         while (j >= 0 && notes[j] > nt) {
             notes[j + 1] = notes[j];
             vels[j + 1] = vels[j];
+            flags[j + 1] = flags[j];
             --j;
         }
         notes[j + 1] = nt;
         vels[j + 1] = vl;
+        flags[j + 1] = fl;
     }
 }
 
 void arp_step(int mode, int octaves, int gate_ticks) {
     uint8_t notes[kMaxHeld], vels[kMaxHeld];
+    /* One flag for the whole step rather than per note: chord mode expands a
+     * key into tones all at once, so a held list is either all chord tones or
+     * none. Taking it from the note the step actually plays keeps that true
+     * even in the window where a list is half replaced. */
+    bool from_chord[kMaxHeld];
     int n;
     taskENTER_CRITICAL(&s_lock);
     n = s_held_count;
     for (int i = 0; i < n; ++i) {
         notes[i] = s_held[i].note;
         vels[i] = s_held[i].vel;
+        from_chord[i] = s_held[i].from_chord;
     }
     taskEXIT_CRITICAL(&s_lock);
     if (n == 0) {
@@ -311,7 +341,9 @@ void arp_step(int mode, int octaves, int gate_ticks) {
         return;
     }
 
-    if (mode != ARP_PLAYED) sort_pairs(notes, vels, n); /* arrival order else */
+    /* Sorted with the velocities and the from_chord bits, which are indexed
+     * the same way and would otherwise be handed to the wrong note. */
+    if (mode != ARP_PLAYED) sort_triples(notes, vels, from_chord, n);
     if (octaves < 1) octaves = 1;
 
     /* Expanded pattern = n notes x octaves; up-down ping-pongs the expansion
@@ -340,8 +372,8 @@ void arp_step(int mode, int octaves, int gate_ticks) {
     int note = (int)notes[i] + 12 * o;
     while (note > 127) note -= 12;
 
-    emit_on((uint8_t)note, vels[i]);
-    pend_push((uint8_t)note, gate_ticks);
+    emit_on((uint8_t)note, vels[i], from_chord[i]);
+    pend_push((uint8_t)note, gate_ticks, from_chord[i]);
     s_arp_idx = (s_arp_idx + 1) % total;
 }
 
@@ -771,7 +803,7 @@ int held_find(uint8_t note) { /* s_lock held */
     return -1;
 }
 
-bool note_tap(uint8_t note, uint8_t vel, bool on, void* ctx) {
+bool note_tap(uint8_t note, uint8_t vel, bool on, int src, void* ctx) {
     (void)ctx;
     if (xTaskGetCurrentTaskHandle() == s_clk_task) return false; /* own note */
 
@@ -782,7 +814,16 @@ bool note_tap(uint8_t note, uint8_t vel, bool on, void* ctx) {
     if (on) {
         const int arp_mode = pi(ARP_MODE);
         const bool hold = pv(ARP_HOLD) >= 0.5f;
-        record = pi(SEQ_MODE) == SEQ_REC;
+        /* The arpeggiator wants every tone of a chord — holding the chord is
+         * what makes one key give a running arpeggio of it — but the recorder
+         * wants only the one standing for the played key. A step carries a
+         * single note, so recording all of them would write three into one
+         * step and leave whichever arrived last. Chord mode marks exactly one
+         * tone per press as MIDI_NOTE_CHORD_ROOT; that is the one stored,
+         * and chord mode expands it again on playback for any track that
+         * opted in (SEQ_TRACK_F_CHORD). */
+        record = pi(SEQ_MODE) == SEQ_REC && src != MIDI_NOTE_CHORD_TONE;
+        const bool from_chord = src != MIDI_NOTE_PLAYED;
         taskENTER_CRITICAL(&s_lock);
         if (arp_mode != ARP_OFF) {
             if (hold && s_held_count > 0) {
@@ -801,6 +842,7 @@ bool note_tap(uint8_t note, uint8_t vel, bool on, void* ctx) {
             if (idx >= 0) { /* retrigger: refresh */
                 s_held[idx].vel = vel;
                 s_held[idx].down = true;
+                s_held[idx].from_chord = from_chord;
                 own_set(note);
                 consumed = true;
             } else if (s_held_count < kMaxHeld) {
@@ -808,6 +850,7 @@ bool note_tap(uint8_t note, uint8_t vel, bool on, void* ctx) {
                 s_held[s_held_count].note = note;
                 s_held[s_held_count].vel = vel;
                 s_held[s_held_count].down = true;
+                s_held[s_held_count].from_chord = from_chord;
                 ++s_held_count;
                 own_set(note);
                 consumed = true;

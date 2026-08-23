@@ -400,6 +400,13 @@ extern "C" esp_err_t loop_store_read_slot_bytes(int slot, int packed_idx,
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
 
+#if defined(CONFIG_OSYNTH_SD_PWR_LDO_CHAN) && CONFIG_OSYNTH_SD_PWR_LDO_CHAN > 0
+#include "esp_ldo_regulator.h"
+#define OSYNTH_SD_LDO 1
+#else
+#define OSYNTH_SD_LDO 0
+#endif
+
 /* Card bring-up diagnostics. The sdmmc/sdspi drivers name the failing
  * command and print its R1 byte at DEBUG only — and every one of those lines
  * is compiled out unless CONFIG_LOG_MAXIMUM_LEVEL is Debug or higher, so a
@@ -505,6 +512,39 @@ bool ensure_dir(const char* path) {
     return false;
 }
 
+/* Power the SD rail (P4 boards whose socket hangs off the SDMMC slot-1 pads).
+ * See the OSYNTH_SD_PWR_LDO_CHAN help: those pads and the card's VDD are fed
+ * by an on-chip LDO that nothing turns on by itself, so the symptom of
+ * skipping this is not a slow mount but a silent bus — CMD0 times out and the
+ * log says "card inserted?" about a card that is.
+ *
+ * Non-adjustable and never released: the SD drum kits bring the same bus up
+ * independently and need their own reference to the same channel, which the
+ * regulator refcounts only while every owner agrees the voltage is fixed.
+ * Called before spi_bus_initialize() so the pads have a supply before anything
+ * drives them, and idempotent because loop_store_init() is not the only path
+ * that reaches a cold bus. */
+void sd_power_up() {
+#if OSYNTH_SD_LDO
+    static esp_ldo_channel_handle_t s_ldo = nullptr;
+    if (s_ldo != nullptr) return;
+    esp_ldo_channel_config_t cfg = {};
+    cfg.chan_id = CONFIG_OSYNTH_SD_PWR_LDO_CHAN;
+    cfg.voltage_mv = CONFIG_OSYNTH_SD_PWR_LDO_MV;
+    const esp_err_t err = esp_ldo_acquire_channel(&cfg, &s_ldo);
+    if (err != ESP_OK) {
+        s_ldo = nullptr;
+        ESP_LOGE(TAG,
+                 "SD rail LDO%d refused (%s) — a card on the SDMMC pads will "
+                 "not answer",
+                 CONFIG_OSYNTH_SD_PWR_LDO_CHAN, esp_err_to_name(err));
+        return;
+    }
+    ESP_LOGI(TAG, "SD rail: LDO%d at %d mV", CONFIG_OSYNTH_SD_PWR_LDO_CHAN,
+             CONFIG_OSYNTH_SD_PWR_LDO_MV);
+#endif
+}
+
 bool ensure_mounted() {
     if (!s_bus_up) return false;
     if (s_card != nullptr) return true;
@@ -587,6 +627,7 @@ extern "C" esp_err_t loop_store_init(void) {
     esp_log_level_set("sdspi_host", ESP_LOG_DEBUG);
     esp_log_level_set("vfs_fat_sdmmc", ESP_LOG_DEBUG);
 #endif
+    sd_power_up();
     spi_bus_config_t bus = {};
     bus.mosi_io_num = CONFIG_OSYNTH_SD_MOSI_GPIO;
     bus.miso_io_num = CONFIG_OSYNTH_SD_MISO_GPIO;

@@ -33,6 +33,7 @@ constexpr uint16_t PID_ENGINE_COMMON_BASE = 0x0100; /* glide, bend range, unison
 constexpr uint16_t PID_ENGINE_BASE        = 0x0200; /* meaning depends on active engine */
 constexpr uint16_t PID_FX_BASE            = 0x0300; /* chorus/delay/granular/reverb */
 constexpr uint16_t PID_SEQARP_BASE        = 0x0400; /* sequencer + arpeggiator */
+constexpr uint16_t PID_CHORD_BASE         = 0x0440; /* chord mode (S41), inside 0x04xx */
 constexpr uint16_t PID_MODMATRIX_BASE     = 0x0500; /* 8 slots x source/dest/amount */
 constexpr uint16_t PID_LOOPER_BASE        = 0x0600; /* 8-track loop recorder (S15) */
 constexpr uint16_t PID_DRUMS_BASE         = 0x0700; /* drum bus + per-slot mixer (S22) */
@@ -129,14 +130,17 @@ public:
      * and its five shared stages, 354 since S38 added the vocoder's
      * fourteen, and 373 since S39 added the nineteen belonging to the two
      * noise-reduction units — 375 since S39b gave each of those a source
-     * selector. Raised from 384 to 448 in
+     * selector, and 394 since S41 added chord mode's nineteen (0x044x).
+     * Raised from 384 to 448 in
      * S34 to keep the margin that number was chosen for, because
      * overflow is per-parameter and partial — a patch would come up with some
      * of a node's controls missing rather than failing outright, which is a
      * far more confusing thing to debug than a refusal. */
     static constexpr size_t kMaxParams = 448;
     /* One per subscribing component: engines, presets, looper, drums,
-     * ble_ctrl, persist, and codec on an ES8388 build — 7 as of S31b.
+     * ble_ctrl, persist, and codec on an ES8388 build — 7 as of S31b, and 8
+     * since S41, where chord mode subscribes so a change of key re-voices the
+     * chord already being held instead of waiting for the next note.
      * Raised from 8 to leave headroom,
      * because overflowing it is silent at the call site (addListener returns
      * -1) and a component that treats that as fatal turns it into a

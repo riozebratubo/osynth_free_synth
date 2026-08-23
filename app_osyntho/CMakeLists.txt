@@ -236,6 +236,7 @@ qt_add_qml_module(
     # QML value types for the parameter API (see src/paramtypes.h).
     SOURCES src/paramtypes.h
     SOURCES src/seqtypes.h
+    SOURCES src/chordtypes.h
     SOURCES src/loopwav.h src/loopwav.cpp
 
     # Phase 3 — synth control UI
@@ -255,6 +256,7 @@ qt_add_qml_module(
     QML_FILES qml/InputScreen.qml
     QML_FILES qml/FxScreen.qml
     QML_FILES qml/ArpSeqScreen.qml
+    QML_FILES qml/ChordScreen.qml
     QML_FILES qml/SequencerScreen.qml
     QML_FILES qml/StepField.qml
     QML_FILES qml/SyncedComboBox.qml

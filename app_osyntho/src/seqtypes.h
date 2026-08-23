@@ -38,6 +38,12 @@ class TrackConfig {
   Q_PROPERTY(int humanize MEMBER humanize FINAL)
   Q_PROPERTY(int scale MEMBER scale FINAL)
   Q_PROPERTY(int root MEMBER root FINAL)
+  // Chord mode expands this track's notes (SEQ_TRACK_F_CHORD, S41). A bool
+  // rather than the raw `flags` byte, because the other two bits in it are
+  // mute and solo — parameters the firmware owns, which a client must not
+  // send back through SEQ_TRACK. Exposing only this one makes that
+  // impossible rather than merely documented.
+  Q_PROPERTY(bool chord MEMBER chord FINAL)
   // Derived on the C++ side so QML never has to know 0xFF is the sentinel.
   Q_PROPERTY(bool followsPatternSwing MEMBER followsPatternSwing FINAL)
   Q_PROPERTY(bool followsPatternScale MEMBER followsPatternScale FINAL)
@@ -57,6 +63,7 @@ class TrackConfig {
   int humanize = 0;
   int scale = 0xFF;
   int root = 0xFF;
+  bool chord = false;
   bool followsPatternSwing = true;
   bool followsPatternScale = true;
   bool noteToSlot = false;

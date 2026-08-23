@@ -562,6 +562,7 @@ ApplicationWindow {
                 SequencerScreen {}
                 DrumsScreen {}
                 ArpSeqScreen {}
+                ChordScreen {}
                 LooperScreen {}
                 GraphScreen {}
                 PresetsScreen {}

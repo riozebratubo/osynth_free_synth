@@ -94,6 +94,13 @@ enum Op : quint8 {
   // with. Firmware without the looper answers UNSUPPORTED, which is how the
   // page decides whether to offer the download at all.
   OP_LOOP_DUMP     = 0x3D,
+  // The user chord set (S41): twelve eight-byte slots, one per pitch class
+  // relative to chord.root. Small enough to travel whole in one frame either
+  // way, so a write answers with the entire set rather than an ack — the
+  // editor draws all twelve at once and can never fall out of step with the
+  // synth. Firmware without chord mode answers UNSUPPORTED, which is how the
+  // page decides whether to offer user mode.
+  OP_CHORD_SET     = 0x3E,
   OP_PING          = 0x7F,
 };
 
@@ -585,6 +592,14 @@ struct SeqTrackCfg {
 
 inline constexpr quint8 SEQ_SLOT_FROM_NOTE = 0xFF;
 
+// seq_track_cfg_t::flags. Mute and solo are read-only from a client's point of
+// view — the firmware owns them through the trk<N>.mute/solo parameters and
+// writes its own copy back over anything SEQ_TRACK carries — so only the chord
+// bit (S41) is ever set from here.
+inline constexpr quint8 SEQ_TRACK_F_MUTE = 1 << 0;
+inline constexpr quint8 SEQ_TRACK_F_SOLO = 1 << 1;
+inline constexpr quint8 SEQ_TRACK_F_CHORD = 1 << 2;
+
 inline void appendStep(QByteArray& b, const SeqStep& s) {
   b.append(char(s.note));
   b.append(char(s.vel));
@@ -625,6 +640,39 @@ inline void appendTrackCfg(QByteArray& b, const SeqTrackCfg& c) {
   b.append(char(c.scale));
   b.append(char(c.root));
   b.append(char(c.reserved));
+}
+
+// --- chord mode (S41) ----------------------------------------------------
+
+inline constexpr int CHORD_USER_SLOTS = 12;
+inline constexpr int CHORD_USER_IVS = 6;
+
+// One user chord: semitones added to the played key, then the intervals above
+// that. `count` 0 means the key is silent, which is a legitimate entry — it is
+// how a five-chord set stays quiet on the seven keys it does not use.
+struct ChordUserSlot {
+  qint8 transpose = 0;
+  quint8 count = 0;
+  qint8 iv[CHORD_USER_IVS] = {0, 0, 0, 0, 0, 0};
+};
+
+inline void appendChordSlot(QByteArray& b, const ChordUserSlot& u) {
+  b.append(char(quint8(u.transpose)));
+  b.append(char(u.count));
+  for (int i = 0; i < CHORD_USER_IVS; ++i) b.append(char(quint8(u.iv[i])));
+}
+
+inline QByteArray payloadChordGet() {
+  QByteArray p;
+  appendU8(p, 0);
+  return p;
+}
+inline QByteArray payloadChordSet(int slot, const ChordUserSlot& u) {
+  QByteArray p;
+  appendU8(p, 1);
+  appendU8(p, quint8(slot));
+  appendChordSlot(p, u);
+  return p;
 }
 
 inline SeqTrackCfg readTrackCfg(Reader& r) {

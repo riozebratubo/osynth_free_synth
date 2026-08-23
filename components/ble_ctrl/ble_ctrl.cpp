@@ -57,6 +57,7 @@ static const char* TAG = "ble_ctrl";
 #include "esp_hosted.h"
 #endif
 
+#include "chord.h"
 #include "drum_kit_fmt.h"
 #include "drums.h"
 #include "engines.h"
@@ -158,6 +159,12 @@ enum : uint8_t {
      * more than a second channel. The window is what keeps it honest — the
      * synth only ever sends what was just asked for. */
     OP_LOOP_DUMP = 0x3D,
+    /* The user chord set (S41). Twelve slots of eight bytes is not
+     * parameter space � a parameter is one float � and it is far too
+     * small to deserve the chunking the sequencer opcodes need, so it is
+     * one opcode that carries the whole set in a single frame either way.
+     * Direction byte first, like every other read-and-write op here. */
+    OP_CHORD_SET = 0x3E,
     OP_PING = 0x7F,
     EVT_PARAMS = 0xC0,
     EVT_ENGINE = 0xC1,
@@ -811,6 +818,50 @@ void handle_seq_track(uint8_t seq, const uint8_t* p, uint16_t plen) {
     memcpy(s_tx + n, &cfg, sizeof(cfg));
     n += sizeof(cfg);
     s_tx[0] = OP_SEQ_TRACK | 0x80;
+    s_tx[1] = seq;
+    wr16(s_tx + 2, (uint16_t)(n - 4));
+    s_tx[4] = ST_OK;
+    send_frame(s_tx, n);
+}
+
+/* The user chord set (S41): twelve eight-byte slots, addressed by
+ * (played note - chord.root) mod 12.
+ *
+ *   get  [0]                       -> [u8 slots][slots x chord_user_slot_t]
+ *   set  [1][u8 slot][8 B slot]    -> the same full listing
+ *
+ * A set answers with the whole set rather than an ack because the app's
+ * editor draws all twelve at once, and 96 bytes fits one frame with room to
+ * spare — cheaper than a re-read and impossible to get out of step with.
+ * `chord.rev` moves on every write, so a second app on the link learns of the
+ * change through the ordinary parameter batch. */
+void handle_chord_set(uint8_t seq, const uint8_t* p, uint16_t plen) {
+    if (plen < 1) {
+        send_status(OP_CHORD_SET, seq, ST_MALFORMED);
+        return;
+    }
+    if (p[0] != 0) {
+        if (plen != 2 + sizeof(chord_user_slot_t)) {
+            send_status(OP_CHORD_SET, seq, ST_MALFORMED);
+            return;
+        }
+        if (p[1] >= CHORD_USER_SLOTS) {
+            send_status(OP_CHORD_SET, seq, ST_BAD_ARG);
+            return;
+        }
+        chord_user_slot_t u;
+        memcpy(&u, p + 2, sizeof(u));
+        chord_user_set(p[1], &u); /* clamps count and transpose itself */
+    }
+    size_t n = 5;
+    s_tx[n++] = (uint8_t)CHORD_USER_SLOTS;
+    for (int i = 0; i < CHORD_USER_SLOTS; ++i) {
+        chord_user_slot_t u;
+        chord_user_get(i, &u);
+        memcpy(s_tx + n, &u, sizeof(u));
+        n += sizeof(u);
+    }
+    s_tx[0] = OP_CHORD_SET | 0x80;
     s_tx[1] = seq;
     wr16(s_tx + 2, (uint16_t)(n - 4));
     s_tx[4] = ST_OK;
@@ -1563,6 +1614,9 @@ void handle_frame(const uint8_t* d, size_t n) {
             send_status(op, seq, ST_UNSUPPORTED);
             break;
 #endif
+        case OP_CHORD_SET:
+            handle_chord_set(seq, p, plen);
+            break;
         case OP_DRUM_TRIG: /* pads: {slot, velocity}, no response on success */
             if (plen != 2) {
                 send_status(op, seq, ST_MALFORMED);
@@ -1867,6 +1921,13 @@ int gap_event(struct ble_gap_event* ev, void*) {
              * Safe from the host task: the entry point is the same lock-free
              * ring every other control task pushes through. */
             voice_manager_all_notes_off();
+            /* And the chord table with it (S41). The voices are already gone,
+             * but the table would still be holding those keys — and their
+             * per-tone reference counts — so the next press of a key it still
+             * lists would find its tones "already sounding" and play nothing.
+             * The note-offs this sends also clear the arpeggiator's held list,
+             * which the call above does not reach. */
+            chord_all_off();
             start_advertising();
             return 0;
         case BLE_GAP_EVENT_ADV_COMPLETE:

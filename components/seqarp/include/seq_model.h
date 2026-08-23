@@ -142,6 +142,12 @@ typedef struct {
 enum {
     SEQ_TRACK_F_MUTE = 1 << 0,
     SEQ_TRACK_F_SOLO = 1 << 1,
+    /* Chord mode (S41) expands this track's notes. Per track and not global,
+     * because the useful case is one lane: a one-note-per-step bassline
+     * becomes a chord progression while the lead lane beside it keeps playing
+     * the melody as written. Off on every existing pattern, which is what a
+     * new flag bit in a saved blob means, and that is the right default. */
+    SEQ_TRACK_F_CHORD = 1 << 2,
 };
 
 /* ---- scales for the quantiser ---- */
@@ -267,6 +273,12 @@ void seq_song_set(int index, const seq_song_entry_t* in);
 const char* seq_scale_name(int scale);
 /* Snaps `note` into `scale` rooted at `root` (0..11). Chromatic is a no-op. */
 uint8_t seq_quantize(uint8_t note, int scale, int root);
+/* The scale as a 12-bit pitch-class set relative to its root, bit 0 = the
+ * root. Chord mode (components/chord) needs the degrees themselves, not just
+ * the nearest legal note, and one owner of these tables is better than two
+ * copies that can disagree about what "dorian" means. Out-of-range asks
+ * answer chromatic. */
+uint16_t seq_scale_mask(int scale);
 
 /* ---- serialisation (preset task) ----
  * Writes one pattern into `buf` in the on-disk format, returning the byte

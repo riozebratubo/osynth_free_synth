@@ -61,11 +61,19 @@ Ring g_rec;
 std::atomic<uint32_t> g_underruns{0};
 std::atomic<uint8_t> g_resync{0};
 std::atomic<uint8_t> g_hold{0};
+std::atomic<uint8_t> g_prejoin{0};
+std::atomic<uint8_t*> g_pre_buf{nullptr};
+std::atomic<uint32_t> g_pre_cap{0};
+std::atomic<uint32_t> g_preroll{0};
 
 } // namespace osynth::loopstream
 
 using osynth::loopstream::g_hold;
 using osynth::loopstream::g_play;
+using osynth::loopstream::g_pre_buf;
+using osynth::loopstream::g_pre_cap;
+using osynth::loopstream::g_prejoin;
+using osynth::loopstream::g_preroll;
 using osynth::loopstream::g_rec;
 using osynth::loopstream::g_resync;
 using osynth::loopstream::g_underruns;
@@ -107,6 +115,14 @@ uint32_t s_play_pos[LOOP_TRACKS] = {}; /* byte offset within the pass */
 FILE* s_rec_f = nullptr;
 int s_rec_trk = -1;
 uint32_t s_rec_written = 0;
+
+/* ---- punch-in pre-arm (S41, loop_stream.h), guarded by s_lock ---- */
+
+/* The track whose window the audio task is mirroring the take into, or -1.
+ * Armed by loop_stream_open_record() and disarmed by drop_prearm(); how much
+ * of it was actually covered is g_preroll, which only the audio task writes
+ * and only at the wrap. */
+int s_pre_trk = -1;
 
 /* Both stay inside 8.3 ("live0" + "olt", "live" + "tmp") so the layout does
  * not depend on long-filename support being compiled in. */
@@ -151,7 +167,41 @@ void ring_reset(osynth::loopstream::Ring& r) {
     r.rd.store(0, std::memory_order_relaxed);
 }
 
+/* Abandons a staged window. Lock held, and safe when nothing is staged.
+ *
+ * The two cases differ in who is looking at the ring. If the audio task never
+ * joined it, nobody is, and it is reset. If it did, it is playing out of it
+ * right now — so the track is held instead, which quiets it within a block
+ * and rejoins it at the next wrap, and the ring is left alone for whoever
+ * gives the track a reader again to reset. Resetting it here would be a torn
+ * read straight into the mix. */
+void drop_prearm() {
+    if (s_pre_trk < 0) return;
+    const int t = s_pre_trk;
+    const uint8_t bit = (uint8_t)(1u << t);
+    s_pre_trk = -1;
+    /* Stops the mirror: everything below assumes the audio task is no longer
+     * writing into this window.
+     *
+     * The cap is the only gate, and g_pre_buf is deliberately left pointing
+     * where it did. Clearing it would open a window where the audio task has
+     * already passed the cap test with the old value and then loads a null
+     * pointer — a crash in the render path for no gain, since every ring is
+     * allocated once at init and never freed, so a stale pointer is always a
+     * valid one. */
+    g_pre_cap.store(0, std::memory_order_release);
+    if ((g_prejoin.load(std::memory_order_acquire) & bit) != 0) {
+        g_hold.fetch_or(bit, std::memory_order_release);
+        g_prejoin.fetch_and((uint8_t)~bit, std::memory_order_release);
+    } else {
+        ring_reset(g_play[t]);
+    }
+}
+
 void close_play(int t) {
+    /* Every set-lifecycle path funnels through here, so this is the one place
+     * a staged window has to be cleaned up from. */
+    if (s_pre_trk == t) drop_prearm();
     if (s_play_f[t] != nullptr) {
         fclose(s_play_f[t]);
         s_play_f[t] = nullptr;
@@ -613,6 +663,30 @@ extern "C" esp_err_t loop_stream_open_record(int t, uint32_t loop_frames) {
         s_rec_written = 0;
         ring_reset(g_rec);
         if (loop_frames != 0) s_pass_bytes = pass_bytes_for(loop_frames, s_mono);
+        /* Arm the punch-in pre-roll (loop_stream.h). The track's window has to
+         * have exactly one producer while the take runs, so its reader is
+         * closed and it leaves s_playing: loop_io will not touch this ring
+         * again until loop_stream_adopt_prearmed() puts it back. Both are what
+         * would have happened at close anyway — the file behind that reader is
+         * the one the take is replacing.
+         *
+         * Not armed for the first take of a set: s_pass_bytes is still 0, so
+         * there is no pass to mirror against — and no loop to punch into
+         * either, which is the case this whole mechanism exists for. */
+        drop_prearm();
+        close_play(t);
+        s_playing &= (uint8_t)~(1u << t);
+        g_preroll.store(0, std::memory_order_relaxed);
+        g_prejoin.fetch_and((uint8_t)~(1u << t), std::memory_order_release);
+        if (s_pass_bytes != 0) {
+            uint32_t cap = LOOP_STREAM_RING_BYTES - kIoChunk;
+            if (cap > s_pass_bytes) cap = s_pass_bytes;
+            s_pre_trk = t;
+            g_pre_buf.store(g_play[t].buf, std::memory_order_relaxed);
+            /* Published last: until the cap is non-zero the mirror is off, so
+             * the audio task can never write through a stale buffer. */
+            g_pre_cap.store(cap, std::memory_order_release);
+        }
     }
     xSemaphoreGive(s_lock);
     return err;
@@ -654,11 +728,28 @@ extern "C" esp_err_t loop_stream_close_record(int t, bool keep) {
         char tmp[64], dst[64];
         tmp_path(tmp, sizeof(tmp));
         track_path(dst, sizeof(dst), t);
+        /* Did the audio task take the staged window at the wrap? Read before
+         * anything below can clear it. */
+        const bool joined =
+            (g_prejoin.load(std::memory_order_acquire) & (uint8_t)(1u << t)) !=
+            0;
         if (keep && err == ESP_OK) {
-            /* the track being recorded is never open for playback (the render
-             * path skips it), so replacing the file under the set is safe */
-            close_play(t);
-            s_playing &= (uint8_t)~(1u << t);
+            if (joined) {
+                /* That window is what the audio task is playing *now*, so it
+                 * has to survive the rename that is about to make it real —
+                 * the ring, g_preroll and the audio task's cursor all stand,
+                 * and loop_stream_adopt_prearmed() picks them up. This is the
+                 * one path that must not call close_play(), which would reset
+                 * the ring under a live reader. The mirror itself has already
+                 * stopped: the take is over. */
+                g_pre_cap.store(0, std::memory_order_release);
+            } else {
+                /* the track being recorded is never open for playback (the
+                 * render path skips it), so replacing the file under the set
+                 * is safe */
+                close_play(t);
+                s_playing &= (uint8_t)~(1u << t);
+            }
             remove(dst); /* FAT rename does not overwrite */
             if (rename(tmp, dst) != 0) {
                 ESP_LOGE(TAG, "track %d: rename failed (%s)", t + 1,
@@ -668,6 +759,11 @@ extern "C" esp_err_t loop_stream_close_record(int t, bool keep) {
             }
         } else {
             remove(tmp);
+        }
+        /* Anything still staged describes a take that is not becoming this
+         * track — a discard, a failed rename, or a window nothing joined. */
+        if (s_pre_trk == t && !(joined && keep && err == ESP_OK)) {
+            drop_prearm();
         }
     }
     s_rec_trk = -1;
@@ -752,6 +848,63 @@ extern "C" esp_err_t loop_stream_add_track(int t) {
     return err;
 }
 
+extern "C" bool loop_stream_prejoined(int t) {
+    if (!s_ready || t < 0 || t >= LOOP_TRACKS) return false;
+    return (g_prejoin.load(std::memory_order_acquire) &
+            (uint8_t)(1u << t)) != 0;
+}
+
+extern "C" esp_err_t loop_stream_adopt_prearmed(int t) {
+    if (!s_ready || t < 0 || t >= LOOP_TRACKS) return ESP_ERR_INVALID_STATE;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    esp_err_t err = ESP_OK;
+    if (s_pre_trk != t || s_pass_bytes == 0) {
+        err = ESP_ERR_INVALID_STATE;
+    } else {
+        char path[64];
+        track_path(path, sizeof(path), t);
+        FILE* f = fopen(path, "rb");
+        /* Where the staging stopped, not 0: the window already holds
+         * everything before this and the audio task is reading it. A whole
+         * pass staged (a loop barely longer than the ring) leaves the file
+         * exactly at the seam, which is the loop start again. */
+        uint32_t pos = g_preroll.load(std::memory_order_acquire);
+        if (pos >= s_pass_bytes) pos = 0;
+        if (f == nullptr || fseek(f, (long)pos, SEEK_SET) != 0) {
+            if (f != nullptr) fclose(f);
+            err = ESP_FAIL;
+        } else {
+            /* Nothing to close: staging took this slot when it built the
+             * window, and close_record left it alone. Checked anyway, because
+             * leaking a handle here costs the mount one of its file slots. */
+            if (s_play_f[t] != nullptr) fclose(s_play_f[t]);
+            s_play_f[t] = f;
+            s_play_pos[t] = pos;
+            s_playing |= (uint8_t)(1u << t);
+            s_pre_trk = -1;
+            g_pre_cap.store(0, std::memory_order_release); /* mirror off */
+            g_prejoin.fetch_and((uint8_t)~(1u << t), std::memory_order_release);
+            /* Top the window back up behind the audio task, exactly as the
+             * ordinary refill would — from here on the ring is a live
+             * producer/consumer pair and needs no further ceremony. */
+            if (!fill_track(t)) {
+                close_play(t);
+                s_playing &= (uint8_t)~(1u << t);
+                err = ESP_FAIL;
+            }
+        }
+    }
+    if (err != ESP_OK) {
+        /* Holds the track on its way out, so it goes quiet within a block
+         * rather than reading a window nothing is filling. The caller falls
+         * back to loop_stream_add_track(): a pass late, but audible. */
+        drop_prearm();
+        s_playing &= (uint8_t)~(1u << t);
+    }
+    xSemaphoreGive(s_lock);
+    return err;
+}
+
 extern "C" void loop_stream_release_track(int t) {
     if (!s_ready || t < 0 || t >= LOOP_TRACKS) return;
     g_hold.fetch_and((uint8_t)~(1u << t), std::memory_order_release);
@@ -760,6 +913,9 @@ extern "C" void loop_stream_release_track(int t) {
 extern "C" esp_err_t loop_stream_rewind(void) {
     if (!s_ready || s_pass_bytes == 0) return ESP_ERR_INVALID_STATE;
     xSemaphoreTake(s_lock, portMAX_DELAY);
+    /* Before the masks are cleared: a staged window describes a take, and the
+     * transport is being put back to the top of the set. */
+    drop_prearm();
     g_resync.store(0, std::memory_order_release);
     g_hold.store(0, std::memory_order_release);
     for (int t = 0; t < LOOP_TRACKS; ++t) {
@@ -864,6 +1020,10 @@ extern "C" esp_err_t loop_stream_start_playback(uint32_t, uint8_t) {
 extern "C" esp_err_t loop_stream_rewind(void) { return ESP_ERR_NOT_SUPPORTED; }
 extern "C" void loop_stream_set_length(uint32_t) {}
 extern "C" esp_err_t loop_stream_add_track(int) { return ESP_ERR_NOT_SUPPORTED; }
+extern "C" bool loop_stream_prejoined(int) { return false; }
+extern "C" esp_err_t loop_stream_adopt_prearmed(int) {
+    return ESP_ERR_NOT_SUPPORTED;
+}
 extern "C" void loop_stream_release_track(int) {}
 extern "C" void loop_stream_clear_track(int) {}
 extern "C" esp_err_t loop_stream_export_read(int, uint32_t, uint8_t*, uint32_t,

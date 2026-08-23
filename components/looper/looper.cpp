@@ -73,6 +73,15 @@
  *    to play it again.
  * Neither state is reachable in PSRAM mode, where a buffer is either there
  * or the take was refused up front.
+ * The same no-mid-stream-re-entry rule is why a punch-in needs the handoff in
+ * loop_stream.h (g_prearm/g_prejoin, S41): a take ends exactly at a wrap, and
+ * a wrap is the only place a track can start playing, so its window has to
+ * already exist at that instant. Building it there is card I/O — close,
+ * rename, open, prime — and while that was where it happened, the track the
+ * user had just recorded stayed silent until the pass after. So the audio
+ * task mirrors the take's opening into that window as it encodes it (the
+ * bytes are already in its hand; fetching them back off the card was the
+ * mistake), and audio_join_prearm() hands the window over at the wrap.
  */
 #include "looper.h"
 
@@ -489,6 +498,57 @@ inline void audio_hold_track(int t) {
 #endif
 }
 
+/* Streamed punch-in: hand the pre-roll this task has been mirroring all take
+ * over as track `t`'s playback window, instead of holding the track for a
+ * whole pass (loop_stream.h). Returns false when there is no pre-roll, and the
+ * caller then holds the track exactly as it always did — PSRAM mode, or a
+ * first take, which has no pass to mirror against and no loop to punch into.
+ *
+ * Called only from the wrap, which is the one place that knows a take just
+ * closed cleanly on a pass boundary. Every other way out of a take leaves the
+ * pre-roll untaken, so they all keep the original path.
+ *
+ * A take whose record ring overran is refused here rather than left to
+ * loop_ctl. The mirrored bytes are real — they are the opening of the take,
+ * and the overrun happened later — but the take as a whole is about to be
+ * thrown away, and playing its first seconds before loop_ctl catches up would
+ * be audible.
+ *
+ * Writing g_play[t].wr from the audio task is the one moment it may: loop_io
+ * gave this ring up when the take opened (loop_stream_open_record drops the
+ * track from s_playing) and does not touch it again until
+ * loop_stream_adopt_prearmed() hands it back. This is the handover itself. */
+inline bool audio_join_prearm(int t) {
+#if SYNTH_LOOP_STREAM
+    if (!s_streamed.load(std::memory_order_relaxed)) return false;
+    if (s_stream_overrun.load(std::memory_order_relaxed)) return false;
+    namespace ls = osynth::loopstream;
+    const uint32_t cap = ls::g_pre_cap.load(std::memory_order_acquire);
+    if (cap == 0) return false;
+    /* g_rec.wr was reset when the take opened, so it counts this take's bytes;
+     * a punch-in that reached the wrap wrote exactly one pass of them. */
+    uint32_t staged = ls::g_rec.wr.load(std::memory_order_relaxed);
+    if (staged > cap) staged = cap;
+    if (staged == 0) return false;
+    const uint8_t bit = (uint8_t)(1u << t);
+    ls::g_play[t].rd.store(0, std::memory_order_relaxed);
+    ls::g_play[t].wr.store(staged, std::memory_order_release);
+    /* Before g_prejoin, which is what lets loop_ctl read it. */
+    ls::g_preroll.store(staged, std::memory_order_release);
+    /* a_starved and a_win_off were cleared for every track a few lines above,
+     * which is exactly the state a window sitting at the pass start needs. */
+    ls::g_prejoin.fetch_or(bit, std::memory_order_release);
+    /* The one place the audio task lifts a hold of its own, at the one instant
+     * the rule is about: these bytes are this take's opening, not the replaced
+     * file's, so this is not the stale-audio case g_hold guards. */
+    ls::g_hold.fetch_and((uint8_t)~bit, std::memory_order_release);
+    return true;
+#else
+    (void)t;
+    return false;
+#endif
+}
+
 inline int16_t f2i16(float v) {
     int32_t s = (int32_t)(v * 32767.0f);
     if (s > 32767) s = 32767;
@@ -752,6 +812,41 @@ void ctl_mirror_maxlen() {
            (float)ctl_take_cap(mono, four, streamed) / (float)SYNTH_SAMPLE_RATE,
            ParamOrigin::Internal);
 }
+
+#if SYNTH_LOOP_STREAM
+/* sd records stereo, and the app greys loop.mono out to say so. This is the
+ * half that makes the greyed switch tell the truth: a client that never sees
+ * the grey — an older app, a MIDI CC, a script — can still write the
+ * parameter, and nothing else would put it back.
+ *
+ * The reason mono stops being offered is the one ctl_mirror_maxlen() gives
+ * just above: on the card there is no length to buy. ctl_take_cap() hands
+ * back LOOP_STREAM_MAX_S whatever the format is, so the toggle would be
+ * trading half the audio for nothing the user can see.
+ *
+ * Not applied to a set adopted off the card — that one's format was decided
+ * when it was recorded and the manifest is what says so. Hence the caller's
+ * `if (!ctl_adopt_card_set())`.
+ *
+ * What this gives up is real and worth writing down rather than discovering:
+ * mono halves the write rate (~23 against ~46 KB/s per track), which is the
+ * headroom an eight-track streamed set leans on when the card or the bus is
+ * marginal — loop_stream.h budgets ~430 KB/s there. If sd sets start
+ * overrunning at eight tracks, this is the first thing to reconsider, with
+ * OSYNTH_SD_FREQ_KHZ in loop_store.cpp the other end of the same problem.
+ *
+ * s_mono is deliberately not touched: the first take latches the format by
+ * re-reading this parameter (ctl_start_rec, both paths), so the parameter is
+ * the only thing that has to be right. */
+void ctl_sd_forces_stereo() {
+    ParamStore& ps = ParamStore::instance();
+    if (ps.get(LOOP_PID_MONO) <= 0.5f) return;
+    /* Internal: the app is told rather than asked, and the listener's task
+     * filter keeps this write from coming straight back as another kFlagMono. */
+    ps.set(LOOP_PID_MONO, 0.0f, ParamOrigin::Internal);
+    ESP_LOGI(TAG, "sd streams stereo — loop.mono cleared");
+}
+#endif
 
 /* Transport telemetry (S18): loop.pos / loop.rectrk, published on the timed
  * ctl wake while the transport runs (~4 Hz; the app interpolates between
@@ -1032,6 +1127,8 @@ void ctl_finish_streamed_take() {
     if (s_ctl_rec_trk < 0) return;
     const int trk = s_ctl_rec_trk;
     s_ctl_rec_trk = -1;
+    /* Asked before close_record, which is where the answer gets consumed. */
+    const bool joined = loop_stream_prejoined(trk);
     const uint8_t filled = s_filled.load(std::memory_order_acquire);
     bool keep = ((filled >> trk) & 1) != 0;
     if (s_stream_overrun.exchange(false, std::memory_order_acq_rel)) {
@@ -1064,7 +1161,22 @@ void ctl_finish_streamed_take() {
     const uint32_t L = s_loop_frames.load(std::memory_order_acquire);
     if (L == 0) return;
     loop_stream_set_length(L);
-    if (loop_stream_add_track(trk) != ESP_OK) {
+    esp_err_t err;
+    if (joined) {
+        /* The audio task is already playing out of the staged window, so the
+         * file just has to be opened behind it and the refill resumed — the
+         * ring must not be reset, which is the one thing add_track does. */
+        err = loop_stream_adopt_prearmed(trk);
+        if (err != ESP_OK) {
+            /* adopt held the track on its way out, so this is the ordinary
+             * path again: a pass late, but audible. */
+            ESP_LOGW(TAG, "track %d: staged window lost, re-opening", trk + 1);
+            err = loop_stream_add_track(trk);
+        }
+    } else {
+        err = loop_stream_add_track(trk);
+    }
+    if (err != ESP_OK) {
         ESP_LOGW(TAG, "track %d: recorded but could not be re-opened to play",
                  trk + 1);
         s_filled.fetch_and((uint8_t)~(1u << trk), std::memory_order_release);
@@ -1806,7 +1918,9 @@ void ctl_task(void* arg) {
              * reached once anything is recorded — kFlagMono also covers
              * loop.mono and loop.tracks, which must not go looking for one. */
             if (ParamStore::instance().get(LOOP_PID_STORE) > 0.5f) {
-                ctl_adopt_card_set();
+                /* Adopting settles the format from the manifest; only a fresh
+                 * sd set has a format left to decide. */
+                if (!ctl_adopt_card_set()) ctl_sd_forces_stereo();
             }
 #endif
         }
@@ -1935,17 +2049,43 @@ extern "C" esp_err_t looper_init(void) {
      * switch then falls back to psram with a log line rather than failing a
      * take. */
     ESP_ERROR_CHECK(loop_stream_init());
-    if (ps.add(kStoreParams, kStoreParamCount) != kStoreParamCount) {
+    /* Probed before loop.store is registered rather than after, so the answer
+     * can be its default. Probing mounts the card through loop_store_mount(),
+     * which has one logical caller, and past the xTaskCreate below that caller
+     * is loop_ctl — up here it is still the main task, so this is as safe as
+     * it was a few lines further down. It also seeds what loop_stream_ready()
+     * reports, so the first loop.maxlen mirror already knows whether sd is on
+     * offer. */
+    const bool card_now = loop_stream_probe_card();
+    /* A card in the slot at boot means sd. Carried as the registered
+     * *default* rather than a set() afterwards, because those are different
+     * promises: ParamStore::add() seeds the live value from the default and
+     * PARAM_INFO carries it to the app, so one field makes the firmware and
+     * the app's switch agree without either being told — whereas a write is
+     * an event, and a client that connects later never saw it.
+     *
+     * Same local-copy trick as `live` above, for the same reason: the table
+     * stays readable and the patch stays next to what justifies it.
+     *
+     * It remains only a default. loop.store is latched by the first take, the
+     * app can flip it back before then, and ctl_start_rec() returns it to
+     * psram by itself if the card has left in the meantime. With no card the
+     * default is untouched and this whole block costs nothing. */
+    ParamDesc store_live[kStoreParamCount];
+    memcpy(store_live, kStoreParams, sizeof(store_live));
+    for (ParamDesc& d : store_live) {
+        if (d.id == LOOP_PID_STORE && card_now) d.def = 1.0f;
+    }
+    if (ps.add(store_live, kStoreParamCount) != kStoreParamCount) {
         ESP_LOGE(TAG, "loop.store registration failed");
         return ESP_FAIL;
     }
     params += kStoreParamCount;
-    /* Probed here rather than in the summary line below: probing mounts the
-     * card through loop_store_mount(), which has one logical caller, and past
-     * the xTaskCreate below that caller is loop_ctl. It also seeds what
-     * loop_stream_ready() reports, so the first loop.maxlen mirror already
-     * knows whether sd is on offer. */
-    const bool card_now = loop_stream_probe_card();
+    /* loop.mono was registered above, before the card was known about, so its
+     * default cannot be patched the same way — and sd streams stereo (see
+     * ctl_sd_forces_stereo). Still ahead of addListener() and of any
+     * connection, so this is a quiet correction rather than an event. */
+    if (card_now) ps.set(LOOP_PID_MONO, 0.0f, ParamOrigin::Internal);
 #endif
     for (int t = 0; t < LOOP_TRACKS; ++t) {
         s_lvl[t] = ps.valuePtr((uint16_t)LOOP_PID_LEVEL(t));
@@ -1997,9 +2137,10 @@ extern "C" esp_err_t looper_init(void) {
 #if SYNTH_LOOP_STREAM
     ESP_LOGI(TAG,
              "loop.store: psram (the cap above) or sd (streamed from the "
-             "card, up to %.0f s) — %s right now",
+             "card, up to %.0f s) — %s",
              LOOP_STREAM_MAX_S,
-             card_now ? "card ready" : "no card, psram only");
+             card_now ? "card ready, defaulting to sd in stereo"
+                      : "no card, psram only");
 #endif
     return ESP_OK;
 }
@@ -2284,10 +2425,16 @@ extern "C" void SYNTH_RENDER_IRAM looper_process(float* __restrict__ l,
                     a_rec = false;
                     s_filled.fetch_or((uint8_t)(1u << a_rec_trk),
                                       std::memory_order_release);
-                    /* streamed: its file is being replaced — no reader until
-                     * loop_ctl re-opens it (the a_starved reset just above
-                     * cleared the hold this track was already under) */
-                    audio_hold_track(a_rec_trk);
+                    /* streamed: the take's opening has been mirrored into
+                     * this track's own window all along, and taking it here is
+                     * what lets the punch-in be heard from this pass instead
+                     * of the one after. Failing that, its file is being
+                     * replaced and there is no reader until loop_ctl re-opens
+                     * it (the a_starved reset just above cleared the hold this
+                     * track was already under). */
+                    if (!audio_join_prearm(a_rec_trk)) {
+                        audio_hold_track(a_rec_trk);
+                    }
                     s_rec_trk_live.store(-1, std::memory_order_release);
                     audio_raise(kEvtState | kEvtAutoPlay);
                 }

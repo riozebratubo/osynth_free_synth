@@ -86,6 +86,43 @@ so syncing to a DAW keeps every one of those features.
 
 Plus a song chain, Euclidean fills, and a 4-beat count-in.
 
+### 🎼 Chord mode — one finger, whole harmony
+
+Turn it on and a key stops being a note. It lives in the MIDI router, which is
+the one place every note source meets, so it works the same whether you play
+the app's keyboard, a USB MIDI controller plugged into the host port, or a DIN
+cable. Drums never get chorded — they leave the router before it happens.
+
+- **Free** — one chord shape under every key, transposed. 25 qualities from a
+  bare fifth to a thirteenth.
+- **Scale** — the key picks a *degree* and the chord is stacked in scale
+  thirds, so the quality follows the degree with nothing to choose: I maj,
+  ii min, V dom7, vii°. **There is no wrong chord to play.** In the default
+  keymap every semitone is one scale step, so no key on the keyboard is dead
+  or a duplicate — and the app labels each one with the chord it actually
+  plays.
+- **User** — twelve slots, one per key of the octave, each an arbitrary
+  interval list. The progression you actually wanted, laid out under your hand.
+
+Stack 1 to 7 notes (**1 is a real answer** — a single note, still snapped into
+the scale), pick an inversion or let **auto voice-leading** choose the one
+nearest the chord you just played, drop a voice or two for an open spread, add
+a bass note an octave or two down, taper the velocity toward the top so it
+sounds played rather than typed, and **strum** it over up to 200 ms in four
+directions.
+
+It composes with the rest of the box rather than sitting beside it. Point it
+*before* the arpeggiator and one key gives a running arpeggio of that chord;
+point it *after* and every arp step lands as a block chord. Sequencer tracks
+opt in **one at a time**, so a one-note-per-step bassline becomes a chord
+progression while the lead lane beside it keeps playing what you wrote. And
+because every control is an ordinary parameter, you can lock the chord type to
+a single step, drive it from a MIDI CC, or aim the mod matrix at it.
+
+Chord mode is a *performance* setting, not part of a patch: it survives a
+power cycle and loading a preset never changes it out from under you
+mid-performance.
+
 ### 🔁 8-track looper
 
 Records the master bus, complete with its FX print. IMA-ADPCM in PSRAM at

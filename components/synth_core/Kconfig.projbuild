@@ -778,6 +778,45 @@ menu "osynth Synthesizer"
         default 42 if IDF_TARGET_ESP32P4
         default 13
 
+    config OSYNTH_SD_PWR_LDO_CHAN
+        int "On-chip LDO channel powering the SD rail (0 = externally powered)"
+        depends on OSYNTH_SD_BUS
+        default 4 if IDF_TARGET_ESP32P4
+        default 0
+        help
+            ESP32-P4 only, and only when the socket is wired to the SDMMC
+            slot-1 pads (GPIO39-44). That pad block and, on every P4 carrier
+            seen so far, the card's own VDD sit on a rail the chip does not
+            power by default: it comes from an on-chip LDO output, VO4 by
+            convention. Until the channel is acquired nothing on that rail
+            responds — SCK never leaves 0 V — and the mount fails with
+            ESP_ERR_TIMEOUT, which is indistinguishable in the log from an
+            empty slot. That is the whole failure, and no amount of pin
+            configuration fixes it.
+
+            Set to 0 when the socket has its own regulator, or when the card
+            is on ordinary GPIOs routed through the matrix: acquiring a
+            channel that feeds something else on the board is not free.
+
+    config OSYNTH_SD_PWR_LDO_MV
+        int "SD rail voltage (mV)"
+        depends on OSYNTH_SD_BUS
+        default 3300
+        help
+            Ignored when OSYNTH_SD_PWR_LDO_CHAN is 0.
+
+            The channel is acquired *non-adjustable*, which is what lets the
+            looper's SD backend and the SD drum kits each hold a reference to
+            it — an adjustable channel may have exactly one owner, and those
+            two bring the bus up independently of each other. Nothing is lost
+            by fixing it: adjusting the rail is for negotiating 1.8 V UHS-I
+            signalling, which SPI mode never does.
+
+            3300 is the SD default and what IDF's own examples use. Some
+            carrier firmware for these boards runs the rail at 2700 instead;
+            both sit inside the card's 2.7-3.6 V range, so try that if a card
+            enumerates unreliably at 3300.
+
     config OSYNTH_RENDER_IN_IRAM
         bool "Place the audio render path in IRAM"
         default y
@@ -785,8 +824,33 @@ menu "osynth Synthesizer"
             Marks the per-block render code (engines, voice manager, FX
             bus, looper, audio-task conversion) IRAM_ATTR so flash-cache
             misses from BLE/Wi-Fi or filesystem traffic cannot add jitter
-            to the audio deadline. Costs roughly 20-30 KB of IRAM. Turn
-            off if the image stops linking with "region iram0 overflowed".
+            to the audio deadline.
+
+            It costs far more than the "20-30 KB" this help used to claim:
+            measured on the P4 build with tools/s41_iram_census.py, the
+            .iram1 sections it creates come to ~98 KB (fx 42 K, engines
+            24 K, graph 15 K, looper 6 K, audio_io 4 K, synth_core 3 K,
+            drums 3 K) — more than half of everything osynth puts in
+            internal RAM. Some of that is collected away by --gc-sections,
+            but the order of magnitude is right.
+
+            Turning it off is therefore a big, blunt lever, and usually the
+            wrong first one: it buys internal RAM by giving up exactly the
+            jitter immunity that filesystem and radio traffic make matter.
+            Prefer moving a *peripheral* out of IRAM whose driver osynth
+            does not depend on for audio — see the internal-RAM block in
+            sdkconfig.defaults.esp32p4, which pays for the SD stack that
+            way.
+
+            The failure this answers does not say "region iram0
+            overflowed" on the P4. It says
+
+              --enable-non-contiguous-regions discards section `.sdata...'
+              Total discarded sections size is NNNN bytes
+
+            naming a hundred sections from libraries that have nothing to
+            do with the change. That is the out-of-internal-RAM message,
+            and NNNN is how many bytes have to be found.
 
     config OSYNTH_ENABLE_MODULAR
         bool "Enable the modular patch graph engine (S28)"

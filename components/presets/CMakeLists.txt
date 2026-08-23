@@ -6,5 +6,6 @@ idf_component_register(
     # NVS settings from both owning one parameter. audio_io: audio_io_quiet_ms(),
     # which is how the working state's auto-save finds a moment where stalling
     # the render chain is inaudible.
-    PRIV_REQUIRES seqarp fx drums graph persist audio_io
+    # chord: the user chord set travels in the working-state file (S41).
+    PRIV_REQUIRES seqarp chord fx drums graph persist audio_io
 )

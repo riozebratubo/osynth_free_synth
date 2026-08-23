@@ -247,3 +247,90 @@ to the same points that feed the codec module. That is also the arrangement
 proven working on this board, and it avoids the entire master-mode clock-source
 problem described in `sdkconfig.defaults.esp32p4`.
 
+---
+
+## The micro-SD socket (S41)
+
+**It was never enabled.** The build had `CONFIG_OSYNTH_LOOP_STORE_FLASH=y` and
+`OSYNTH_LOOP_STORE_SD` unset, so `OSYNTH_SD_BUS` was `n`, no SD pins existed in
+the config, and neither `loop_store.cpp`'s SD backend nor `loop_stream.cpp`
+compiled at all. There was no failing mount to debug because nothing ever tried
+to mount anything.
+
+**The symptom that gives it away is the looper's own max-length figure.** In
+PSRAM mode the cap policy in `looper.cpp` clamps the base cap at
+`kLoopBaseCapMaxS` = 160 s (reached around 30 MB free, which 32 MB of PSRAM
+comfortably is), and mono x 4-track doubles it twice: **640 s**. That number is
+not a card that failed — it is the PSRAM ceiling, arrived at exactly. A working
+streamed set reports `LOOP_STREAM_MAX_S`, 1800 s, instead.
+
+**Two things stood between the config and a working card, and only one of them
+is pins.**
+
+- *Pins.* The Kconfig defaults (39/40/41/42 as CS/SCK/MOSI/MISO) land three of
+  four on the SDMMC slot-1 IOMUX block but in the wrong roles. The socket is on
+  that block in SDMMC roles, so the SPI mapping is `CS <- DAT3 (42)`,
+  `SCK <- CLK (43)`, `MOSI <- CMD (44)`, `MISO <- DAT0 (39)`. This is the same
+  table IDF prints in `examples/storage/sd_card/sdspi/README.md` for boards
+  whose slot is wired to the dedicated pins.
+- *Power.* Those pads and the card's VDD are on an on-chip LDO output that
+  nothing turns on by itself. IDF's own examples gate this behind
+  `SD_PWR_CTRL_LDO_INTERNAL_IO` with `LDO ID` defaulting to 4 on the P4, and
+  `SOC_SDMMC_IO_POWER_EXTERNAL` is set for this chip. osynth had no
+  `esp_ldo_*` call anywhere in the tree. Without it the mount fails
+  `ESP_ERR_TIMEOUT` — the same log line an empty slot produces, which is how
+  this would have eaten a day if the pins had been fixed first.
+
+`OSYNTH_SD_PWR_LDO_CHAN` / `_MV` now cover that, acquired *non-adjustable* so
+the SD drum kits (which bring the bus up independently) can hold their own
+reference to the same channel; the regulator refuses a second owner on an
+adjustable one. SPI mode never negotiates 1.8 V UHS-I signalling, so nothing is
+given up by fixing the voltage.
+
+**Voltage is the one number still open.** The table above records this rail at
+**2.7 V** from the carrier's own firmware; the defaults ship 3300 mV, which is
+what IDF uses and what `esp_ldo_acquire_channel()` brings the channel up at
+regardless before any adjustment. Both are inside the card's 2.7-3.6 V range.
+If a card enumerates unreliably rather than not at all, `OSYNTH_SD_PWR_LDO_MV`
+= 2700 is the first thing to try.
+
+**Unverified end to end** — no card has been mounted on this board yet. The
+boot log tells the two failures apart: `SD rail: LDO4 at 3300 mV` without a
+following `SD mounted: <n> MB` is pins or wiring, not power. Check
+`tools/s41_check_sd_pwr.py` and `tools/check_sdkconfig_drift.py` first if
+neither line appears — `sdkconfig` is gitignored and wins over the defaults
+files once it exists, which is exactly how the ES8388 bring-up came up silent.
+
+### The SD stack does not fit for free (S41)
+
+Enabling it broke the link, and the message is worth recognising because it
+names nothing to do with SD:
+
+    --enable-non-contiguous-regions discards section `.sdata.xKernelLock'
+    ... ~130 more, from freertos, lwip, mbedtls, picolibc, osynth ...
+    Total discarded sections size is 5260 bytes
+
+That is the P4's out-of-internal-RAM message. `memory.ld` aliases **both**
+`iram_text_seg` and `dram_seg` to `sram_low`, which is 0x2BBD0 = 179,152 B;
+the 384 KB `sram_high` is the heap. Parsing the last good `build/osynth.bin`
+segment headers put that build at 172,496 B of sram_low — **6,656 bytes
+spare** — so the ~12 KB the SD stack wants was never going to fit.
+
+Levers, and what each is actually worth here (measured from the object files,
+`tools/s41_iram_census.py`):
+
+| Lever | Frees | Notes |
+| --- | --- | --- |
+| `SPI_MASTER_ISR_IN_IRAM=n` | 8.1 KB + selects | **taken** — SPI2 drives only the SD card on this board |
+| `LIBC_LOCKS_PLACE_IN_IRAM=n` | 1,738 B | next rung; read its help first |
+| `OSYNTH_RENDER_IN_IRAM=n` | ~98 KB | last resort, wrong direction |
+| `CACHE_L2_CACHE_128KB` | — | already at the chip's minimum |
+| `SPI_FLASH_PLACE_FUNCTIONS_IN_IRAM=n` | ~10 KB | **not available**: its prompt is `if SPI_FLASH_AUTO_SUSPEND`, which osynth must never enable, so the symbol is promptless and pinned at its `default y` — writing it into sdkconfig does nothing |
+
+The last row is the trap: it is the option that most directly targets the
+discarded `spi_flash_chip_generic` / `spi_flash_os_func_app` text, and it
+cannot be set.
+
+`OSYNTH_RENDER_IN_IRAM`'s help used to say it cost "roughly 20-30 KB". It
+costs ~98 KB, and it named an error string ("region iram0 overflowed") that
+this target never prints. Both are corrected now.

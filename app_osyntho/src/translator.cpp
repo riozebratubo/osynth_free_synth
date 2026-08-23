@@ -398,6 +398,75 @@ Translator::Translator() {
       "cabos, e um arrasto destinado a um deles acaba trocando de página. A barra no "
       "topo e as setas da barra de ferramentas sempre funcionam.";
 
+  // ── Chord mode (ChordScreen.qml, TrackSheet.qml, S41) ────────────────
+  pt["Chord mode"] = "Modo acorde";
+  pt["Keys play chords."] = "As teclas tocam acordes.";
+  pt["Keys play single notes."] = "As teclas tocam notas simples.";
+  pt["User set"] = "Conjunto próprio";
+  pt["One chord shape under every key, transposed."] =
+      "Uma forma de acorde sob cada tecla, transposta.";
+  pt["The key picks a scale degree and the chord is stacked in scale thirds, so the quality follows the degree — there is no wrong chord to play."] =
+      "A tecla escolhe um grau da escala e o acorde é empilhado em terças da "
+      "escala, então a qualidade segue o grau — não existe acorde errado para tocar.";
+  pt["Twelve slots, one per key of the octave above the root."] =
+      "Doze posições, uma para cada tecla da oitava acima da tônica.";
+  pt["C plays"] = "C toca";
+  pt["Tap a chord to hear it. In 'degrees' the keys run one scale step apart from middle C, so no key is dead or doubled; in 'chromatic' they keep their own pitch and are snapped into the scale."] =
+      "Toque um acorde para ouvi-lo. Em 'degrees' as teclas avançam um grau da "
+      "escala a partir do dó central, então nenhuma tecla fica morta ou repetida; "
+      "em 'chromatic' elas mantêm a própria altura e são ajustadas à escala.";
+  pt["User chord set"] = "Conjunto de acordes próprio";
+  pt["This firmware has no user chord set."] =
+      "Este firmware não tem conjunto de acordes próprio.";
+  pt["silent"] = "silencioso";
+  pt["Try"] = "Testar";
+  pt["Voice-leading picks the inversion nearest the chord you just played, so a progression moves by the shortest path — it overrides the inversion setting while it is on."] =
+      "A condução de vozes escolhe a inversão mais próxima do acorde que você "
+      "acabou de tocar, então a progressão se move pelo caminho mais curto — "
+      "enquanto está ligada, ela ignora o ajuste de inversão.";
+  pt["Milliseconds between the notes of a chord. At 0 they all start together."] =
+      "Milissegundos entre as notas de um acorde. Em 0 todas começam juntas.";
+  pt["Routing"] = "Roteamento";
+  pt["Pre-arp: one key gives a running arpeggio of the chord. Post-arp: each note the arpeggiator plays comes out as a block chord. Mono releases the previous key's chord when a new key lands, which is what keeps a chord inside eight voices."] =
+      "Pre-arp: uma tecla gera um arpejo contínuo do acorde. Post-arp: cada nota "
+      "que o arpejador toca sai como um acorde em bloco. Mono solta o acorde da "
+      "tecla anterior quando uma nova tecla chega, que é o que mantém um acorde "
+      "dentro das oito vozes.";
+  pt["Chord mode is a performance setting: it survives a power cycle, and loading a preset never changes it. Sequencer tracks are chorded one at a time — the switch is on the track sheet of the Sequencer page."] =
+      "O modo acorde é um ajuste de performance: sobrevive a um desligamento, e "
+      "carregar um preset nunca o altera. As faixas do sequenciador recebem acordes "
+      "uma a uma — a chave fica na ficha da faixa, na página Sequenciador.";
+  pt["Chord mode expands this track"] = "O modo acorde expande esta faixa";
+  pt["Every setting on this page takes effect on the chord you are already holding, not just the next one — the row above decides whether you hear only the notes that changed, or the whole chord played again. A change that moves no note is silent either way. Voice-leading picks the inversion nearest the chord you just played, so a progression moves by the shortest path — it overrides the inversion setting while it is on."] =
+      "Cada ajuste desta página vale para o acorde que você já está segurando, não apenas "
+      "para o próximo — a linha acima decide se você ouve só as notas que mudaram ou o "
+      "acorde inteiro tocado de novo. Uma mudança que não move nenhuma nota é silenciosa "
+      "nos dois casos. A condução de vozes escolhe a inversão mais próxima do acorde que "
+      "você acabou de tocar, então a progressão se move pelo caminho mais curto — enquanto "
+      "está ligada, ela ignora o ajuste de inversão.";
+  // Pad-row labels and options. Passed as properties rather than literals,
+  // so tools/s41_check_translations.py lists them explicitly.
+  pt["Inversion"] = "Inversão";
+  // "Root" here is the scale root, which is what it means on the track
+  // sheet too; the inversion pad says "Root pos." precisely so the two
+  // senses do not share one entry.
+  pt["Root"] = "Tônica";
+  pt["Scale"] = "Escala";
+  pt["Notes in the chord"] = "Notas do acorde";
+  pt["When a setting changes"] = "Quando um ajuste muda";
+  pt["Play what changed"] = "Tocar o que mudou";
+  pt["Play the whole chord"] = "Tocar o acorde inteiro";
+  pt["Root pos."] = "Fundamental";
+  pt["Single"] = "Nota única";
+  pt["Triad"] = "Tríade";
+  pt["1st"] = "1ª";
+  pt["2nd"] = "2ª";
+  pt["3rd"] = "3ª";
+  pt["7th"] = "7ª";
+  pt["9th"] = "9ª";
+  pt["11th"] = "11ª";
+  pt["13th"] = "13ª";
+
   // ── On-screen keyboard (Keyboard.qml) ──────────────────────────────────
   pt["Octave"] = "Oitava";
   pt["hold"] = "segurar";

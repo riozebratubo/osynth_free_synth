@@ -127,9 +127,18 @@ uint32_t rng_next(uint32_t& s) {
 
 /* ---- note plumbing ---------------------------------------------------- */
 
-void emit_on(uint8_t note, uint8_t vel) {
-    midi_route_channel_message(0x90, note, vel);
+/* `chord` is the track's SEQ_TRACK_F_CHORD flag reaching the router: a lane
+ * that opted in has its notes expanded by chord mode, a lane that did not
+ * plays exactly what the pattern says. Passed per note rather than latched,
+ * because the router is entered from four tasks and any parked "current
+ * track" would be read by whichever note arrived in between. */
+void emit_on(uint8_t note, uint8_t vel, bool chord) {
+    midi_route_note(0x90, note, vel, chord);
 }
+/* Note-offs need no flag: chord mode releases by looking the key up in its
+ * held table, so it answers for the notes it actually started whatever the
+ * track's flag says now. That is what makes toggling the flag mid-pattern
+ * safe rather than a way to stick a chord on. */
 void emit_off(uint8_t note) { midi_route_channel_message(0x80, note, 0); }
 
 void schedule_off(uint8_t note, int track, int32_t at_tick) {
@@ -395,7 +404,7 @@ void trigger_note(int track, const seq_track_cfg_t& cfg, uint8_t note,
     } else {
         flush_offs(track);
     }
-    emit_on(note, vel);
+    emit_on(note, vel, (cfg.flags & SEQ_TRACK_F_CHORD) != 0);
     schedule_off(note, track, s_tick + (gate_ticks > 0 ? gate_ticks : 1));
     t.last_note = note;
     t.note_held = true;

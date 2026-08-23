@@ -18,6 +18,7 @@
 #include "src/ble/synthprotocol.h"
 #include "src/business/databaseclient.h"
 #include "src/loopwav.h"
+#include "src/chordtypes.h"
 #include "src/paramtypes.h"
 #include "src/seqtypes.h"
 
@@ -73,6 +74,16 @@ class SynthController final : public QObject, public DatabaseClient {
   // Kept for a future osynth firmware-update capability (none today).
   Q_PROPERTY(bool firmwareUpdateSupported READ firmwareUpdateSupported CONSTANT FINAL)
   Q_PROPERTY(bool isUpdatingFirmware READ isUpdatingFirmware NOTIFY isUpdatingFirmwareChanged FINAL)
+
+  // --- chord mode (S41) ---
+  // The nineteen chord.* parameters need nothing here — they are ordinary
+  // parameters and the page reads them like any other. Only the user set does:
+  // twelve slots of intervals are not parameter space, so they travel over
+  // CHORD_SET. chordAvailable stays false until that opcode has answered, so
+  // the page hides its user-set editor on firmware that predates chord mode
+  // rather than offering an editor for something that is not there.
+  Q_PROPERTY(bool chordAvailable READ chordAvailable NOTIFY chordSetChanged FINAL)
+  Q_PROPERTY(QList<ChordSlot> chordSet READ chordSet NOTIFY chordSetChanged FINAL)
 
   // --- sequencer (S23) ---
   // The firmware's compile-time sizing: a PSRAM build has 8 tracks x 8
@@ -315,6 +326,48 @@ class SynthController final : public QObject, public DatabaseClient {
   // "C4", "F#3" — MIDI note number to name, C4 = 60 (Yamaha convention).
   Q_INVOKABLE QString noteName(int note) const;
 
+  // --- chord mode (S41) --------------------------------------------------
+  //
+  // The three below answer "what would this key play", for the degree strip
+  // and the live readout on the Chord page. They are a *display* copy of the
+  // firmware's construction (components/chord/chord.cpp), which stays the
+  // sole authority on what the instrument actually sounds — see the comment
+  // over chordNotesFor() in the .cpp for what has to stay in step and what
+  // deliberately does not.
+  //
+  // Why a copy at all: both surfaces redraw while a control is moving, and a
+  // BLE round trip per redraw is not something that can be made to feel
+  // right on a 7.5 ms connection interval.
+  Q_INVOKABLE QList<int> chordNotesFor(int note) const;
+  // "Cmaj7", "Dm7", "G7" — or the note names when the stack is not a chord
+  // any standard name fits, which scale mode reaches on the pentatonics.
+  Q_INVOKABLE QString chordNameFor(int note) const;
+  // The keys that play degree 0..n-1 of the current scale, for `octaves`
+  // octaves of it, so the board can label itself without knowing what
+  // `chord.keymap` means — in `degrees` the keys run one semitone apart, in
+  // `chromatic` they are the scale's own pitches.
+  Q_INVOKABLE QList<int> chordDegreeKeys(int octaves = 1) const;
+
+  // The user chord set: twelve slots, one per pitch class above chord.root.
+  Q_INVOKABLE void refreshChordSet();
+  Q_INVOKABLE QList<ChordSlot> chordSet() const { return m_chordSet; }
+  // Two primitive-argument forms rather than one taking a ChordSlot: QML has
+  // to be able to *build* the new value, and a JS object literal converted to
+  // a Q_GADGET is both fragile and invisible to qmlcachegen, which drops the
+  // whole binding to interpreted byte code. Ints and a list of ints are types
+  // it can see all the way through.
+  Q_INVOKABLE void setChordSlot(int slot, int transpose,
+                                const QList<int>& intervals);
+  Q_INVOKABLE void clearChordSlot(int slot);
+  // Fills a slot from one of the chord.type qualities, which is how the
+  // editor stays usable without asking anyone to type interval numbers.
+  Q_INVOKABLE void setChordSlotQuality(int slot, int quality, int transpose);
+  // Chord-quality labels, in the order chord.type numbers them. Taken from
+  // PARAM_INFO when discovery has it, so the picker cannot disagree with the
+  // parameter it writes.
+  Q_INVOKABLE QStringList chordQualityNames() const;
+  bool chordAvailable() const { return m_chordAvailable; }
+
   // --- drum kit (S22) ----------------------------------------------------
   QVariantList kitSlots() const { return m_kitSlots; }
   QVariantList kits() const { return m_kits; }
@@ -494,6 +547,7 @@ class SynthController final : public QObject, public DatabaseClient {
   // target, and the playhead (which moves ~20 Hz and drives only the grid's
   // highlight — kept separate so a step edit never repaints the whole page).
   void seqInfoChanged();
+  void chordSetChanged();
   void stepsChanged();
   void trackConfigChanged();
   void editTargetChanged();
@@ -649,6 +703,13 @@ class SynthController final : public QObject, public DatabaseClient {
 
   // Sequencer/kit frame handlers, all chunked like the preset list.
   void handleSeqInfo(const QByteArray& payload);
+  void handleChordSet(const QByteArray& payload);
+  // Live value of one chord.* parameter, by name, falling back to
+  // `fallback` before discovery has run. The display-side chord math
+  // reads every setting through this, so "not connected yet" is one
+  // answer in one place rather than a guard at every call site.
+  double chordParam(const char* leaf, double fallback) const;
+  void chordScaleRoot(int* scale, int* root) const;
   void handleSeqSteps(const QByteArray& payload, bool more);
   void handleSeqTrack(const QByteArray& payload, quint8 seq);
   void handleSeqPattern(const QByteArray& payload);
@@ -855,6 +916,11 @@ class SynthController final : public QObject, public DatabaseClient {
   // Fetching all 8x256 steps up front would be ~16 KB over BLE for a view
   // that shows 64 of them.
   SynthProto::SeqInfo m_seqInfo;
+  // The user chord set as the synth last reported it. CHORD_SET answers every
+  // read *and* every write with the whole set, so this is never a guess about
+  // what landed.
+  QList<ChordSlot> m_chordSet;
+  bool m_chordAvailable = false;
   int m_editPattern = 0;
   int m_editTrack = 0;
   int m_playhead = -1;

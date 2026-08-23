@@ -5,6 +5,14 @@
 
 #include "src/business/database.h"
 
+namespace {
+// Which revision of UI.screens the stored page indices are written against.
+// Bump this *and* add a remap step in migrateScreenOrder() whenever a page is
+// inserted into or removed from UI.screens, or people's stored startup page
+// and last-visited page quietly slide one page over.
+constexpr const char* kScreenOrderRev = "2";
+}  // namespace
+
 Settings::Settings(IDatabase& db)
   : db{db} {
   reloadCurrentSettings();
@@ -35,24 +43,39 @@ void Settings::reloadCurrentSettings() {
   migrateScreenOrder();
 }
 
-// UI.screens gained an Input page before FX and lost the osynth (Dev) page,
-// which moved every index from FX up by one and left index 12 naming nothing.
-// Two settings store one of those indices — the startup screen and the page
-// the last run was left on — and both would otherwise quietly point at the
-// wrong page. Remapped once, marked by screen_order_rev.
+// Inserting or removing a page in UI.screens moves every index after it, and
+// two settings store one of those indices — the startup screen and the page
+// the last run was left on. Both would otherwise quietly point at the wrong
+// page. screen_order_rev records which layout they were written against, and
+// each step below moves them one revision forward.
 //
-// The old order was: 0 Home, 1 Osc, 2 Flt, 3 Mod, 4 FX, 5 Seq, 6 Drum, 7 Arp,
-// 8 Loop, 9 Patch, 10 Pre, 11 Lib, 12 Dev.
+// The steps chain deliberately: someone upgrading from rev 0 has to be carried
+// through rev 1 as well, and writing one combined remap per release would mean
+// re-deriving the whole history every time a page is added.
+//
+//   rev 0  0 Home, 1 Osc, 2 Flt, 3 Mod, 4 FX, 5 Seq, 6 Drum, 7 Arp, 8 Loop,
+//          9 Patch, 10 Pre, 11 Lib, 12 Dev
+//   rev 1  an Input page went in before FX and the Dev page came off the end
+//   rev 2  a Chord page (S41) went in after Arp
 void Settings::migrateScreenOrder() {
-  if (settingsCache.value("screen_order_rev") == "1") return;
+  const QString stored = settingsCache.value(QStringLiteral("screen_order_rev"));
+  if (stored == QLatin1String(kScreenOrderRev)) return;
+  bool revOk = false;
+  const int from = stored.toInt(&revOk);
+  const int start = revOk ? from : 0;  // unreadable counts as "the oldest"
+
   // Recorded before anything moves, and the migration abandoned if it cannot
   // be: a remap that ran but failed to say so would run again on the next
   // launch and shift the same index a second time. Failing here instead leaves
   // every stored value exactly as it was, which is merely wrong rather than
   // progressively wrong.
-  if (saveSetting(QStringLiteral("screen_order_rev"), QStringLiteral("1")) == 0) return;
+  if (saveSetting(QStringLiteral("screen_order_rev"),
+                  QString::fromLatin1(kScreenOrderRev)) == 0) {
+    return;
+  }
 
-  const auto remap = [](const QString& value) {
+  // rev 0 -> 1: Input inserted at 4, Dev (12) removed.
+  const auto remapTo1 = [](const QString& value) {
     bool ok = false;
     const int idx = value.toInt(&ok);
     if (!ok || idx < 4) return value;  // "last", Home..Mod: unmoved
@@ -61,10 +84,22 @@ void Settings::migrateScreenOrder() {
     return QString::number(idx + 1);
   };
 
+  // rev 1 -> 2: Chord inserted at 9, so Loop and everything after it moves up.
+  const auto remapTo2 = [](const QString& value) {
+    bool ok = false;
+    const int idx = value.toInt(&ok);
+    if (!ok || idx < 9) return value;  // "last", Home..Arp: unmoved
+    if (idx > 12) return value;        // past the old list; not one of ours
+    return QString::number(idx + 1);
+  };
+
   for (const QString& key :
        {QStringLiteral("startup_screen"), QStringLiteral("last_swipeview_index")}) {
-    const QString moved = remap(settingsCache.value(key));
-    if (moved != settingsCache.value(key)) saveSetting(key, moved);
+    const QString before = settingsCache.value(key);
+    QString moved = before;
+    if (start < 1) moved = remapTo1(moved);
+    if (start < 2) moved = remapTo2(moved);
+    if (moved != before) saveSetting(key, moved);
   }
 }
 

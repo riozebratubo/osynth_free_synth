@@ -163,6 +163,13 @@ void drum_kit_free(drum_kit_t* kit) {
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
 
+#if defined(CONFIG_OSYNTH_SD_PWR_LDO_CHAN) && CONFIG_OSYNTH_SD_PWR_LDO_CHAN > 0
+#include "esp_ldo_regulator.h"
+#define OSYNTH_SD_LDO 1
+#else
+#define OSYNTH_SD_LDO 0
+#endif
+
 namespace {
 
 constexpr const char* kMount = "/sd";
@@ -174,6 +181,28 @@ constexpr size_t kMaxKitBytes = 2 * 1024 * 1024;
 
 sdmmc_card_t* s_card = nullptr;
 
+/* The SD rail's on-chip LDO — the looper's copy of this in loop_store.cpp
+ * carries the reasoning. Duplicated rather than shared because these two
+ * components bring the bus up independently and neither may depend on the
+ * other (looper already requires drums); the regulator refcounts a
+ * non-adjustable channel, so whichever gets here first turns the rail on and
+ * the second one simply joins. */
+void sd_power_up() {
+#if OSYNTH_SD_LDO
+    static esp_ldo_channel_handle_t s_ldo = nullptr;
+    if (s_ldo != nullptr) return;
+    esp_ldo_channel_config_t cfg = {};
+    cfg.chan_id = CONFIG_OSYNTH_SD_PWR_LDO_CHAN;
+    cfg.voltage_mv = CONFIG_OSYNTH_SD_PWR_LDO_MV;
+    const esp_err_t err = esp_ldo_acquire_channel(&cfg, &s_ldo);
+    if (err != ESP_OK) {
+        s_ldo = nullptr;
+        ESP_LOGE(TAG, "SD rail LDO%d refused (%s) — kits will not load",
+                 CONFIG_OSYNTH_SD_PWR_LDO_CHAN, esp_err_to_name(err));
+    }
+#endif
+}
+
 /* Idempotent bring-up. The looper's S16 SD backend may already own the bus
  * and the mount point; both are shared, so "already there" is success, not
  * an error. */
@@ -181,6 +210,7 @@ bool ensure_mounted() {
     struct stat st;
     if (stat(kMount, &st) == 0) return true; /* someone mounted it already */
 
+    sd_power_up();
     spi_bus_config_t bus = {};
     bus.mosi_io_num = CONFIG_OSYNTH_SD_MOSI_GPIO;
     bus.miso_io_num = CONFIG_OSYNTH_SD_MISO_GPIO;

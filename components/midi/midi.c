@@ -55,10 +55,19 @@ static midi_drum_tap_fn s_drum_tap = NULL;
 static void* s_drum_tap_ctx = NULL;
 static midi_realtime_fn s_realtime = NULL;
 static void* s_realtime_ctx = NULL;
+/* Chord mode's hook (S41). Null on a build without components/chord, and the
+ * router then behaves exactly as it did before chord mode existed. */
+static midi_chord_fn s_chord = NULL;
+static void* s_chord_ctx = NULL;
 
 void midi_set_note_tap(midi_note_tap_fn fn, void* ctx) {
     s_note_tap_ctx = ctx;
     s_note_tap = fn;
+}
+
+void midi_set_chord_hook(midi_chord_fn fn, void* ctx) {
+    s_chord_ctx = ctx;
+    s_chord = fn;
 }
 
 void midi_set_drum_tap(midi_drum_tap_fn fn, void* ctx) {
@@ -71,9 +80,26 @@ void midi_set_realtime_callback(midi_realtime_fn fn, void* ctx) {
     s_realtime = fn;
 }
 
-static bool note_tap(uint8_t note, uint8_t velocity, bool on) {
+static bool note_tap(uint8_t note, uint8_t velocity, bool on, int src) {
     const midi_note_tap_fn fn = s_note_tap;
-    return fn != NULL && fn(note, velocity, on, s_note_tap_ctx);
+    return fn != NULL && fn(note, velocity, on, src, s_note_tap_ctx);
+}
+
+static bool chord_hook(uint8_t note, uint8_t velocity, bool on, bool allow,
+                       int when) {
+    const midi_chord_fn fn = s_chord;
+    return fn != NULL && fn(note, velocity, on, allow, when, s_chord_ctx);
+}
+
+void midi_play_note(uint8_t note, uint8_t velocity, bool on, bool pre,
+                    int src) {
+    if (on) {
+        if (pre && note_tap(note, velocity, true, src)) return;
+        voice_manager_note_on(note, velocity);
+    } else {
+        if (pre && note_tap(note, 0, false, src)) return;
+        voice_manager_note_off(note);
+    }
 }
 
 static void drum_tap(uint8_t note, uint8_t velocity) {
@@ -213,6 +239,11 @@ static bool cc_route(uint8_t cc, uint8_t value) {
 }
 
 void midi_route_channel_message(uint8_t status, uint8_t d1, uint8_t d2) {
+    midi_route_note(status, d1, d2, true);
+}
+
+void midi_route_note(uint8_t status, uint8_t d1, uint8_t d2,
+                     bool allow_chord) {
     d1 &= 0x7F;
     d2 &= 0x7F;
     switch (status & 0xF0) {
@@ -231,17 +262,43 @@ void midi_route_channel_message(uint8_t status, uint8_t d1, uint8_t d2) {
                     drum_tap(d1, d2);
                     break;
                 }
-                if (!note_tap(d1, d2, true)) voice_manager_note_on(d1, d2);
+                /* Chord mode (S41) is asked twice, and answers once. Before
+                 * the tap it hands the arpeggiator the chord's tones; after
+                 * it, it turns each note the arpeggiator plays into a block
+                 * chord. `chord.route` picks which, so only one of these two
+                 * calls can ever return true. */
+                if (chord_hook(d1, d2, true, allow_chord, MIDI_CHORD_PRE)) {
+                    break;
+                }
+                if (!note_tap(d1, d2, true, MIDI_NOTE_PLAYED)) {
+                    if (!chord_hook(d1, d2, true, allow_chord,
+                                    MIDI_CHORD_POST)) {
+                        voice_manager_note_on(d1, d2);
+                    }
+                }
             } else {
                 ESP_LOGD(TAG, "note off %u (vel 0)", d1);
                 if (drums_note_on(status & 0x0F, d1, 0)) break;
-                if (!note_tap(d1, 0, false)) voice_manager_note_off(d1);
+                if (chord_hook(d1, 0, false, allow_chord, MIDI_CHORD_PRE)) {
+                    break;
+                }
+                if (!note_tap(d1, 0, false, MIDI_NOTE_PLAYED)) {
+                    if (!chord_hook(d1, 0, false, allow_chord,
+                                    MIDI_CHORD_POST)) {
+                        voice_manager_note_off(d1);
+                    }
+                }
             }
             break;
         case 0x80:
             ESP_LOGD(TAG, "note off %u", d1);
             if (drums_note_on(status & 0x0F, d1, 0)) break;
-            if (!note_tap(d1, 0, false)) voice_manager_note_off(d1);
+            if (chord_hook(d1, 0, false, allow_chord, MIDI_CHORD_PRE)) break;
+            if (!note_tap(d1, 0, false, MIDI_NOTE_PLAYED)) {
+                if (!chord_hook(d1, 0, false, allow_chord, MIDI_CHORD_POST)) {
+                    voice_manager_note_off(d1);
+                }
+            }
             break;
         case 0xB0: /* control change */
             switch (d1) {
@@ -295,6 +352,12 @@ void midi_route_channel_message(uint8_t status, uint8_t d1, uint8_t d2) {
                     break;
                 case 120: /* all sound off */
                     voice_manager_all_sound_off();
+                    /* Chord mode holds a table of keys and a reference count
+                     * per sounding tone. The voices are gone either way, but
+                     * leaving the table populated would strand those counts:
+                     * the next press of a key still listed there would find
+                     * its tones "already sounding" and emit nothing. */
+                    chord_hook(0, 0, false, false, MIDI_CHORD_ALL_OFF);
                     break;
                 case 121: /* reset all controllers */
                     voice_manager_set_pitch_bend(0.0f);
@@ -303,6 +366,7 @@ void midi_route_channel_message(uint8_t status, uint8_t d1, uint8_t d2) {
                     break;
                 case 123: /* all notes off */
                     voice_manager_all_notes_off();
+                    chord_hook(0, 0, false, false, MIDI_CHORD_ALL_OFF);
                     break;
                 default:
                     if (!cc_route(d1, d2)) {

@@ -49,6 +49,7 @@
 
 #include "audio_io.h"
 #include "ble_ctrl.h"
+#include "chord.h"
 #include "codec.h"
 #include "drums.h"
 #include "engines.h"
@@ -319,6 +320,11 @@ extern "C" void app_main(void) {
     ESP_ERROR_CHECK(fx_init());            /* + FX-bus params (0x03xx), delay lines */
     ESP_ERROR_CHECK(drums_init());         /* + drum params (0x07xx), factory kit */
     ESP_ERROR_CHECK(seqarp_init());        /* + seq/arp params (0x04xx), pattern store, clock task */
+    /* After seqarp: chord.follow mirrors seq.scale/seq.root, and chord mode
+     * resolves those two ids at init. Before midi_init(), like every other
+     * router hook: registering one is a pointer assignment, and the router
+     * is not yet delivering anything for it to answer. */
+    ESP_ERROR_CHECK(chord_init());         /* + chord params (0x044x), strum task */
     ESP_ERROR_CHECK(presets_init());       /* + preset params (0x000x), littlefs, task */
     ESP_ERROR_CHECK(looper_init());        /* + looper params (0x06xx), loop_ctl task */
     /* Last of the registration phase: it applies stored values through

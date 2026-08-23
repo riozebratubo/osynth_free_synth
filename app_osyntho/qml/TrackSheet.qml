@@ -242,6 +242,33 @@ Dialog {
                 }
             }
 
+            // Chord mode is opt-in per track (S41), which is what makes it
+            // useful on a sequence: one lane's one-note-per-step bassline
+            // becomes a chord progression while the lead lane beside it keeps
+            // playing what is written. Hidden on drum lanes — the drum bus
+            // takes its notes before chord mode can see them, so the switch
+            // there would be a control that does nothing.
+            Switch {
+                id: chordSwitch
+                visible: root.cfg.target === 0
+                text: Tr.t("Chord mode expands this track")
+                property bool syncing: false
+                checked: root.cfg.chord
+                onToggled: if (!chordSwitch.syncing)
+                               Synth.setTrackField("chord", chordSwitch.checked ? 1 : 0)
+                // A tap breaks the binding above; re-assert it whenever the
+                // track config is re-read, so switching track or loading a
+                // pattern still moves the switch.
+                Connections {
+                    target: Synth
+                    function onTrackConfigChanged(): void {
+                        chordSwitch.syncing = true
+                        chordSwitch.checked = root.cfg.chord
+                        chordSwitch.syncing = false
+                    }
+                }
+            }
+
             // ---- pattern (shared by every track) ---------------------------
             Label {
                 text: Tr.t("Pattern")

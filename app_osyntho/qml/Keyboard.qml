@@ -128,6 +128,47 @@ Rectangle {
         var name = semiNames[midi % 12]
         return withOctave ? name + (Math.floor(midi / 12) - 1) : name
     }
+
+    // Chord mode (S41): with it on, a key no longer plays the note it is
+    // labelled with, so the labels say what it *does* play instead - "Cmaj7",
+    // "Dm7". Without this, scale mode in the "degrees" keymap is unreadable:
+    // every semitone is a scale step there, so the printed pitch names are
+    // wrong for every key but the tonic.
+    //
+    // Refreshed rather than bound, and gated on chordOn so the ordinary case
+    // costs nothing: Synth.chordNameFor() is a plain invokable, and a binding
+    // onto one captures no property and evaluates exactly once (ParamValue.qml
+    // exists for this reason). chordRevision is what the labels depend on.
+    property int pidChordEnable: -1
+    property bool chordOn: false
+    property int chordRevision: 0
+
+    function refreshChordState(): void {
+        pidChordEnable = Synth.paramIdForName("chord.enable")
+        const on = pidChordEnable >= 0
+            && Synth.paramValue(pidChordEnable) >= 0.5
+        if (on !== chordOn) chordOn = on
+        chordRevision++
+    }
+
+    function keyLabel(midi: int, withOctave: bool): string {
+        const dep = chordRevision  // read only to register the dependency
+        void dep
+        if (!chordOn) return noteName(midi, withOctave)
+        return Synth.chordNameFor(midi)
+    }
+
+    Connections {
+        target: Synth
+        enabled: root.visible
+        function onParamsDiscovered(): void { root.refreshChordState() }
+        function onParamChanged(id: int, value: real): void {
+            if (Synth.paramName(id).startsWith("chord."))
+                root.refreshChordState()
+        }
+        function onChordSetChanged(): void { root.refreshChordState() }
+    }
+    Component.onCompleted: refreshChordState()
     function isActive(n: int): bool { return activeNotes[n] === true || held[n] === true }
 
     function noteOn(n: int): void { Synth.noteOn(n, velocity) }
@@ -512,7 +553,7 @@ Rectangle {
                         anchors.horizontalCenter: parent.horizontalCenter
                         anchors.bottom: parent.bottom
                         anchors.bottomMargin: 4
-                        text: root.noteName(midi, true)
+                        text: root.keyLabel(midi, true)
                         color: root.isActive(midi) ? "white" : "#777777"
                         font.pointSize: Math.max(7, UI.fontSize * 0.68)
                     }
@@ -556,7 +597,7 @@ Rectangle {
                     anchors.horizontalCenter: parent.horizontalCenter
                     anchors.bottom: parent.bottom
                     anchors.bottomMargin: 3
-                    text: root.noteName(midi, false)
+                    text: root.keyLabel(midi, false)
                     color: "white"
                     opacity: 0.85
                     font.pointSize: Math.max(6, UI.fontSize * 0.55)

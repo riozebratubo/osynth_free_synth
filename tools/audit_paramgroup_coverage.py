@@ -36,6 +36,11 @@ HAND_BUILT = {
     # state.reset (S40) is the Home page's "Start from scratch" card: one
     # button behind a confirmation, not a control anyone drags.
     "state.": "HomeScreen reset card",
+    # chord.* (S41) is drawn by ChordScreen, which resolves every id by name.
+    # A ParamGroup would have been shorter and wrong: the mode decides which
+    # controls are meaningful, and the quality picker and the degree strip are
+    # not knobs.
+    "chord.": "ChordScreen",
 }
 
 

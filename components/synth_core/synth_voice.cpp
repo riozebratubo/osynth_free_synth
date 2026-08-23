@@ -183,12 +183,32 @@ void ev_note_on(const synth_engine_t* eng, uint8_t note, uint8_t velocity) {
     if (n > kMaxUnison) n = kMaxUnison;
     if (n > SYNTH_VOICES) n = SYNTH_VOICES;
 
-    /* Same note already sounding: retrigger its voices in place (no
-     * stacking), then allocate/steal until the unison stack is full. */
+    /* Same note still *held*: retrigger its voices in place (no stacking),
+     * then allocate/steal until the unison stack is full.
+     *
+     * `v.gate` is load-bearing, and was missing until S41. A voice whose gate
+     * has been dropped is releasing, and re-striking that note is a new note,
+     * not a legato retrigger — so it must not land back on the same voice.
+     * Landing there took the `was_sounding` path in every engine, which
+     * deliberately rescales the envelope for continuity ("no step") and then
+     * gates it on, and Attack ramps from wherever the level already was. A
+     * note released and immediately struck again therefore went Release ->
+     * Attack from near sustain and made no audible transient at all.
+     *
+     * Leaving the released voice alone lets it ring out while pick_voice()
+     * hands the new strike an idle voice — attacking from zero, which is the
+     * strike, with no click because nothing jumped. That is what a piano does
+     * with a repeated key, and it is what chord mode's `chord.restrike = all`
+     * needs to be audible: it releases the chord and plays it again, and every
+     * tone that did not change was landing on its own still-open voice.
+     *
+     * Costs a second voice for as long as the old tail lasts. pick_voice()
+     * steals the quietest releasing tail first when the pool runs short, which
+     * is exactly the voice to take. */
     Voice* picked[kMaxUnison];
     int np = 0;
     for (auto& v : s_voices) {
-        if (np < n && v.active && v.note == note) picked[np++] = &v;
+        if (np < n && v.active && v.gate && v.note == note) picked[np++] = &v;
     }
     while (np < n) {
         picked[np] = pick_voice(eng, picked, np);

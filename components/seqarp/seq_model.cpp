@@ -766,6 +766,11 @@ const char* seq_scale_name(int scale) {
     return kScaleNames[scale];
 }
 
+uint16_t seq_scale_mask(int scale) {
+    if (scale < 0 || scale >= SEQ_SCALE_COUNT) return kScaleMask[0];
+    return kScaleMask[scale];
+}
+
 uint8_t seq_quantize(uint8_t note, int scale, int root) {
     if (scale <= SEQ_SCALE_CHROMATIC || scale >= SEQ_SCALE_COUNT) return note;
     const uint16_t mask = kScaleMask[scale];

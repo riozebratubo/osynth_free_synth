@@ -1,0 +1,339 @@
+
+/* ------------------------------------------------------- chord mode (S41) */
+
+// A *display* copy of the firmware's chord construction, and only that. What
+// the instrument actually plays is decided in components/chord/chord.cpp and
+// reaches the app through no channel at all; this exists so the degree strip
+// and the live readout can redraw while a control is moving, which a BLE round
+// trip per redraw cannot do on a 7.5 ms connection interval.
+//
+// So it has to be kept in step with chord.cpp by hand, and the list of what
+// that means is short on purpose:
+//
+//   kQuality        the order *is* the chord.type enum, which PARAM_INFO
+//                   serves — a mismatch would mislabel every chord in the
+//                   picker. chordQualityNames() prefers the firmware's own
+//                   labels for exactly that reason; this table is the
+//                   fallback and the interval source.
+//   the scale stack every other scale degree, which is what makes the quality
+//                   follow the degree.
+//   kDegreeOrigin   middle C plays the tonic in `degrees` keymap.
+//   the root fold   roots above F# anchor an octave down, so changing key
+//                   does not also change register.
+//
+// Everything else chord.cpp does — voicing, the bass note, the range fold,
+// strum, velocity falloff, voice-leading — is deliberately *not* mirrored.
+// The strip names chords and lists their tones; it does not claim to voice
+// them, so there is nothing there to drift.
+
+namespace {
+
+struct ChordQuality {
+  const char* name;
+  int count;
+  int iv[7];
+};
+
+const ChordQuality kQuality[] = {
+    {"single", 1, {0}},
+    {"5th", 2, {0, 7}},
+    {"oct", 2, {0, 12}},
+    {"sus2", 3, {0, 2, 7}},
+    {"sus4", 3, {0, 5, 7}},
+    {"maj", 3, {0, 4, 7}},
+    {"min", 3, {0, 3, 7}},
+    {"dim", 3, {0, 3, 6}},
+    {"aug", 3, {0, 4, 8}},
+    {"maj6", 4, {0, 4, 7, 9}},
+    {"min6", 4, {0, 3, 7, 9}},
+    {"7", 4, {0, 4, 7, 10}},
+    {"maj7", 4, {0, 4, 7, 11}},
+    {"min7", 4, {0, 3, 7, 10}},
+    {"m7b5", 4, {0, 3, 6, 10}},
+    {"dim7", 4, {0, 3, 6, 9}},
+    {"mmaj7", 4, {0, 3, 7, 11}},
+    {"add9", 4, {0, 4, 7, 14}},
+    {"6/9", 5, {0, 4, 7, 9, 14}},
+    {"9", 5, {0, 4, 7, 10, 14}},
+    {"maj9", 5, {0, 4, 7, 11, 14}},
+    {"min9", 5, {0, 3, 7, 10, 14}},
+    {"11", 6, {0, 4, 7, 10, 14, 17}},
+    {"13", 6, {0, 4, 7, 10, 14, 21}},
+    {"quartal", 4, {0, 5, 10, 15}},
+};
+constexpr int kQualityCount = int(sizeof(kQuality) / sizeof(kQuality[0]));
+
+// seq_scale_mask()'s tables, as 12-bit pitch-class sets relative to the root.
+const quint16 kScaleMask[12] = {
+    0x0FFF, 0x0AB5, 0x05AD, 0x06AD, 0x05AB, 0x0AD5,
+    0x06B5, 0x055B, 0x09AD, 0x0295, 0x04A9, 0x04E9,
+};
+
+constexpr int kDegreeOrigin = 60;  // middle C plays the tonic
+
+const char* const kPitchNames[12] = {"C",  "C#", "D",  "D#", "E",  "F",
+                                     "F#", "G",  "G#", "A",  "A#", "B"};
+
+int scaleDegrees(int scale, int* semi) {
+  const quint16 mask = kScaleMask[(scale >= 0 && scale < 12) ? scale : 0];
+  int n = 0;
+  for (int i = 0; i < 12; ++i) {
+    if (mask & (1u << i)) semi[n++] = i;
+  }
+  return n > 0 ? n : 1;
+}
+
+int scaleBase(int root) { return kDegreeOrigin + (root > 6 ? root - 12 : root); }
+
+int degreeToMidi(int deg, int base, const int* semi, int n) {
+  int oct = deg / n;
+  int step = deg % n;
+  if (step < 0) {
+    step += n;
+    --oct;
+  }
+  return base + 12 * oct + semi[step];
+}
+
+// The pitch-class set of an interval list, which is what both name lookups
+// compare: an inversion or a dropped voice moves notes by octaves and must
+// still spell the same chord.
+quint16 pitchClassSet(const int* iv, int count) {
+  quint16 set = 0;
+  for (int i = 0; i < count; ++i) set |= quint16(1u << ((iv[i] % 12 + 12) % 12));
+  return set;
+}
+
+// First match in table order wins, and the table runs thin to rich, so the
+// simplest name that fits is the one printed. -1 when nothing does.
+int qualityForSet(quint16 have) {
+  for (int q = 0; q < kQualityCount; ++q) {
+    if (pitchClassSet(kQuality[q].iv, kQuality[q].count) == have) return q;
+  }
+  return -1;
+}
+
+}  // namespace
+
+// The live value of one chord parameter. paramIdForName() is a linear walk of
+// the parameter table, which is fine here and nowhere near a hot path: these
+// callers redraw on a parameter *change*, not per frame.
+double SynthController::chordParam(const char* leaf, double fallback) const {
+  const int pid = paramIdForName(QLatin1String(leaf));
+  if (pid < 0) return fallback;
+  return paramValueKnown(pid) ? paramValue(pid) : fallback;
+}
+
+// chord.scale / chord.root, honouring chord.follow.
+void SynthController::chordScaleRoot(int* scale, int* root) const {
+  if (chordParam("chord.follow", 0.0) >= 0.5) {
+    *scale = int(std::lround(chordParam("seq.scale", 0.0)));
+    *root = int(std::lround(chordParam("seq.root", 0.0)));
+  } else {
+    *scale = int(std::lround(chordParam("chord.scale", 1.0)));
+    *root = int(std::lround(chordParam("chord.root", 0.0)));
+  }
+  if (*scale < 0 || *scale > 11) *scale = 0;
+  *root = ((*root % 12) + 12) % 12;
+}
+
+QList<int> SynthController::chordNotesFor(int note) const {
+  QList<int> out;
+  if (note < 0 || note > 127) return out;
+  const int mode = int(std::lround(chordParam("chord.mode", 0.0)));
+
+  if (mode == 2) {  // user
+    int scale = 0, root = 0;
+    chordScaleRoot(&scale, &root);
+    const int slot = ((note - root) % 12 + 12) % 12;
+    if (slot >= m_chordSet.size()) return out;
+    const ChordSlot& u = m_chordSet.at(slot);
+    for (int iv : u.intervals) {
+      const int n = note + u.transpose + iv;
+      if (n >= 0 && n <= 127) out.append(n);
+    }
+  } else if (mode == 1) {  // scale
+    int scale = 0, root = 0;
+    chordScaleRoot(&scale, &root);
+    int semi[12];
+    const int n = scaleDegrees(scale, semi);
+    const int base = scaleBase(root);
+    int deg = 0;
+    if (int(std::lround(chordParam("chord.keymap", 0.0))) == 0) {
+      deg = note - kDegreeOrigin;
+    } else {
+      // Chromatic keymap: the key is snapped into the scale, and this is
+      // where that lands as a degree index.
+      const int pc = ((note - root) % 12 + 12) % 12;
+      int step = 0;
+      int bestDist = 99;
+      for (int i = 0; i < n; ++i) {
+        const int d = qAbs(semi[i] - pc);
+        if (d < bestDist) {
+          bestDist = d;
+          step = i;
+        }
+      }
+      int oct = note - base - semi[step];
+      oct = oct >= 0 ? oct / 12 : -((-oct + 11) / 12);
+      deg = oct * n + step;
+    }
+    int size = int(std::lround(chordParam("chord.size", 3.0)));
+    size = qBound(1, size, 7);
+    for (int i = 0; i < size; ++i) {
+      const int m = degreeToMidi(deg + 2 * i, base, semi, n);
+      if (m >= 0 && m <= 127) out.append(m);
+    }
+  } else {  // free
+    int type = int(std::lround(chordParam("chord.type", 5.0)));
+    if (type < 0 || type >= kQualityCount) type = 0;
+    const ChordQuality& q = kQuality[type];
+    for (int i = 0; i < q.count; ++i) {
+      const int m = note + q.iv[i];
+      if (m >= 0 && m <= 127) out.append(m);
+    }
+  }
+
+  // Inversions, which are the one voicing control that changes which notes are
+  // listed rather than only where they sit. Voice-leading overrides them in the
+  // firmware and is deliberately not mirrored, so the strip keeps a stable
+  // label while the sound moves — which is what a strip of chord names is for.
+  int inv = int(std::lround(chordParam("chord.inv", 0.0)));
+  inv = qBound(0, inv, 3);
+  for (int t = 0; t < inv && out.size() > 1; ++t) {
+    const int low = out.first() + 12;
+    out.removeFirst();
+    if (low <= 127) out.append(low);
+  }
+  return out;
+}
+
+QString SynthController::chordNameFor(int note) const {
+  const QList<int> notes = chordNotesFor(note);
+  if (notes.isEmpty()) return QStringLiteral("-");
+  int root = notes.first();
+  for (int n : notes) root = qMin(root, n);
+  int rel[16];
+  int count = 0;
+  for (int n : notes) {
+    if (count < 16) rel[count++] = n - root;
+  }
+  const int q = qualityForSet(pitchClassSet(rel, count));
+  if (q >= 0) {
+    return QLatin1String(kPitchNames[((root % 12) + 12) % 12]) +
+           QLatin1String(kQuality[q].name);
+  }
+  // Nothing standard fits — a user slot, or a scale stack that is not tertian,
+  // which the pentatonics reach routinely. The notes are more use than "?".
+  QStringList spelled;
+  spelled.reserve(notes.size());
+  for (int n : notes) spelled << QLatin1String(kPitchNames[((n % 12) + 12) % 12]);
+  return spelled.join(QLatin1Char(' '));
+}
+
+QList<int> SynthController::chordDegreeKeys() const {
+  QList<int> keys;
+  int scale = 0, root = 0;
+  chordScaleRoot(&scale, &root);
+  int semi[12];
+  const int n = scaleDegrees(scale, semi);
+  const bool degrees = int(std::lround(chordParam("chord.keymap", 0.0))) == 0;
+  const int base = scaleBase(root);
+  keys.reserve(n);
+  for (int i = 0; i < n; ++i) {
+    keys.append(degrees ? kDegreeOrigin + i : base + semi[i]);
+  }
+  return keys;
+}
+
+QStringList SynthController::chordQualityNames() const {
+  // The firmware's own labels when discovery has them: the picker writes
+  // chord.type by index, so a list built from anything else could point at a
+  // different quality than the one it printed.
+  const int pid = paramIdForName(QStringLiteral("chord.type"));
+  if (pid > 0) {
+    const Param& p = m_params.value(quint16(pid));
+    if (p.infoKnown && !p.info.enumNames.isEmpty()) return p.info.enumNames;
+  }
+  QStringList names;
+  names.reserve(kQualityCount);
+  for (int i = 0; i < kQualityCount; ++i) names << QLatin1String(kQuality[i].name);
+  return names;
+}
+
+void SynthController::refreshChordSet() {
+  if (!connected()) return;
+  send(OP_CHORD_SET, payloadChordGet(), true);
+}
+
+void SynthController::setChordSlot(int slot, const ChordSlot& value) {
+  if (slot < 0 || slot >= SynthProto::CHORD_USER_SLOTS) return;
+  SynthProto::ChordUserSlot u;
+  u.transpose = qint8(qBound(-24, value.transpose, 24));
+  u.count = quint8(qMin(value.intervals.size(),
+                        qsizetype(SynthProto::CHORD_USER_IVS)));
+  for (int i = 0; i < int(u.count); ++i) {
+    u.iv[i] = qint8(qBound(-24, value.intervals.at(i), 36));
+  }
+  send(OP_CHORD_SET, payloadChordSet(slot, u), true);
+}
+
+void SynthController::setChordSlotQuality(int slot, int quality, int transpose) {
+  if (quality < 0 || quality >= kQualityCount) return;
+  ChordSlot s;
+  s.transpose = transpose;
+  const ChordQuality& q = kQuality[quality];
+  // A slot holds six intervals and the widest qualities have six, so nothing
+  // is lost here — the bound is what keeps that true if either table grows.
+  for (int i = 0; i < q.count && i < SynthProto::CHORD_USER_IVS; ++i) {
+    s.intervals.append(q.iv[i]);
+  }
+  setChordSlot(slot, s);
+}
+
+// Names an interval list the way the editor prints it: the same pitch-class
+// match, minus the root. A slot is a shape, not a chord in a key, so "maj7" is
+// the whole answer.
+static QString chordSlotLabel(const QList<int>& intervals) {
+  if (intervals.isEmpty()) return QStringLiteral("silent");
+  int iv[SynthProto::CHORD_USER_IVS];
+  int count = 0;
+  for (int v : intervals) {
+    if (count < SynthProto::CHORD_USER_IVS) iv[count++] = v;
+  }
+  const int q = qualityForSet(pitchClassSet(iv, count));
+  if (q >= 0) return QLatin1String(kQuality[q].name);
+  QStringList parts;
+  parts.reserve(count);
+  for (int i = 0; i < count; ++i) parts << QString::number(iv[i]);
+  return parts.join(QLatin1Char(' '));
+}
+
+void SynthController::handleChordSet(const QByteArray& payload) {
+  Reader r(payload);
+  const int slots = r.u8();
+  if (slots <= 0 || slots > 64) return;
+  QList<ChordSlot> set;
+  set.reserve(slots);
+  for (int i = 0; i < slots; ++i) {
+    // Truncated: keep the set we already had rather than replacing it with a
+    // partial one. A half-read set would look like an edit nobody made, and
+    // the editor would then write it back.
+    if (r.remaining < 8) return;
+    ChordSlot s;
+    s.transpose = qint8(r.u8());
+    int count = r.u8();
+    if (count > SynthProto::CHORD_USER_IVS) count = SynthProto::CHORD_USER_IVS;
+    for (int k = 0; k < SynthProto::CHORD_USER_IVS; ++k) {
+      const int v = qint8(r.u8());
+      if (k < count) s.intervals.append(v);
+    }
+    s.label = chordSlotLabel(s.intervals);
+    set.append(s);
+  }
+  m_chordSet = set;
+  m_chordAvailable = true;
+  emit chordSetChanged();
+}
+
+/* ------------------------------------------------- sequencer frame decode */

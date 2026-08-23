@@ -63,6 +63,7 @@
 #include "freertos/task.h"
 
 #include "audio_io.h" /* audio_io_quiet_ms(): when a flash write is inaudible */
+#include "chord.h" /* CHORD_PID_*: skipped by patches, kept by the state (S41) */
 #include "drums.h"
 #include "engines.h"
 #include "fx.h" /* FX_PID_*: the S36 enable-switch migration */
@@ -200,14 +201,24 @@ static_assert(sizeof(SetHdr) == 36, "on-disk layout");
 
 /* The working state file (S40): the header, then `params` pairs, then a
  * `graph_len`-byte modular graph blob, then `song_len` chain entries, then
- * `patterns` pattern blobs each prefixed by its u32 length.
+ * `patterns` pattern blobs each prefixed by its u32 length, and last a
+ * `chord_len`-byte user chord set (S41).
  *
  * Deliberately its own format rather than a preset plus a set: the two
  * overlap (both carry 0x04xx parameters) and neither carries engine.type,
  * which is the one value that has to be read before anything else can be
  * applied. Reusing the *sections* is what keeps them from drifting — the
  * pattern blobs are exactly what a sequence slot stores and the graph blob is
- * exactly what a v4 preset stores. */
+ * exactly what a v4 preset stores.
+ *
+ * The chord set went into the spare byte and onto the end rather than taking
+ * a version bump, and that is worth a sentence: `version` is compared for
+ * equality, so bumping it would have thrown away every stored working state
+ * in the field — every user's sequencer, patch and engine choice — to add one
+ * optional 96-byte section. A file written before S41 carries chord_len 0 and
+ * simply has no section, which is exactly what "no set was stored" should
+ * mean, and a pre-S41 firmware reading a new file stops after the patterns
+ * and ignores the tail. */
 struct __attribute__((packed)) StateHdr {
     uint32_t magic;
     uint16_t version;
@@ -216,8 +227,8 @@ struct __attribute__((packed)) StateHdr {
     uint16_t params;
     uint16_t graph_len;
     uint8_t song_len;
-    uint8_t reserved;
-    int16_t preset; /* linear slot last loaded, -1 = none — display only */
+    uint8_t chord_len; /* 0 on files written before S41 */
+    int16_t preset;    /* linear slot last loaded, -1 = none — display only */
 };
 static_assert(sizeof(StateHdr) == 16, "on-disk layout");
 
@@ -420,6 +431,17 @@ bool skip_id(uint16_t id) {
     if (id >= osynth::PID_LOOPER_BASE && id < osynth::PID_DRUMS_BASE) {
         return true;
     }
+    /* Chord mode (0x044x, S41): a performance setting, not a patch value —
+     * the same class as master volume and the line input. Loading a preset
+     * called "Bell" mid-set must not silently change what your keyboard plays
+     * a triad of, and the reverse is worse still: chord mode is most useful
+     * exactly while you are auditioning sounds, and a patch change that
+     * switched it off every time would make it unusable there.
+     *
+     * It is in the *working state* instead (state_id() widens this by the
+     * whole range), so it survives a power cycle like everything else about
+     * how the box was left. */
+    if (id >= CHORD_PID_FIRST && id <= CHORD_PID_LAST) return true;
     /* Drums (0x07xx): the per-slot mixer *is* part of the sound and is
      * stored, but the kit selection and the audition trigger are not — a
      * preset that silently swapped the kit (or fired a hit) on load would be
@@ -522,15 +544,25 @@ bool skip_id(uint16_t id) {
  * still holds the day someone adds a setting there. */
 bool state_id(uint16_t id) {
     if (id == osynth::PID_ENGINE_TYPE) return false; /* in the header */
+    /* chord.rev counts edits to the user set; the set itself travels as a
+     * blob further down this file, exactly as the pattern data and the graph
+     * do. Storing the counter as well would restore a revision that no longer
+     * describes anything — the same reason seq.rev and graph.rev are excluded. */
+    if (id == CHORD_PID_REV) return false;
     /* skip_id first because it is a switch and persist_owns() is a scan, and
      * this runs on every parameter write in the instrument. */
     if (skip_id(id)) {
-        switch (id) {
-            case DRUM_PID_KIT:
-            case SEQ_PID_PATTERN:
-                break;
-            default:
-                return false;
+        /* Chord mode is skipped by presets and kept by the working state: it
+         * describes how the keyboard behaves, which is part of "the box as
+         * you left it" and no part of any named patch. */
+        if (id < CHORD_PID_FIRST || id > CHORD_PID_LAST) {
+            switch (id) {
+                case DRUM_PID_KIT:
+                case SEQ_PID_PATTERN:
+                    break;
+                default:
+                    return false;
+            }
         }
     }
     return !persist_owns(id);
@@ -993,6 +1025,11 @@ bool seqset_id(uint16_t id) {
     if (id < osynth::PID_SEQARP_BASE || id >= osynth::PID_MODMATRIX_BASE) {
         return false;
     }
+    /* Chord mode shares the 0x04xx namespace but not the reasoning: it is a
+     * performance setting, and a set is the sequencer's side of a song.
+     * Loading someone's arrangement should not reach across and change what
+     * your keyboard plays. */
+    if (id >= CHORD_PID_FIRST && id <= CHORD_PID_LAST) return false;
     switch (id) {
         case SEQ_PID_CLOCK_SRC:  /* rig setup */
         case SEQ_PID_SEQ_MODE:   /* transport */
@@ -1270,6 +1307,9 @@ bool build_state(StateSink& sk, uint8_t* buf, size_t cap) {
     if (song_len > SEQ_SONG_MAX) song_len = SEQ_SONG_MAX;
     for (int i = 0; i < song_len; ++i) seq_song_get(i, &song[i]);
 
+    uint8_t chord_set[CHORD_USER_SLOTS * sizeof(chord_user_slot_t)];
+    const size_t chord_len = chord_user_export(chord_set, sizeof(chord_set));
+
     StateHdr h = {};
     h.magic = kStateMagic;
     h.version = kStateVersion;
@@ -1278,6 +1318,7 @@ bool build_state(StateSink& sk, uint8_t* buf, size_t cap) {
     h.params = (uint16_t)count;
     h.graph_len = (uint16_t)graph_len;
     h.song_len = (uint8_t)song_len;
+    h.chord_len = (uint8_t)chord_len;
     h.preset = (int16_t)s_cur_load;
 
     sk.put(&h, sizeof(h));
@@ -1293,6 +1334,10 @@ bool build_state(StateSink& sk, uint8_t* buf, size_t cap) {
         sk.put(&len, sizeof(len));
         sk.put(buf, len);
     }
+    /* Last, and only because it is last can it be optional: a reader that
+     * does not know about this section has already finished by the time it
+     * would start. */
+    if (chord_len > 0) sk.put(chord_set, chord_len);
     return sk.ok;
 }
 
@@ -1497,23 +1542,53 @@ void do_state_load(void) {
          * that was saved, so patterns the file does not carry are cleared
          * rather than left holding whatever was there before. */
         int loaded = 0;
+        bool patterns_ok = true;
         for (int p = 0; p < (int)h.patterns; ++p) {
             uint32_t len = 0;
-            if (fread(&len, sizeof(len), 1, fp) != 1 || len == 0) break;
+            if (fread(&len, sizeof(len), 1, fp) != 1 || len == 0) {
+                patterns_ok = false;
+                break;
+            }
             if (len > cap) {
                 /* A pattern from a build with more tracks or steps than this
                  * one — skip it rather than abandon the restore. */
                 if (p < SEQ_PATTERNS) seq_pattern_clear(p);
-                if (fseek(fp, (long)len, SEEK_CUR) != 0) break;
+                if (fseek(fp, (long)len, SEEK_CUR) != 0) {
+                    patterns_ok = false;
+                    break;
+                }
                 continue;
             }
-            if (fread(buf, 1, len, fp) != len) break;
+            if (fread(buf, 1, len, fp) != len) {
+                patterns_ok = false;
+                break;
+            }
             if (p < SEQ_PATTERNS && seqarp_pattern_import(p, buf, len)) {
                 ++loaded;
             }
         }
         for (int p = (int)h.patterns; p < SEQ_PATTERNS; ++p) {
             seq_pattern_clear(p);
+        }
+
+        /* The user chord set (S41), which is positional — it starts wherever
+         * the pattern blobs ended. `patterns_ok` is therefore load-bearing
+         * rather than tidiness: a truncated pattern leaves the file position
+         * somewhere arbitrary, and reading 96 bytes from there would import
+         * whatever happened to be at that offset as a chord set. A set the
+         * file does not carry keeps the defaults, which is what a pre-S41
+         * file (chord_len 0) means too. */
+        if (patterns_ok && h.chord_len > 0) {
+            uint8_t chord_set[CHORD_USER_SLOTS * sizeof(chord_user_slot_t)];
+            if (h.chord_len == sizeof(chord_set) &&
+                fread(chord_set, 1, sizeof(chord_set), fp) ==
+                    sizeof(chord_set)) {
+                (void)chord_user_import(chord_set, sizeof(chord_set));
+            } else {
+                ESP_LOGW(TAG, "state: chord set is %u B, expected %u — kept "
+                              "the defaults",
+                         (unsigned)h.chord_len, (unsigned)sizeof(chord_set));
+            }
         }
         fclose(fp);
 
@@ -1605,6 +1680,11 @@ void do_state_reset(void) {
     for (int p = 0; p < SEQ_PATTERNS; ++p) seq_pattern_clear(p);
     seq_song_set_length(0);
     seqarp_pattern_reflect(seqarp_edit_pattern());
+
+    /* The user chord set is state the parameter loop above cannot reach — it
+     * is a blob, like the patterns and the graph — so a reset that skipped it
+     * would leave an edited set behind on an otherwise blank instrument. */
+    chord_user_reset();
 
     s_cur_load = 0;
     reflect(PRESET_PID_LOAD, 0);

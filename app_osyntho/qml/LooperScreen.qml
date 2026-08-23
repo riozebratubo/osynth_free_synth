@@ -426,7 +426,15 @@ Item {
                         id: monoSwitch
                         text: Tr.t("Record mono")
                         visible: root.idMono >= 0
-                        enabled: Synth.connected
+                        // Off the table in sd mode. Mono exists to buy loop
+                        // length out of the PSRAM pool, and a streamed set's
+                        // cap is the card's — so the toggle would trade half
+                        // the audio for nothing visible. The firmware clears
+                        // loop.mono when the store goes to sd
+                        // (ctl_sd_forces_stereo), and onMonoOnChanged below
+                        // re-asserts `checked`, so this greys out already
+                        // showing stereo rather than greying out on.
+                        enabled: Synth.connected && !root.sdStore
                         checked: root.monoOn
                         onToggled: {
                             Synth.setParam(root.idMono, checked ? 1 : 0)

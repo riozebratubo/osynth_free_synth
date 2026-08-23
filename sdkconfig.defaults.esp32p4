@@ -21,7 +21,14 @@
 # On a board with a wider header, any free pins work: all five are routed
 # through the GPIO matrix.
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
-CONFIG_OSYNTH_FLASH_16MB=y
+# OSYNTH_FLASH_16MB sizes the looper's raw-flash loops region and `depends on
+# OSYNTH_LOOP_STORE_FLASH`, which this file no longer selects (see the looper
+# persistence block below) — so kconfgen drops it from the generated sdkconfig
+# and setting it here would read as drift. Uncomment it together with
+# CONFIG_OSYNTH_LOOP_STORE_FLASH=y if the card ever has to be given up: the
+# choice's own default is 8 MB, which would silently halve the region on this
+# 16 MB board.
+# CONFIG_OSYNTH_FLASH_16MB=y
 
 # Chip revision, and the CPU clock that follows from it. **These are one
 # setting, not two.**
@@ -716,41 +723,112 @@ CONFIG_OSYNTH_ES8388_OUT1=y
 # loop.save / loop.load. Default y (needs PSRAM, which this board has plenty
 # of — 32 MB against the S3's 8).
 # CONFIG_OSYNTH_LOOP_PERSIST=y
+
+# The card, not the spare flash region. This board has a micro-SD socket
+# fitted, and the two things that follow from choosing it are what make it
+# worth the switch: eight slots instead of one, and a *streamed* looper — the
+# take goes to the card as it is recorded, so loop.maxlen becomes
+# LOOP_STREAM_MAX_S (1800 s) instead of the PSRAM cap policy's ceiling.
+#
+# That ceiling is worth recognising in the field, because it is what a build
+# with this left on flash reports: 160 s base (the kLoopBaseCapMaxS clamp,
+# reached at ~30 MB free) x2 mono x2 4-track = **640 s**. A looper advertising
+# 640 s max is not a card that failed to mount — it is a build with no SD
+# backend compiled into it at all.
+#
+# Switching backends does not erase anything, but it does hide it: a set saved
+# to the flash region is still there and simply unreachable until this goes
+# back to OSYNTH_LOOP_STORE_FLASH.
 # CONFIG_OSYNTH_LOOP_STORE_FLASH=y
-# CONFIG_OSYNTH_LOOP_STORE_SD=y
+CONFIG_OSYNTH_LOOP_STORE_SD=y
 
 # --- SD card ----------------------------------------------------------------
 
 # CONFIG_OSYNTH_DRUM_SD_KITS=n
-# Shared by the SD looper backend and SD drum kits; also board-specific, and
-# a P4 devkit usually has its own SD slot already wired somewhere else.
+
+# THE KCONFIG PIN DEFAULTS (39/40/41/42) ARE WRONG FOR THIS BOARD. They land
+# three of four pins on the SDMMC slot-1 IOMUX block but in the wrong roles,
+# which is worse than not wiring it at all. The socket here is already fitted
+# and routed to that block — D0-D3 on 39-42, CLK 43, CMD 44 — and it needs no
+# header pins to reach: SPI2 goes through the GPIO matrix, and every SD card
+# supports SPI mode. What it needs is the SD-to-SPI role mapping rather than
+# the SDMMC one, which is the four lines below and matches the table in IDF's
+# own examples/storage/sd_card/sdspi README for exactly this case.
+CONFIG_OSYNTH_SD_CS_GPIO=42
+CONFIG_OSYNTH_SD_SCK_GPIO=43
+CONFIG_OSYNTH_SD_MOSI_GPIO=44
+CONFIG_OSYNTH_SD_MISO_GPIO=39
+
+# And the pins are only half of it. **Those pads have no supply until the
+# firmware gives them one.** On the P4 the slot-1 pad block and the card's VDD
+# hang off an on-chip LDO output (VO4) that nothing enables by itself, so a
+# correctly wired card on correctly configured pins still fails CMD0 with
+# ESP_ERR_TIMEOUT — which logs identically to an empty slot. loop_store.cpp
+# acquires the channel before it touches the bus; this is what tells it which.
+CONFIG_OSYNTH_SD_PWR_LDO_CHAN=4
+CONFIG_OSYNTH_SD_PWR_LDO_MV=3300
+
+# **Unverified on this board as of S41.** Two things are worth checking on the
+# schematic if it does not come up, and one in the log:
+#  - that the socket really is on the slot-1 IOMUX, and that DAT1/DAT2 are
+#    pulled up rather than left floating (SPI mode leaves them unused, and a
+#    floating DAT1 is the card's interrupt line);
+#  - that no buffer or level shifter sits between the P4 and the socket that
+#    is unidirectional on the data lines;
+#  - `SD rail: LDO4 at 3300 mV` then `SD mounted: <n> MB` at boot. The rail
+#    line without the mount line means the pins or the wiring; neither line
+#    means this file never reached the build (see tools/check_sdkconfig_drift.py
+#    — sdkconfig wins over the defaults once it exists).
+# The carrier's own firmware is reported to run this rail at 2700 mV rather
+# than 3300; both are inside the card's 2.7-3.6 V range, so that is the first
+# thing to try if a card enumerates unreliably rather than not at all.
+
+# --- Internal RAM: paying for the SD stack ----------------------------------
+
+# Turning the SD backend on above costs about 12 KB of `sram_low`, and this
+# build had 6,656 bytes of it left. The link does not say "out of memory" when
+# that happens — on the P4 it says
 #
-# ON A BOARD WITH THE SOCKET ALREADY FITTED, these four defaults are wrong and
-# the card will not mount. osynth's backend is SDSPI (loop_store.cpp), while an
-# on-board micro-SD socket on this chip is almost always wired to the SDMMC
-# slot-1 IOMUX: D0-D3 on 39-42, CLK 43, CMD 44. The defaults below land three
-# of four pins on that block but in the wrong roles, which is worse than not
-# wiring it at all.
+#     --enable-non-contiguous-regions discards section `.sdata...'
+#     Total discarded sections size is NNNN bytes
 #
-# It does not need header pins to fix. SPI2 routes through the GPIO matrix, so
-# the firmware can reach pins the header never brings out, and every SD card
-# supports SPI mode — the socket just has to be driven with the SD-to-SPI role
-# mapping instead of the SDMMC one:
+# listing a hundred innocent-looking sections from every library in the image.
+# That message *is* the out-of-internal-RAM message, and the byte count at the
+# end is exactly how much has to be found. Why it is so tight here: memory.ld
+# aliases **both** `iram_text_seg` and `dram_seg` to `sram_low`, which is only
+# 0x2BBD0 (179,152 B) — the roomy 384 KB `sram_high` holds the heap, not code.
+# The other obvious lever is already pulled: CACHE_L2_CACHE_128KB is the
+# smallest L2 the chip offers, and every byte it gives up is already here.
 #
-#   CS   <- DAT3 (42)      SCK  <- CLK (43)
-#   MOSI <- CMD  (44)      MISO <- DAT0 (39)
+# So this is where the SD stack is paid for. SPI2 on this board drives exactly
+# one thing — the SD card — so moving its ISR to flash cannot affect anything
+# that was working before the card existed. What it does mean is that an SD
+# transfer in flight when the flash cache goes down (an NVS commit, a LittleFS
+# preset write) completes late instead of on time. That is affordable: the
+# streamed looper's ring is 64 KB, about 1.4 s of stereo cushion, against flash
+# operations measured in tens of milliseconds, and sdspi's own command timeout
+# is ~1.1 s.
 #
-# **Unverified on this board** — that is why it is commented out and the
-# storage backend is left on flash. Two things to check on the schematic
-# before trying it: that the socket really is on the slot-1 IOMUX, and that
-# DAT1/DAT2 are pulled up rather than left floating (SPI mode leaves them
-# unused, and a floating DAT1 is the card's interrupt line). If a buffer or
-# level shifter sits between the P4 and the socket, check it is bidirectional
-# on the data lines before driving them as SPI.
-# CONFIG_OSYNTH_SD_CS_GPIO=42
-# CONFIG_OSYNTH_SD_SCK_GPIO=43
-# CONFIG_OSYNTH_SD_MOSI_GPIO=44
-# CONFIG_OSYNTH_SD_MISO_GPIO=39
+# Measured worth (tools/s41_iram_census.py, from the object files):
+#   spi_master.c .iram1  5,412 B  +  spi_hal_iram.c (noflash)  2,691 B
+# = 8.1 KB against the 5,260 B the linker asked for, plus whatever the four
+# symbols this one `select`s give back (ESP_PERIPH_CTRL_FUNC_IN_IRAM,
+# ESP_SPI_BUS_LOCK_ISR_FUNCS_IN_IRAM and the two GDMA ones) — those are placed
+# by linker fragment rather than IRAM_ATTR, so the census cannot see them and
+# they are margin, not budget. **Do not set the four by hand**: they are
+# `select`ed, and kconfgen recomputes them from this line.
+#
+# Dropping GDMA out of IRAM costs audio nothing here, which is worth stating
+# because it looks alarming: I2S_ISR_IRAM_SAFE is already n, so the I2S DMA
+# path was never flash-immune in the first place.
+#
+# If the link is still short after this, the next rungs in order of increasing
+# regret are CONFIG_LIBC_LOCKS_PLACE_IN_IRAM=n (1,738 B measured, but read its
+# help — it exists so IRAM ISRs can take libc locks), and only then
+# OSYNTH_RENDER_IN_IRAM=n, which is the wrong direction: it is worth ~98 KB but
+# gives up the render path's cache-miss immunity precisely when the new SD
+# traffic makes it matter most.
+CONFIG_SPI_MASTER_ISR_IN_IRAM=n
 
 # --- Serial MIDI ------------------------------------------------------------
 

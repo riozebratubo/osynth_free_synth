@@ -67,6 +67,9 @@ QtObject {
     // repeated two of them — master volume was already on the toolbar and its
     // `in.` group was already on FX — so the analogue output level and the USB
     // card moved to Home and the input took a page of its own.)
+    //
+    // rev 2 (S41) inserted Chord after Arp; Settings::migrateScreenOrder()
+    // carries the two stored indices across that in one step.
     readonly property var screens: [
         { label: "Home", name: "Home",               icon: "\uf015" },  // house
         { label: "Osc",  name: "Oscillator",         icon: "\uf83e" },  // wave-square
@@ -80,6 +83,10 @@ QtObject {
         { label: "Seq",  name: "Sequencer",          icon: "\uf00a" },  // table-cells
         { label: "Drum", name: "Drums",              icon: "\uf569" },  // drum
         { label: "Arp",  name: "Arpeggiator",        icon: "\uf550" },  // bars-staggered
+        // Next to the arpeggiator because the two are the same kind of thing:
+        // a transform between the key you press and the notes that sound. And
+        // because chord.route decides which of them runs first.
+        { label: "Chord", name: "Chord mode",        icon: "\uf5fd" },  // layer-group
         { label: "Loop", name: "Looper",             icon: "\uf363" },  // repeat
         { label: "Patch", name: "Modular patch",     icon: "\uf542" },  // project-diagram
         { label: "Pre",  name: "Presets",            icon: "\uf0c7" },  // floppy-disk
