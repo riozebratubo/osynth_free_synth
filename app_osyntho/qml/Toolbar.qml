@@ -31,12 +31,12 @@ ToolBar {
     // transports — measuring the (fillWidth) title column instead would make
     // the fit test oscillate: hide the strip, gain room, show it again.
     readonly property real fixedChromeWidth:
-        (prevButton.visible ? prevButton.width : 8)
+        prevButton.width
         + (masterVol.visible ? 76 : 0)
         + (outLevel.visible ? 76 : 0)
         + plugLabel.width + 4
         + menuButton.width
-        + (nextButton.visible ? nextButton.width : 0)
+        + nextButton.width
         + 24  // RowLayout spacing and margins
 
     RowLayout {
@@ -48,16 +48,15 @@ ToolBar {
             font.family: App.fontAwesomeName
             font.weight: Font.Black  // solid face
             font.pointSize: UI.fontSize * 1.2
-            visible: t1.pager && t1.pager.currentIndex > 0
+            // Greyed at the ends of the pager rather than hidden. A button
+            // that comes and goes moves everything beside it: the title used
+            // to jump a whole button's width on the first and last pages, and
+            // the spacer that used to stand in for this one existed only to
+            // soften that. It also kept the arrow from being somewhere your
+            // eye could learn.
+            enabled: t1.pager && t1.pager.currentIndex > 0
             onClicked: if (t1.pager.currentIndex > 0) t1.pager.currentIndex--
         }
-        // Stands in for the hidden prev button so the title does not jump to the
-        // edge on the first page. Layout.preferredWidth, not width: a RowLayout
-        // sets its children's width itself, from their preferred/implicit size,
-        // so a plain `width: 8` was overwritten with the Item's implicitWidth of
-        // 0 — the spacer was not there at all, while fixedChromeWidth below has
-        // always charged 8 px for it.
-        Item { visible: !prevButton.visible; Layout.preferredWidth: 8 }
 
         ColumnLayout {
             Layout.fillWidth: true
@@ -383,7 +382,7 @@ ToolBar {
             font.family: App.fontAwesomeName
             font.weight: Font.Black  // solid face
             font.pointSize: UI.fontSize * 1.2
-            visible: t1.pager && t1.pager.currentIndex < t1.pager.count - 1
+            enabled: t1.pager && t1.pager.currentIndex < t1.pager.count - 1
             onClicked: if (t1.pager.currentIndex < t1.pager.count - 1) t1.pager.currentIndex++
         }
     }

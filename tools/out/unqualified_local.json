@@ -1,0 +1,926 @@
+[
+ {
+  "file": "qml/BluetoothDeviceSelectorScreen.qml",
+  "line": 36,
+  "column": 28,
+  "name": "mainStackView"
+ },
+ {
+  "file": "qml/BluetoothDeviceSelectorScreen.qml",
+  "line": 136,
+  "column": 24,
+  "name": "deviceList"
+ },
+ {
+  "file": "qml/BluetoothDeviceSelectorScreen.qml",
+  "line": 145,
+  "column": 35,
+  "name": "modelData"
+ },
+ {
+  "file": "qml/DrumPads.qml",
+  "line": 102,
+  "column": 63,
+  "name": "root"
+ },
+ {
+  "file": "qml/DrumPads.qml",
+  "line": 103,
+  "column": 52,
+  "name": "root"
+ },
+ {
+  "file": "qml/DrumPads.qml",
+  "line": 104,
+  "column": 45,
+  "name": "root"
+ },
+ {
+  "file": "qml/DrumPads.qml",
+  "line": 105,
+  "column": 49,
+  "name": "root"
+ },
+ {
+  "file": "qml/DrumPads.qml",
+  "line": 106,
+  "column": 45,
+  "name": "root"
+ },
+ {
+  "file": "qml/DrumPads.qml",
+  "line": 110,
+  "column": 24,
+  "name": "grid"
+ },
+ {
+  "file": "qml/DrumPads.qml",
+  "line": 111,
+  "column": 25,
+  "name": "grid"
+ },
+ {
+  "file": "qml/DrumPads.qml",
+  "line": 143,
+  "column": 47,
+  "name": "root"
+ },
+ {
+  "file": "qml/DrumsScreen.qml",
+  "line": 186,
+  "column": 63,
+  "name": "panels"
+ },
+ {
+  "file": "qml/GraphScreen.qml",
+  "line": 302,
+  "column": 28,
+  "name": "screen"
+ },
+ {
+  "file": "qml/GraphScreen.qml",
+  "line": 303,
+  "column": 29,
+  "name": "screen"
+ },
+ {
+  "file": "qml/GraphScreen.qml",
+  "line": 306,
+  "column": 35,
+  "name": "screen"
+ },
+ {
+  "file": "qml/GraphScreen.qml",
+  "line": 307,
+  "column": 35,
+  "name": "screen"
+ },
+ {
+  "file": "qml/GraphScreen.qml",
+  "line": 309,
+  "column": 28,
+  "name": "screen"
+ },
+ {
+  "file": "qml/GraphScreen.qml",
+  "line": 339,
+  "column": 61,
+  "name": "cables"
+ },
+ {
+  "file": "qml/GraphScreen.qml",
+  "line": 349,
+  "column": 29,
+  "name": "screen"
+ },
+ {
+  "file": "qml/GraphScreen.qml",
+  "line": 350,
+  "column": 34,
+  "name": "screen"
+ },
+ {
+  "file": "qml/GraphScreen.qml",
+  "line": 337,
+  "column": 40,
+  "name": "canvas"
+ },
+ {
+  "file": "qml/GraphScreen.qml",
+  "line": 338,
+  "column": 40,
+  "name": "canvas"
+ },
+ {
+  "file": "qml/GraphScreen.qml",
+  "line": 357,
+  "column": 32,
+  "name": "screen"
+ },
+ {
+  "file": "qml/GraphScreen.qml",
+  "line": 362,
+  "column": 32,
+  "name": "screen"
+ },
+ {
+  "file": "qml/GraphScreen.qml",
+  "line": 364,
+  "column": 32,
+  "name": "screen"
+ },
+ {
+  "file": "qml/GraphScreen.qml",
+  "line": 370,
+  "column": 40,
+  "name": "screen"
+ },
+ {
+  "file": "qml/GraphScreen.qml",
+  "line": 381,
+  "column": 33,
+  "name": "screen"
+ },
+ {
+  "file": "qml/GraphScreen.qml",
+  "line": 381,
+  "column": 50,
+  "name": "node"
+ },
+ {
+  "file": "qml/GraphScreen.qml",
+  "line": 383,
+  "column": 33,
+  "name": "node"
+ },
+ {
+  "file": "qml/GraphScreen.qml",
+  "line": 385,
+  "column": 33,
+  "name": "screen"
+ },
+ {
+  "file": "qml/GraphScreen.qml",
+  "line": 386,
+  "column": 47,
+  "name": "node"
+ },
+ {
+  "file": "qml/GraphScreen.qml",
+  "line": 386,
+  "column": 71,
+  "name": "screen"
+ },
+ {
+  "file": "qml/GraphScreen.qml",
+  "line": 387,
+  "column": 36,
+  "name": "screen"
+ },
+ {
+  "file": "qml/GraphScreen.qml",
+  "line": 388,
+  "column": 37,
+  "name": "screen"
+ },
+ {
+  "file": "qml/GraphScreen.qml",
+  "line": 396,
+  "column": 47,
+  "name": "screen"
+ },
+ {
+  "file": "qml/GraphScreen.qml",
+  "line": 410,
+  "column": 44,
+  "name": "screen"
+ },
+ {
+  "file": "qml/GraphScreen.qml",
+  "line": 410,
+  "column": 60,
+  "name": "node"
+ },
+ {
+  "file": "qml/GraphScreen.qml",
+  "line": 480,
+  "column": 57,
+  "name": "screen"
+ },
+ {
+  "file": "qml/GraphScreen.qml",
+  "line": 519,
+  "column": 21,
+  "name": "kindPicker"
+ },
+ {
+  "file": "qml/Keyboard.qml",
+  "line": 357,
+  "column": 36,
+  "name": "pianoIcon"
+ },
+ {
+  "file": "qml/Keyboard.qml",
+  "line": 358,
+  "column": 37,
+  "name": "pianoIcon"
+ },
+ {
+  "file": "qml/Keyboard.qml",
+  "line": 372,
+  "column": 40,
+  "name": "pianoIcon"
+ },
+ {
+  "file": "qml/Keyboard.qml",
+  "line": 373,
+  "column": 32,
+  "name": "pianoIcon"
+ },
+ {
+  "file": "qml/Keyboard.qml",
+  "line": 374,
+  "column": 33,
+  "name": "pianoIcon"
+ },
+ {
+  "file": "qml/Keyboard.qml",
+  "line": 491,
+  "column": 49,
+  "name": "root"
+ },
+ {
+  "file": "qml/Keyboard.qml",
+  "line": 492,
+  "column": 28,
+  "name": "keyArea"
+ },
+ {
+  "file": "qml/Keyboard.qml",
+  "line": 493,
+  "column": 29,
+  "name": "keyArea"
+ },
+ {
+  "file": "qml/Keyboard.qml",
+  "line": 494,
+  "column": 28,
+  "name": "root"
+ },
+ {
+  "file": "qml/Keyboard.qml",
+  "line": 499,
+  "column": 34,
+  "name": "root"
+ },
+ {
+  "file": "qml/Keyboard.qml",
+  "line": 503,
+  "column": 31,
+  "name": "root"
+ },
+ {
+  "file": "qml/Keyboard.qml",
+  "line": 503,
+  "column": 45,
+  "name": "midi"
+ },
+ {
+  "file": "qml/Keyboard.qml",
+  "line": 504,
+  "column": 46,
+  "name": "midi"
+ },
+ {
+  "file": "qml/Keyboard.qml",
+  "line": 531,
+  "column": 51,
+  "name": "root"
+ },
+ {
+  "file": "qml/Keyboard.qml",
+  "line": 532,
+  "column": 44,
+  "name": "keyArea"
+ },
+ {
+  "file": "qml/Keyboard.qml",
+  "line": 534,
+  "column": 25,
+  "name": "keyArea"
+ },
+ {
+  "file": "qml/Keyboard.qml",
+  "line": 539,
+  "column": 24,
+  "name": "root"
+ },
+ {
+  "file": "qml/Keyboard.qml",
+  "line": 543,
+  "column": 30,
+  "name": "root"
+ },
+ {
+  "file": "qml/Keyboard.qml",
+  "line": 547,
+  "column": 27,
+  "name": "root"
+ },
+ {
+  "file": "qml/Keyboard.qml",
+  "line": 547,
+  "column": 41,
+  "name": "midi"
+ },
+ {
+  "file": "qml/Knob.qml",
+  "line": 60,
+  "column": 33,
+  "name": "meta"
+ },
+ {
+  "file": "qml/LooperScreen.qml",
+  "line": 526,
+  "column": 66,
+  "name": "root"
+ },
+ {
+  "file": "qml/LooperScreen.qml",
+  "line": 527,
+  "column": 65,
+  "name": "root"
+ },
+ {
+  "file": "qml/LooperScreen.qml",
+  "line": 528,
+  "column": 79,
+  "name": "root"
+ },
+ {
+  "file": "qml/LooperScreen.qml",
+  "line": 533,
+  "column": 59,
+  "name": "root"
+ },
+ {
+  "file": "qml/Main.qml",
+  "line": 124,
+  "column": 64,
+  "name": "applyImmersive"
+ },
+ {
+  "file": "qml/Main.qml",
+  "line": 145,
+  "column": 22,
+  "name": "applyImmersive"
+ },
+ {
+  "file": "qml/Main.qml",
+  "line": 325,
+  "column": 13,
+  "name": "writeExportTo"
+ },
+ {
+  "file": "qml/Main.qml",
+  "line": 338,
+  "column": 21,
+  "name": "writeWavExportTo"
+ },
+ {
+  "file": "qml/Main.qml",
+  "line": 347,
+  "column": 21,
+  "name": "loadImportFrom"
+ },
+ {
+  "file": "qml/Main.qml",
+  "line": 361,
+  "column": 21,
+  "name": "writeBackupTo"
+ },
+ {
+  "file": "qml/Main.qml",
+  "line": 375,
+  "column": 45,
+  "name": "shareBackup"
+ },
+ {
+  "file": "qml/Main.qml",
+  "line": 376,
+  "column": 47,
+  "name": "restoreBackup"
+ },
+ {
+  "file": "qml/Main.qml",
+  "line": 377,
+  "column": 85,
+  "name": "exportJson"
+ },
+ {
+  "file": "qml/Main.qml",
+  "line": 378,
+  "column": 62,
+  "name": "importJson"
+ },
+ {
+  "file": "qml/Main.qml",
+  "line": 391,
+  "column": 17,
+  "name": "pendingJsonImport"
+ },
+ {
+  "file": "qml/Main.qml",
+  "line": 392,
+  "column": 17,
+  "name": "pendingJsonImport"
+ },
+ {
+  "file": "qml/Main.qml",
+  "line": 393,
+  "column": 17,
+  "name": "loadImportFrom"
+ },
+ {
+  "file": "qml/Main.qml",
+  "line": 396,
+  "column": 17,
+  "name": "pendingRestore"
+ },
+ {
+  "file": "qml/Main.qml",
+  "line": 397,
+  "column": 17,
+  "name": "pendingRestore"
+ },
+ {
+  "file": "qml/Main.qml",
+  "line": 405,
+  "column": 17,
+  "name": "pendingJsonImport"
+ },
+ {
+  "file": "qml/Main.qml",
+  "line": 406,
+  "column": 17,
+  "name": "pendingJsonImport"
+ },
+ {
+  "file": "qml/Main.qml",
+  "line": 409,
+  "column": 17,
+  "name": "pendingRestore"
+ },
+ {
+  "file": "qml/Main.qml",
+  "line": 409,
+  "column": 33,
+  "name": "pendingRestore"
+ },
+ {
+  "file": "qml/Main.qml",
+  "line": 413,
+  "column": 13,
+  "name": "reApplySettings"
+ },
+ {
+  "file": "qml/Main.qml",
+  "line": 430,
+  "column": 67,
+  "name": "exportWav"
+ },
+ {
+  "file": "qml/Main.qml",
+  "line": 471,
+  "column": 61,
+  "name": "swipeView"
+ },
+ {
+  "file": "qml/Main.qml",
+  "line": 485,
+  "column": 40,
+  "name": "swipeView"
+ },
+ {
+  "file": "qml/ParamControl.qml",
+  "line": 57,
+  "column": 47,
+  "name": "pc"
+ },
+ {
+  "file": "qml/ParamControl.qml",
+  "line": 58,
+  "column": 55,
+  "name": "pc"
+ },
+ {
+  "file": "qml/ParamControl.qml",
+  "line": 75,
+  "column": 27,
+  "name": "pc"
+ },
+ {
+  "file": "qml/ParamControl.qml",
+  "line": 75,
+  "column": 44,
+  "name": "pc"
+ },
+ {
+  "file": "qml/ParamControl.qml",
+  "line": 89,
+  "column": 61,
+  "name": "pc"
+ },
+ {
+  "file": "qml/ParamControl.qml",
+  "line": 86,
+  "column": 63,
+  "name": "pc"
+ },
+ {
+  "file": "qml/ParamControl.qml",
+  "line": 93,
+  "column": 40,
+  "name": "pc"
+ },
+ {
+  "file": "qml/PatchLibraryScreen.qml",
+  "line": 150,
+  "column": 35,
+  "name": "modelData"
+ },
+ {
+  "file": "qml/PatchLibraryScreen.qml",
+  "line": 155,
+  "column": 59,
+  "name": "modelData"
+ },
+ {
+  "file": "qml/PatchLibraryScreen.qml",
+  "line": 167,
+  "column": 52,
+  "name": "screen"
+ },
+ {
+  "file": "qml/PatchLibraryScreen.qml",
+  "line": 175,
+  "column": 77,
+  "name": "modelData"
+ },
+ {
+  "file": "qml/PatchLibraryScreen.qml",
+  "line": 184,
+  "column": 29,
+  "name": "nameDialog"
+ },
+ {
+  "file": "qml/PatchLibraryScreen.qml",
+  "line": 184,
+  "column": 50,
+  "name": "modelData"
+ },
+ {
+  "file": "qml/PatchLibraryScreen.qml",
+  "line": 185,
+  "column": 48,
+  "name": "modelData"
+ },
+ {
+  "file": "qml/PatchLibraryScreen.qml",
+  "line": 191,
+  "column": 56,
+  "name": "modelData"
+ },
+ {
+  "file": "qml/PresetsScreen.qml",
+  "line": 124,
+  "column": 24,
+  "name": "presetGrid"
+ },
+ {
+  "file": "qml/PresetsScreen.qml",
+  "line": 125,
+  "column": 25,
+  "name": "presetGrid"
+ },
+ {
+  "file": "qml/PresetsScreen.qml",
+  "line": 132,
+  "column": 49,
+  "name": "screen"
+ },
+ {
+  "file": "qml/PresetsScreen.qml",
+  "line": 175,
+  "column": 67,
+  "name": "screen"
+ },
+ {
+  "file": "qml/SequencerScreen.qml",
+  "line": 467,
+  "column": 34,
+  "name": "root"
+ },
+ {
+  "file": "qml/SequencerScreen.qml",
+  "line": 499,
+  "column": 28,
+  "name": "grid"
+ },
+ {
+  "file": "qml/SequencerScreen.qml",
+  "line": 500,
+  "column": 29,
+  "name": "grid"
+ },
+ {
+  "file": "qml/SequencerScreen.qml",
+  "line": 502,
+  "column": 54,
+  "name": "root"
+ },
+ {
+  "file": "qml/SequencerScreen.qml",
+  "line": 503,
+  "column": 48,
+  "name": "root"
+ },
+ {
+  "file": "qml/SequencerScreen.qml",
+  "line": 507,
+  "column": 36,
+  "name": "root"
+ },
+ {
+  "file": "qml/SequencerScreen.qml",
+  "line": 508,
+  "column": 28,
+  "name": "root"
+ },
+ {
+  "file": "qml/SequencerScreen.qml",
+  "line": 509,
+  "column": 30,
+  "name": "root"
+ },
+ {
+  "file": "qml/SequencerScreen.qml",
+  "line": 523,
+  "column": 40,
+  "name": "root"
+ },
+ {
+  "file": "qml/SequencerScreen.qml",
+  "line": 525,
+  "column": 39,
+  "name": "root"
+ },
+ {
+  "file": "qml/SequencerScreen.qml",
+  "line": 561,
+  "column": 54,
+  "name": "root"
+ },
+ {
+  "file": "qml/SequencerScreen.qml",
+  "line": 572,
+  "column": 53,
+  "name": "root"
+ },
+ {
+  "file": "qml/SequencerScreen.qml",
+  "line": 573,
+  "column": 50,
+  "name": "root"
+ },
+ {
+  "file": "qml/SequencerScreen.qml",
+  "line": 584,
+  "column": 53,
+  "name": "root"
+ },
+ {
+  "file": "qml/SequencerScreen.qml",
+  "line": 585,
+  "column": 42,
+  "name": "root"
+ },
+ {
+  "file": "qml/SequencerScreen.qml",
+  "line": 616,
+  "column": 33,
+  "name": "root"
+ },
+ {
+  "file": "qml/SequencerScreen.qml",
+  "line": 618,
+  "column": 83,
+  "name": "root"
+ },
+ {
+  "file": "qml/SequencerScreen.qml",
+  "line": 625,
+  "column": 52,
+  "name": "root"
+ },
+ {
+  "file": "qml/SequencerScreen.qml",
+  "line": 789,
+  "column": 35,
+  "name": "modelData"
+ },
+ {
+  "file": "qml/SequencerScreen.qml",
+  "line": 799,
+  "column": 76,
+  "name": "modelData"
+ },
+ {
+  "file": "qml/SettingsScreen.qml",
+  "line": 444,
+  "column": 44,
+  "name": "mainStackView"
+ },
+ {
+  "file": "qml/Toast.qml",
+  "line": 70,
+  "column": 12,
+  "name": "margin"
+ },
+ {
+  "file": "qml/Toast.qml",
+  "line": 71,
+  "column": 12,
+  "name": "margin"
+ },
+ {
+  "file": "qml/Toast.qml",
+  "line": 76,
+  "column": 20,
+  "name": "desiredForegroundColor"
+ },
+ {
+  "file": "qml/Toast.qml",
+  "line": 86,
+  "column": 20,
+  "name": "desiredForegroundColor"
+ },
+ {
+  "file": "qml/Toast.qml",
+  "line": 116,
+  "column": 28,
+  "name": "selfDestroying"
+ },
+ {
+  "file": "qml/Toast.qml",
+  "line": 105,
+  "column": 23,
+  "name": "fadeTime"
+ },
+ {
+  "file": "qml/Toast.qml",
+  "line": 108,
+  "column": 23,
+  "name": "time"
+ },
+ {
+  "file": "qml/Toast.qml",
+  "line": 108,
+  "column": 32,
+  "name": "fadeTime"
+ },
+ {
+  "file": "qml/Toast.qml",
+  "line": 112,
+  "column": 23,
+  "name": "fadeTime"
+ },
+ {
+  "file": "qml/Toolbar.qml",
+  "line": 45,
+  "column": 22,
+  "name": "swipeView"
+ },
+ {
+  "file": "qml/Toolbar.qml",
+  "line": 46,
+  "column": 28,
+  "name": "swipeView"
+ },
+ {
+  "file": "qml/Toolbar.qml",
+  "line": 46,
+  "column": 56,
+  "name": "swipeView"
+ },
+ {
+  "file": "qml/Toolbar.qml",
+  "line": 252,
+  "column": 67,
+  "name": "fixedChromeWidth"
+ },
+ {
+  "file": "qml/Toolbar.qml",
+  "line": 326,
+  "column": 30,
+  "name": "mainWindow"
+ },
+ {
+  "file": "qml/Toolbar.qml",
+  "line": 327,
+  "column": 34,
+  "name": "mainWindow"
+ },
+ {
+  "file": "qml/Toolbar.qml",
+  "line": 327,
+  "column": 64,
+  "name": "mainWindow"
+ },
+ {
+  "file": "qml/Toolbar.qml",
+  "line": 333,
+  "column": 30,
+  "name": "mainWindow"
+ },
+ {
+  "file": "qml/Toolbar.qml",
+  "line": 334,
+  "column": 34,
+  "name": "mainWindow"
+ },
+ {
+  "file": "qml/Toolbar.qml",
+  "line": 334,
+  "column": 64,
+  "name": "mainWindow"
+ },
+ {
+  "file": "qml/Toolbar.qml",
+  "line": 356,
+  "column": 34,
+  "name": "mainStackView"
+ },
+ {
+  "file": "qml/Toolbar.qml",
+  "line": 369,
+  "column": 34,
+  "name": "mainStackView"
+ },
+ {
+  "file": "qml/Toolbar.qml",
+  "line": 380,
+  "column": 22,
+  "name": "swipeView"
+ },
+ {
+  "file": "qml/Toolbar.qml",
+  "line": 380,
+  "column": 47,
+  "name": "swipeView"
+ },
+ {
+  "file": "qml/Toolbar.qml",
+  "line": 381,
+  "column": 28,
+  "name": "swipeView"
+ },
+ {
+  "file": "qml/Toolbar.qml",
+  "line": 381,
+  "column": 53,
+  "name": "swipeView"
+ },
+ {
+  "file": "qml/Toolbar.qml",
+  "line": 381,
+  "column": 74,
+  "name": "swipeView"
+ },
+ {
+  "file": "qml/WindowStateSaver.qml",
+  "line": 17,
+  "column": 19,
+  "name": "windowName"
+ }
+]

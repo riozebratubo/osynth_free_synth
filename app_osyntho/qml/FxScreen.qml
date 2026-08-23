@@ -3,9 +3,12 @@ import QtQuick.Controls.Material
 
 import org.osynth.osyntho
 
-// Master FX bus, plus the line input that feeds into it (S31).
-// Engine-independent (registered at boot), so these persist across engine
-// switches.
+// Master FX bus. Engine-independent (registered at boot), so these persist
+// across engine switches.
+//
+// The input that feeds the bus is the Input page next door, not a card here:
+// the same `in.` group was drawn on this page and on the old osynth page at
+// once, so one control appeared twice with nothing to say the two were one.
 //
 // The panels are in signal-chain order — adaptive NR -> NR -> vocoder ->
 // drive -> chorus -> flanger -> phaser -> delay -> granular -> reverb ->
@@ -22,13 +25,9 @@ Item {
         PanelFlow {
             id: panels
 
-            // Line input (S31). Self-hides on firmware without it, since
-            // PARAM_INFO then reports no `in.` ids at all.
-            ParamGroup { title: "Line in"; prefix: "in." }
-
-            // Everything from here down self-hides on firmware that does not
-            // register the prefix, same as Line in above — so one app build
-            // still drives a pre-S33 or pre-S34 synth.
+            // Every card here self-hides on firmware that does not register
+            // its prefix — so one app build still drives a pre-S33 or pre-S34
+            // synth.
             //
             // Noise reduction (S39) is the head of the firmware's chain and
             // so the head of the page. Hold-to-learn writes the same id the
@@ -40,7 +39,8 @@ Item {
             // bypass rather than among the knobs because it is not a setting
             // of the effect, it is what the effect is pointed at: `input`
             // cleans the microphone and leaves the instrument alone, and needs
-            // Line in's route set to fx to have anything to work on.
+            // in.route set to fx — on the Input page — to have anything to
+            // work on.
             ParamGroup { title: "Adaptive NR"; prefix: "fx.anr" }
             HoldSampleCard {
                 title: "Noise profile"

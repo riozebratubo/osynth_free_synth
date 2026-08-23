@@ -126,15 +126,36 @@ Item {
                 height: presetGrid.cellHeight
 
                 ItemDelegate {
+                    id: tileButton
                     anchors.fill: parent
                     anchors.margins: 3
                     padding: 8
-                    highlighted: tile.modelData.slot === Synth.presetSlot
+                    // The slot the synth is actually sitting on. `highlighted`
+                    // alone is a tint you have to hunt for across 112 tiles, so
+                    // the same state also draws the outline below and colours
+                    // the slot number.
+                    readonly property bool current: tile.modelData.slot === Synth.presetSlot
+                    highlighted: tileButton.current
                     onClicked: Synth.loadPreset(screen.engine, tile.modelData.slot)
                     ToolTip.visible: hovered
                     ToolTip.text: (tile.modelData.factory ? Tr.t("Factory preset")
                                                           : Tr.t("User preset"))
                                   + " — " + Tr.t("tap to load")
+
+                    // Declared *before* contentItem so it lands between the
+                    // delegate's background and its labels: the fill would wash
+                    // out text drawn under it, and replacing the background
+                    // outright would take the press ripple with it. No input
+                    // handlers, so the tap still reaches the delegate.
+                    Rectangle {
+                        anchors.fill: parent
+                        radius: 4
+                        color: Qt.rgba(Material.accent.r, Material.accent.g,
+                                       Material.accent.b, 0.16)
+                        border.width: 2
+                        border.color: Material.accent
+                        visible: tileButton.current
+                    }
 
                     contentItem: ColumnLayout {
                         spacing: 2
@@ -158,8 +179,10 @@ Item {
                                 Layout.fillWidth: true
                                 text: tile.modelData.slot
                                 font.pointSize: UI.fontSize * 0.8
-                                color: Material.foreground
-                                opacity: 0.7
+                                font.bold: tileButton.current
+                                color: tileButton.current ? Material.accent
+                                                          : Material.foreground
+                                opacity: tileButton.current ? 1.0 : 0.7
                             }
                             // Icon-only, as it always was, and sized down from
                             // the 48 px touch target — at that size it would set
@@ -182,7 +205,8 @@ Item {
                         Label {
                             Layout.fillWidth: true
                             text: (tile.modelData.name && tile.modelData.name.length)
-                                  ? tile.modelData.name : Tr.t("(unnamed)")
+                                  ? UI.capitalized(tile.modelData.name)
+                                  : Tr.t("(unnamed)")
                             color: Material.foreground
                             opacity: (tile.modelData.name && tile.modelData.name.length) ? 1.0 : 0.5
                             elide: Label.ElideRight

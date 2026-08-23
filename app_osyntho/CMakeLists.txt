@@ -155,6 +155,49 @@ set(QML_IMPORT_PATH ${QML_IMPORT_PATH}
 # registers it so the generated qmldir declares it as a singleton type.
 set_source_files_properties(qml/UI.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 
+# --- DIAGNOSTIC TOGGLE -------------------------------------------------------
+# ON disables qmlcachegen's ahead-of-time compilation for the whole module. The
+# QML still runs (interpreted byte code), so this changes no behaviour that the
+# app itself defines — it only stops the compiler emitting C++ for bindings and
+# functions.
+#
+# Use it to split a fault in two: if a misbehaviour disappears with this ON, it
+# lives in generated code (a wrong type annotation, or a codegen bug); if it
+# survives, the generated code is exonerated and the fault is in the QML or C++
+# as written.
+#
+# Turn it back OFF before measuring: with AOT off, tools/qml_aot_score.py has
+# nothing to read and the .aotstats left in the build tree go stale.
+option(OSYNTHO_NO_QML_AOT "Disable QML ahead-of-time compilation (diagnostic)" OFF)
+if(OSYNTHO_NO_QML_AOT)
+  set(QT_QML_NO_CACHEGEN ON)
+  message(STATUS "osyntho: QML AOT compilation DISABLED (OSYNTHO_NO_QML_AOT=ON)")
+endif()
+# -----------------------------------------------------------------------------
+
+# --- BISECT HELPER -----------------------------------------------------------
+# A semicolon-separated list of QML files to exclude from AOT compilation while
+# leaving it on for everything else. Narrows "the fault is in generated code"
+# down to a single document without editing any source:
+#
+#   -DOSYNTHO_QML_SKIP_CACHEGEN="qml/Keyboard.qml"
+#   -DOSYNTHO_QML_SKIP_CACHEGEN="qml/Keyboard.qml;qml/Toolbar.qml"
+#
+# Empty means every file is compiled, which is the shipping configuration.
+#
+# A normal variable, not a cache one: a cache entry set on an earlier configure
+# would otherwise win over any edit made here, which is exactly the trap this
+# helper exists to avoid.
+#
+# >>> BISECT IN PROGRESS: Keyboard.qml is excluded from AOT. <<<
+# Set back to "" once the offending document is identified.
+set(OSYNTHO_QML_SKIP_CACHEGEN "")
+foreach(_skip IN LISTS OSYNTHO_QML_SKIP_CACHEGEN)
+  set_source_files_properties(${_skip} PROPERTIES QT_QML_SKIP_CACHEGEN TRUE)
+  message(STATUS "osyntho: AOT skipped for ${_skip}")
+endforeach()
+# -----------------------------------------------------------------------------
+
 qt_add_qml_module(
     ${PROJECT_NAME}
     # URI osyntho
@@ -192,6 +235,7 @@ qt_add_qml_module(
     SOURCES src/ble/synthprotocol.h
     # QML value types for the parameter API (see src/paramtypes.h).
     SOURCES src/paramtypes.h
+    SOURCES src/seqtypes.h
     SOURCES src/loopwav.h src/loopwav.cpp
 
     # Phase 3 — synth control UI
@@ -208,6 +252,7 @@ qt_add_qml_module(
     QML_FILES qml/ToneScreen.qml
     QML_FILES qml/FilterEnvScreen.qml
     QML_FILES qml/ModScreen.qml
+    QML_FILES qml/InputScreen.qml
     QML_FILES qml/FxScreen.qml
     QML_FILES qml/ArpSeqScreen.qml
     QML_FILES qml/SequencerScreen.qml
@@ -225,16 +270,15 @@ qt_add_qml_module(
     QML_FILES qml/GraphScreen.qml
     QML_FILES qml/PresetsScreen.qml
     QML_FILES qml/PatchLibraryScreen.qml
-    QML_FILES qml/OsynthScreen.qml
 
     # ENABLE_TYPE_COMPILER
 
     # removes qml code from binary, keeps compiled versions
-    DISCARD_QML_CONTENTS
+    # DISCARD_QML_CONTENTS
     SOURCES src/business/settings.h
     SOURCES src/business/settings.cpp
     SOURCES src/business/isettings.h
-    SOURCES src/business/settingsclient.h
+    SOURCES src/business/settingsclient.h   
 )
 
 include_directories(src/model)

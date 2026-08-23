@@ -26,7 +26,7 @@ Item {
     // Right-click (desktop) or long-press (touch) a key or pad to set it.
 
     property var stepData: []
-    property var cfg: ({})
+    property trackConfig cfg
     readonly property bool isDrumTrack: cfg.target === 1
     // A drum lane whose slot is chosen by each step's note, rather than fixed.
     readonly property bool noteToSlotLane: isDrumTrack && cfg.noteToSlot === true
@@ -49,7 +49,7 @@ Item {
     // The pick that applies to this lane: the pads' choice on a lane whose
     // drum comes from the note, the keyboard's everywhere else.
     readonly property int paintNote: noteToSlotLane ? UI.drumNote : UI.paintNote
-    readonly property int stepCount: cfg.length !== undefined ? cfg.length : 64
+    readonly property int stepCount: cfg.length
     readonly property var sel: (selectedStep >= 0 && selectedStep < stepData.length)
                                ? stepData[selectedStep] : ({})
 
@@ -398,7 +398,7 @@ Item {
                     // push must not look like a user edit.
                     property bool syncing: false
                     function sync() {
-                        const v = root.cfg.velScale !== undefined ? root.cfg.velScale : 100
+                        const v = root.cfg.velScale
                         if (value === v) return
                         syncing = true
                         value = v

@@ -49,7 +49,7 @@ Item {
         RowLayout {
             Layout.fillWidth: true
             Label {
-                text: Tr.t("Patch library")
+                text: Tr.t("Local presets")
                 font.bold: true
                 font.pointSize: UI.fontSize * 1.1
                 color: Material.foreground
@@ -139,16 +139,38 @@ Item {
             ScrollBar.vertical: ScrollBar {}
 
             delegate: ItemDelegate {
+                id: patchRow
                 required property var modelData
                 width: ListView.view.width
+                // The stored patch the live sound came from, marked the way the
+                // Presets page marks the synth's own slot. Nothing on the synth
+                // records this — see SynthController::libraryPatchId — so it is
+                // dropped as soon as anything else claims the sound.
+                readonly property bool current: modelData.id === Synth.libraryPatchId
+                highlighted: patchRow.current
+
+                // Before contentItem for the same reason as the marker on the
+                // Presets page tiles.
+                Rectangle {
+                    anchors.fill: parent
+                    radius: 4
+                    color: Qt.rgba(Material.accent.r, Material.accent.g,
+                                   Material.accent.b, 0.16)
+                    border.width: 2
+                    border.color: Material.accent
+                    visible: patchRow.current
+                }
 
                 contentItem: RowLayout {
                     spacing: 8
                     Column {
                         Layout.fillWidth: true
                         Label {
-                            text: modelData.name && modelData.name.length ? modelData.name : Tr.t("(unnamed)")
-                            color: Material.foreground
+                            // Display only — Rename seeds from modelData.name
+                            // and Export names the file from it, both raw.
+                            text: modelData.name && modelData.name.length
+                                  ? UI.capitalized(modelData.name) : Tr.t("(unnamed)")
+                            color: patchRow.current ? Material.accent : Material.foreground
                             font.bold: true
                         }
                         Label {

@@ -12,8 +12,8 @@ import org.osynth.osyntho
 Dialog {
     id: root
 
-    property var cfg: ({})
-    property var pat: ({})
+    property trackConfig cfg
+    property patternConfig pat
 
     function reload() {
         cfg = Synth.trackConfig()
@@ -63,7 +63,7 @@ Dialog {
                     }
                     SyncedComboBox {
                         model: Synth.targetNames()
-                        modelIndex: root.cfg.target !== undefined ? root.cfg.target : 0
+                        modelIndex: root.cfg.target
                         onActivated: Synth.setTrackField("target", currentIndex)
                     }
                 }
@@ -111,7 +111,7 @@ Dialog {
                         // there would misreport what the lane actually does.
                         modelIndex: {
                             if (root.cfg.noteToSlot) return 0
-                            const s = root.cfg.slot !== undefined ? root.cfg.slot : 0
+                            const s = root.cfg.slot
                             for (var i = 0; i < slotBox.slotList.length; ++i)
                                 if (slotBox.slotList[i].slot === s) return i + 1
                             return -1
@@ -144,7 +144,7 @@ Dialog {
                     from: 1
                     to: Math.max(1, Synth.seqMaxSteps)
                     suffix: Tr.t("steps")
-                    value: root.cfg.length !== undefined ? root.cfg.length : 64
+                    value: root.cfg.length
                     onEdited: (v) => Synth.setTrackField("length", v)
                 }
 
@@ -158,7 +158,7 @@ Dialog {
                     }
                     SyncedComboBox {
                         model: Synth.divNames()
-                        modelIndex: root.cfg.div !== undefined ? root.cfg.div : 6
+                        modelIndex: root.cfg.div
                         onActivated: Synth.setTrackField("div", currentIndex)
                     }
                 }
@@ -173,7 +173,7 @@ Dialog {
                     }
                     SyncedComboBox {
                         model: Synth.dirNames()
-                        modelIndex: root.cfg.dir !== undefined ? root.cfg.dir : 0
+                        modelIndex: root.cfg.dir
                         onActivated: Synth.setTrackField("dir", currentIndex)
                     }
                 }
@@ -184,8 +184,7 @@ Dialog {
                     // encoding for that is 0xFF, mapped by the controller.
                     from: 0; to: 75
                     suffix: root.cfg.followsPatternSwing ? Tr.t("(pattern)") : "%"
-                    value: root.cfg.followsPatternSwing ? 0
-                           : (root.cfg.swing !== undefined ? root.cfg.swing : 50)
+                    value: root.cfg.followsPatternSwing ? 0 : root.cfg.swing
                     onEdited: (v) => Synth.setTrackField("swing", v === 0 ? -1 : v)
                 }
             }
@@ -204,14 +203,14 @@ Dialog {
                     label: Tr.t("Transpose")
                     from: -24; to: 24
                     suffix: Tr.t("semitones")
-                    value: root.cfg.transpose !== undefined ? root.cfg.transpose : 0
+                    value: root.cfg.transpose
                     onEdited: (v) => Synth.setTrackField("transpose", v)
                 }
                 StepField {
                     label: Tr.t("Gate scale")
                     from: 0; to: 200
                     suffix: "%"
-                    value: root.cfg.gateScale !== undefined ? root.cfg.gateScale : 100
+                    value: root.cfg.gateScale
                     onEdited: (v) => Synth.setTrackField("gateScale", v)
                 }
                 // The same control as the sequencer page's "Level" slider —
@@ -224,21 +223,21 @@ Dialog {
                     // are capped at 127, so a track already played hard has
                     // little headroom left to gain.
                     suffix: root.cfg.velScale > 100 ? "% " + Tr.t("(caps at 127)") : "%"
-                    value: root.cfg.velScale !== undefined ? root.cfg.velScale : 100
+                    value: root.cfg.velScale
                     onEdited: (v) => Synth.setTrackField("velScale", v)
                 }
                 StepField {
                     label: Tr.t("Probability scale")
                     from: 0; to: 100
                     suffix: "%"
-                    value: root.cfg.probScale !== undefined ? root.cfg.probScale : 100
+                    value: root.cfg.probScale
                     onEdited: (v) => Synth.setTrackField("probScale", v)
                 }
                 StepField {
                     label: Tr.t("Humanize")
                     from: 0; to: 100
                     suffix: "%"
-                    value: root.cfg.humanize !== undefined ? root.cfg.humanize : 0
+                    value: root.cfg.humanize
                     onEdited: (v) => Synth.setTrackField("humanize", v)
                 }
             }
@@ -263,7 +262,7 @@ Dialog {
                     }
                     SyncedComboBox {
                         model: Synth.scaleNames()
-                        modelIndex: root.pat.scale !== undefined ? root.pat.scale : 0
+                        modelIndex: root.pat.scale
                         onActivated: Synth.setPatternField("scale", currentIndex)
                     }
                 }
@@ -277,7 +276,7 @@ Dialog {
                     }
                     SyncedComboBox {
                         model: ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
-                        modelIndex: root.pat.root !== undefined ? root.pat.root : 0
+                        modelIndex: root.pat.root
                         onActivated: Synth.setPatternField("root", currentIndex)
                     }
                 }
@@ -285,7 +284,7 @@ Dialog {
                     label: Tr.t("Pattern swing")
                     from: 25; to: 75
                     suffix: "%"
-                    value: root.pat.swing !== undefined ? root.pat.swing : 50
+                    value: root.pat.swing
                     onEdited: (v) => Synth.setPatternField("swing", v)
                 }
             }
@@ -303,7 +302,7 @@ Dialog {
                 SpinBox {
                     id: pulses
                     from: 0
-                    to: Math.max(1, root.cfg.length !== undefined ? root.cfg.length : 16)
+                    to: Math.max(1, root.cfg.length)
                     value: 4
                 }
                 Label {

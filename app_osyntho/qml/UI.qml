@@ -19,17 +19,63 @@ QtObject {
     property int fontSize: App.setting("app_font_size")
     property bool desktopLayout: !portrait
 
+    // Display forms for names the firmware owns. The registered spelling is
+    // never touched: a parameter's name is the firmware's identifier and every
+    // lookup — paramIdForName, the p-lock picker, a stored patch's rows, an
+    // exported JSON file — still spells it exactly as registered. Only what is
+    // drawn passes through here.
+    function capitalized(text: string): string {
+        return text.length > 0 ? text.charAt(0).toUpperCase() + text.slice(1) : text
+    }
+
+    // The leaf of a parameter's dotted name, as a control's label:
+    // "common.glide" -> "Glide", "fx.lfo1.rate" -> "Rate". Every control that
+    // labels itself from a parameter goes through this, so the pages cannot
+    // drift apart on capitalisation the way three separate `.split('.').pop()`
+    // expressions were free to.
+    function paramLabel(name: string): string {
+        const leaf = name.split('.').pop()
+        return leaf.length > 0 ? leaf.charAt(0).toUpperCase() + leaf.slice(1) : leaf
+    }
+
+    // The slot the synth is on, in the one form every surface names it in:
+    // "5 - grain choir", carrying the same 0-47 / 48-111 number the Presets
+    // page tiles are labelled with. Empty — not "-1", not a placeholder —
+    // until the synth has reported a slot and that engine's listing has
+    // supplied its name, so a caller can drop the whole clause rather than
+    // print a stand-in.
+    readonly property string presetLabel:
+        Synth.presetSlot >= 0
+            ? (Synth.presetSlot
+               + (Synth.presetName.length > 0
+                  ? (" - " + capitalized(Synth.presetName)) : ""))
+            : ""
+
     // The SwipeView pages of the main screen, in order — the one source for both
     // the navigation dock (short `label` + icon, all the room it has) and the
     // startup-screen picker in Settings (full `name`). A page's index in this
     // list *is* its SwipeView index, so the two must stay in the same order as
     // the pages declared in Main.qml. Strings are kept in English here and
     // translated where they are shown, as everywhere else.
+    //
+    // Inserting or removing an entry moves every index after it, and two
+    // settings store one — the startup screen and the page the last run was
+    // left on. Bump screen_order_rev and extend Settings::migrateScreenOrder()
+    // when you change this list, or people's stored choices quietly slide one
+    // page over. (That is what the last edit did: an Input page went in before
+    // FX and the osynth page came off the end. It held three things and
+    // repeated two of them — master volume was already on the toolbar and its
+    // `in.` group was already on FX — so the analogue output level and the USB
+    // card moved to Home and the input took a page of its own.)
     readonly property var screens: [
         { label: "Home", name: "Home",               icon: "\uf015" },  // house
         { label: "Osc",  name: "Oscillator",         icon: "\uf83e" },  // wave-square
         { label: "Flt",  name: "Filter & envelopes", icon: "\uf0b0" },  // filter
         { label: "Mod",  name: "Modulation",         icon: "\uf4e2" },  // circle-nodes
+        // Before FX because that is the order the signal takes, and its own
+        // page because the `in.` group used to be drawn on both the FX page
+        // and the old osynth page — one set of controls under two titles.
+        { label: "In",   name: "Input",              icon: "\uf130" },  // microphone
         { label: "FX",   name: "Effects",            icon: "\uf72b" },  // wand-magic-sparkles
         { label: "Seq",  name: "Sequencer",          icon: "\uf00a" },  // table-cells
         { label: "Drum", name: "Drums",              icon: "\uf569" },  // drum
@@ -37,12 +83,7 @@ QtObject {
         { label: "Loop", name: "Looper",             icon: "\uf363" },  // repeat
         { label: "Patch", name: "Modular patch",     icon: "\uf542" },  // project-diagram
         { label: "Pre",  name: "Presets",            icon: "\uf0c7" },  // floppy-disk
-        { label: "Lib",  name: "Patch library",      icon: "\uf02d" },  // book
-        // The synth's own persisted settings (S35), as opposed to the app's
-        // (SettingsScreen) or the patch's (everything above). Last, because it
-        // is the page you visit least and its index must not shift the ones
-        // people have set as their startup screen.
-        { label: "Dev",  name: "osynth",             icon: "\uf2db" }   // microchip
+        { label: "Loc. Pre", name: "Local presets",  icon: "\uf02d" }  // book
     ]
 
     // Panel layout (PanelFlow / ParamGroup): true packs the cards left to right

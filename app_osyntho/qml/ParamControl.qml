@@ -73,7 +73,7 @@ Item {
                 spacing: 1
                 Label {
                     width: parent.width
-                    text: pc.meta.exists ? pc.meta.name.split('.').pop() : ""
+                    text: pc.meta.exists ? UI.paramLabel(pc.meta.name) : ""
                     font.pointSize: UI.fontSize * 0.68
                     elide: Text.ElideRight
                     color: Material.foreground

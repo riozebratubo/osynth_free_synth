@@ -143,6 +143,14 @@ constexpr double kLoopExportMaxSeconds = 300.0;
 
 // Well-known ids the controller tracks directly.
 constexpr quint16 ID_PRESET_LOAD = 0x0002;
+// preset.load's *value* is a linear slot — engine * PRESETS_PER_ENGINE +
+// slot — while OP_LOAD_PRESET, OP_LIST_PRESETS and every screen speak the
+// per-engine 0-111 number (0-47 factory, 48-111 user). Splitting it on the
+// way in is what lets presetSlot() mean the same thing everywhere: read raw,
+// it printed 565 for Granular's slot 5, matched no entry in a list numbered
+// 0-111 — so presetName stayed empty on every engine but the first — and no
+// preset tile ever recognised itself as the current one.
+constexpr int kPresetsPerEngine = 112;  // PRESETS_PER_ENGINE (presets.h)
 // The engine-specific block: whatever engine is bound owns it, and its meaning
 // changes wholesale on a switch. Everything outside it survives one.
 constexpr quint16 ID_ENGINE_FIRST = 0x0200;
@@ -602,8 +610,10 @@ void SynthController::resetState() {
   emit kitChanged();
   emit playheadChanged();
   m_presetSlot = -1;
+  m_presetEngine = -1;
   m_presetName.clear();
   m_presetIsFactory = false;
+  setLibraryPatch(-1, -1);
   emit readyChanged();
   emit presetChanged();
   emit paramsDiscovered();
@@ -1346,11 +1356,19 @@ void SynthController::applyValue(quint16 id, float value, bool echo) {
   if (echo) emit paramChanged(id, value);
 
   if (id == ID_PRESET_LOAD) {
-    const int slot = int(std::lround(value));
-    if (slot != m_presetSlot) {
+    const int linear = int(std::lround(value));
+    const int eng = (linear >= 0) ? linear / kPresetsPerEngine : -1;
+    const int slot = (linear >= 0) ? linear % kPresetsPerEngine : -1;
+    if (slot != m_presetSlot || eng != m_presetEngine) {
       m_presetSlot = slot;
+      m_presetEngine = eng;
       updatePresetFromSlot();
       emit presetChanged();
+      // A firmware slot is what is playing now, so a library patch is not.
+      // Guarded by the change test above on purpose: discovery's value sweep
+      // re-reads this id, and an unconditional clear there would drop the mark
+      // a library patch had just set.
+      setLibraryPatch(-1, -1);
     }
   } else if (id == ID_GRAPH_REV) {
     // Only re-read when it actually moved, and never on the value that
@@ -1449,6 +1467,10 @@ void SynthController::handleEngineEvent(const QByteArray& payload) {
 void SynthController::setEngineCaps(quint8 engine, quint8 caps) {
   const bool engineChangedNow = (int(engine) != m_engine);
   if (engineChangedNow) {
+    // loadPatch() switches engines itself when the stored patch belongs to
+    // another one, and that switch must not clear the mark it has just set —
+    // which is the whole reason the patch's engine is remembered beside its id.
+    if (m_libraryPatchEngine != int(engine)) setLibraryPatch(-1, -1);
     // The engine-specific 0x02xx range changes meaning — drop its stale infos
     // so discovery re-fetches them.
     for (auto it = m_paramOrder.begin(); it != m_paramOrder.end();) {
@@ -1490,15 +1512,26 @@ void SynthController::handlePresetList(const QByteArray& payload, bool more) {
 void SynthController::updatePresetFromSlot() {
   m_presetName.clear();
   m_presetIsFactory = false;
+  // presetSlot(), not m_presetSlot: a slot belonging to another engine is not
+  // this engine's current preset and must not borrow a name from its list.
+  const int slot = presetSlot();
+  if (slot < 0) return;
   const auto it = m_presets.constFind(m_engine);
   if (it == m_presets.constEnd()) return;
   for (const PresetEntry& e : it.value()) {
-    if (int(e.slot) == m_presetSlot) {
+    if (int(e.slot) == slot) {
       m_presetName = e.name;
       m_presetIsFactory = e.factory;
       return;
     }
   }
+}
+
+void SynthController::setLibraryPatch(int patchId, int engine) {
+  m_libraryPatchEngine = engine;
+  if (patchId == m_libraryPatchId) return;
+  m_libraryPatchId = patchId;
+  emit libraryPatchChanged();
 }
 
 QVariantList SynthController::presetsFor(int engine) const {
@@ -2265,7 +2298,13 @@ int SynthController::saveCurrentAsPatch(const QString& name) {
     return 0;
   }
   const int id = db().insertPatch(name, m_engine, params, graphJson());
-  if (id <= 0) emit showError(Translator::instance().t("Could not save the patch."));
+  if (id <= 0) {
+    emit showError(Translator::instance().t("Could not save the patch."));
+    return id;
+  }
+  // The row *is* the live sound — it was just taken from it — so the library
+  // page marks it straight away, without a round trip through loadPatch().
+  setLibraryPatch(id, m_engine);
   return id;
 }
 
@@ -2409,6 +2448,10 @@ void SynthController::loadPatch(int patchId, bool withMasterVolume, bool withOut
 
   const QList<GraphNode> graph = graphFromJson(db().getPatchGraph(patchId));
 
+  // Set before the engine switch below, so the EVT_ENGINE that switch provokes
+  // finds the patch's own engine here and leaves the mark alone.
+  setLibraryPatch(patchId, patchEngine);
+
   // The graph goes in before the values, and it is the whole subtlety of
   // loading a modular patch: a node parameter id only exists while its slot
   // holds a kind that defines it, so values pushed onto the old graph land on
@@ -2448,7 +2491,11 @@ bool SynthController::renamePatch(int patchId, const QString& name) {
   return db().renamePatch(patchId, name);
 }
 
-bool SynthController::deletePatch(int patchId) { return db().deletePatch(patchId); }
+bool SynthController::deletePatch(int patchId) {
+  // Nothing left to mark once the row is gone.
+  if (patchId == m_libraryPatchId) setLibraryPatch(-1, -1);
+  return db().deletePatch(patchId);
+}
 
 QVariantList SynthController::patches(int engine) { return db().getPatches(engine); }
 
@@ -3196,25 +3243,25 @@ void SynthController::writeStep(int index) {
   noteLocalSeqEdit();
 }
 
-QVariantMap SynthController::trackConfig() const {
-  QVariantMap m;
-  m["target"] = m_trackCfg.target;
-  m["slot"] = m_trackCfg.slot;
-  m["length"] = m_trackCfg.length;
-  m["div"] = m_trackCfg.div;
-  m["dir"] = m_trackCfg.dir;
-  m["transpose"] = m_trackCfg.transpose;
-  m["swing"] = m_trackCfg.swing;
-  m["gateScale"] = m_trackCfg.gateScale;
-  m["velScale"] = m_trackCfg.velScale;
-  m["probScale"] = m_trackCfg.probScale;
-  m["humanize"] = m_trackCfg.humanize;
-  m["scale"] = m_trackCfg.scale;
-  m["root"] = m_trackCfg.root;
-  m["followsPatternSwing"] = m_trackCfg.swing == 0xFF;
-  m["followsPatternScale"] = m_trackCfg.scale == 0xFF;
-  m["noteToSlot"] = m_trackCfg.slot == SEQ_SLOT_FROM_NOTE;
-  return m;
+TrackConfig SynthController::trackConfig() const {
+  TrackConfig c;
+  c.target = m_trackCfg.target;
+  c.slot = m_trackCfg.slot;
+  c.length = m_trackCfg.length;
+  c.div = m_trackCfg.div;
+  c.dir = m_trackCfg.dir;
+  c.transpose = m_trackCfg.transpose;
+  c.swing = m_trackCfg.swing;
+  c.gateScale = m_trackCfg.gateScale;
+  c.velScale = m_trackCfg.velScale;
+  c.probScale = m_trackCfg.probScale;
+  c.humanize = m_trackCfg.humanize;
+  c.scale = m_trackCfg.scale;
+  c.root = m_trackCfg.root;
+  c.followsPatternSwing = m_trackCfg.swing == 0xFF;
+  c.followsPatternScale = m_trackCfg.scale == 0xFF;
+  c.noteToSlot = m_trackCfg.slot == SEQ_SLOT_FROM_NOTE;
+  return c;
 }
 
 void SynthController::setTrackField(const QString& field, double value) {
@@ -3278,14 +3325,14 @@ void SynthController::setTrackField(const QString& field, double value) {
   }
 }
 
-QVariantMap SynthController::patternConfig() const {
-  QVariantMap m;
-  m["length"] = m_patternLength;
-  m["scale"] = m_patternScale;
-  m["root"] = m_patternRoot;
-  m["swing"] = m_patternSwing;
-  m["name"] = m_patternName;
-  return m;
+PatternConfig SynthController::patternConfig() const {
+  PatternConfig p;
+  p.length = m_patternLength;
+  p.scale = m_patternScale;
+  p.root = m_patternRoot;
+  p.swing = m_patternSwing;
+  p.name = m_patternName;
+  return p;
 }
 
 void SynthController::setPatternField(const QString& field, double value) {

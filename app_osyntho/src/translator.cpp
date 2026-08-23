@@ -120,11 +120,12 @@ Translator::Translator() {
       "Em qual página o app abre. \"Última usada\" reabre a página em que você estava ao "
       "fechá-lo.";
   // Full page names for the picker above (UI.screens). "Home", "Sequencer",
-  // "Arpeggiator" and "Patch library" are already listed elsewhere; "Looper"
+  // "Arpeggiator" and "Local presets" are already listed elsewhere; "Looper"
   // and "Presets" read the same in pt_BR and are left to fall back.
   pt["Oscillator"] = "Oscilador";
   pt["Filter & envelopes"] = "Filtro e envelopes";
   pt["Modulation"] = "Modulação";
+  pt["Input"] = "Entrada";
   pt["Effects"] = "Efeitos";
   pt["Drums"] = "Bateria";
   pt["App language (restart to apply)"] = "Idioma (reinicie o app para aplicar)";
@@ -348,8 +349,17 @@ Translator::Translator() {
   pt["Added %1 patches to the library; %2 skipped."] =
       "%1 patches adicionados à biblioteca; %2 ignorados.";
 
+  // ── Input / output / USB (InputScreen.qml, HomeScreen.qml) ─────────────
+  pt["Audio input"] = "Entrada de áudio";
+  pt["Analogue output"] = "Saída analógica";
+  pt["This synth has no audio input."] = "Este sintetizador não tem entrada de áudio.";
+  pt["USB port"] = "Porta USB";
+
   // ── Patch library (PatchLibraryScreen.qml) ─────────────────────────────
-  pt["Patch library"] = "Biblioteca de patches";
+  // The page title and its full name in the startup-screen picker; it used to
+  // be "Patch library". The nav dock's short "Loc. Pre" reads the same in
+  // pt_BR and is left to fall back.
+  pt["Local presets"] = "Presets locais";
   pt["Save current…"] = "Salvar atual…";
   pt["Rename"] = "Renomear";
   pt["Delete"] = "Excluir";
@@ -374,9 +384,9 @@ Translator::Translator() {
       "que ele tinha de fábrica.";
   pt["Reset…"] = "Redefinir…";
   pt["Reset the synth?"] = "Redefinir o sintetizador?";
-  pt["Every sound setting goes back to its default, and the sequencer patterns and the modular patch are cleared. Your saved presets, the patch library, the looper and the volume and input settings are left alone."] =
+  pt["Every sound setting goes back to its default, and the sequencer patterns and the modular patch are cleared. Your saved presets, your local presets, the looper and the volume and input settings are left alone."] =
       "Todos os ajustes de som voltam ao padrão, e os padrões do sequenciador e o patch "
-      "modular são apagados. Seus presets salvos, a biblioteca de patches, o looper e "
+      "modular são apagados. Seus presets salvos, seus presets locais, o looper e "
       "os ajustes de volume e de entrada não são alterados.";
 
   // ── Navigation setting (SettingsScreen.qml) ────────────────────────────

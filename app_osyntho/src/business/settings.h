@@ -21,6 +21,7 @@ class Settings : public ISettings {
   Settings();
   void fillSettingsCacheDefaultValues();
   void fillSettingsCacheCurrentValues();
+  void migrateScreenOrder();
 
   IDatabase& db;
   QHash<QString, QString> settingsCache;

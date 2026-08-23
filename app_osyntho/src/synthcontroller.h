@@ -19,6 +19,7 @@
 #include "src/business/databaseclient.h"
 #include "src/loopwav.h"
 #include "src/paramtypes.h"
+#include "src/seqtypes.h"
 
 // Drives one connected osynth over SynthCtl v1.
 //
@@ -56,6 +57,14 @@ class SynthController final : public QObject, public DatabaseClient {
   Q_PROPERTY(int presetSlot READ presetSlot NOTIFY presetChanged FINAL)
   Q_PROPERTY(QString presetName READ presetName NOTIFY presetChanged FINAL)
   Q_PROPERTY(bool presetIsFactory READ presetIsFactory NOTIFY presetChanged FINAL)
+
+  // Which row of the app's own patch library the live sound came from, or -1.
+  // App-side state by necessity: the firmware knows nothing about the library,
+  // so nothing but this can say a stored patch is what is playing — and that is
+  // exactly why it has to be dropped the moment something else claims the sound
+  // (a preset load, an engine change that is not this patch's own, a fresh
+  // connection, or the row being deleted).
+  Q_PROPERTY(int libraryPatchId READ libraryPatchId NOTIFY libraryPatchChanged FINAL)
 
   Q_PROPERTY(QString synthTarget READ synthTarget NOTIFY infoChanged FINAL)
   Q_PROPERTY(QString firmwareVersion READ firmwareVersion NOTIFY infoChanged FINAL)
@@ -151,9 +160,16 @@ class SynthController final : public QObject, public DatabaseClient {
   QString engineName() const;
   int caps() const { return m_caps; }
 
-  int presetSlot() const { return m_presetSlot; }
+  // The per-engine 0-111 slot the synth is on, or -1 — including whenever
+  // the slot preset.load rests on belongs to a different engine. It rests on
+  // the last preset *loaded*, and a plain engine switch does not move it, so
+  // the raw number would otherwise name a preset the live engine has not got.
+  int presetSlot() const {
+    return (m_presetEngine == m_engine) ? m_presetSlot : -1;
+  }
   QString presetName() const { return m_presetName; }
   bool presetIsFactory() const { return m_presetIsFactory; }
+  int libraryPatchId() const { return m_libraryPatchId; }
 
   QString synthTarget() const { return m_target; }
   QString firmwareVersion() const { return m_fwVersion; }
@@ -260,9 +276,9 @@ class SynthController final : public QObject, public DatabaseClient {
 
   // Track configuration of the edited track, as a map with the same keys the
   // setters below take.
-  Q_INVOKABLE QVariantMap trackConfig() const;
+  Q_INVOKABLE TrackConfig trackConfig() const;
   Q_INVOKABLE void setTrackField(const QString& field, double value);
-  Q_INVOKABLE QVariantMap patternConfig() const;
+  Q_INVOKABLE PatternConfig patternConfig() const;
   Q_INVOKABLE void setPatternField(const QString& field, double value);
   Q_INVOKABLE void setPatternName(const QString& name);
 
@@ -459,6 +475,7 @@ class SynthController final : public QObject, public DatabaseClient {
   void engineChanged();
   void engineListChanged();
   void presetChanged();
+  void libraryPatchChanged();
   void infoChanged();
   void isUpdatingFirmwareChanged();
 
@@ -685,6 +702,10 @@ class SynthController final : public QObject, public DatabaseClient {
   void applyValue(quint16 id, float value, bool echo);
   void setEngineCaps(quint8 engine, quint8 caps);
   void updatePresetFromSlot();
+  // -1 clears the mark. `engine` is the engine the patch was stored for, and is
+  // what lets setEngineCaps() tell loadPatch()'s own engine switch apart from
+  // the player picking a different engine.
+  void setLibraryPatch(int patchId, int engine);
 
   bool m_connected = false;
   bool m_ready = false;
@@ -693,8 +714,15 @@ class SynthController final : public QObject, public DatabaseClient {
   int m_caps = 0;
 
   int m_presetSlot = -1;
+  // The engine half of preset.load's linear value; -1 until one is reported.
+  // Kept apart from m_engine so presetSlot() can tell "no preset on this
+  // engine" from "slot 0".
+  int m_presetEngine = -1;
   QString m_presetName;
   bool m_presetIsFactory = false;
+
+  int m_libraryPatchId = -1;
+  int m_libraryPatchEngine = -1;
 
   QString m_target;
   QString m_fwVersion;

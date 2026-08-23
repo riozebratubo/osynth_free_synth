@@ -1,0 +1,305 @@
+{
+  "compiled": 1014,
+  "fallback": 1188,
+  "per_file": {
+    "AdsrEnvelope": [
+      8,
+      4
+    ],
+    "ArpSeqScreen": [
+      13,
+      17
+    ],
+    "BluetoothDeviceSelectorScreen": [
+      11,
+      28
+    ],
+    "DrumPads": [
+      30,
+      31
+    ],
+    "DrumsScreen": [
+      38,
+      33
+    ],
+    "EnumSelector": [
+      11,
+      11
+    ],
+    "FilterEnvScreen": [
+      6,
+      3
+    ],
+    "FxScreen": [
+      4,
+      3
+    ],
+    "GraphScreen": [
+      73,
+      68
+    ],
+    "HoldSampleCard": [
+      18,
+      13
+    ],
+    "HomeScreen": [
+      26,
+      28
+    ],
+    "Keyboard": [
+      86,
+      84
+    ],
+    "Knob": [
+      11,
+      18
+    ],
+    "LooperScreen": [
+      100,
+      103
+    ],
+    "Main": [
+      56,
+      67
+    ],
+    "ModMatrixSlot": [
+      8,
+      10
+    ],
+    "ModScreen": [
+      14,
+      6
+    ],
+    "OsynthScreen": [
+      28,
+      27
+    ],
+    "PanelFlow": [
+      2,
+      0
+    ],
+    "ParamControl": [
+      8,
+      15
+    ],
+    "ParamGroup": [
+      15,
+      7
+    ],
+    "ParamValue": [
+      8,
+      3
+    ],
+    "PatchLibraryScreen": [
+      25,
+      46
+    ],
+    "PlockDialog": [
+      14,
+      24
+    ],
+    "PresetsScreen": [
+      30,
+      43
+    ],
+    "SeqSetDialog": [
+      18,
+      18
+    ],
+    "SequencerScreen": [
+      119,
+      152
+    ],
+    "SettingsItemNumber": [
+      4,
+      4
+    ],
+    "SettingsItemToggable": [
+      4,
+      3
+    ],
+    "SettingsScreen": [
+      57,
+      126
+    ],
+    "SettingsSwitch": [
+      7,
+      1
+    ],
+    "SpinBoxDouble": [
+      7,
+      5
+    ],
+    "StepField": [
+      8,
+      1
+    ],
+    "SyncedButton": [
+      2,
+      0
+    ],
+    "SyncedComboBox": [
+      4,
+      0
+    ],
+    "Toast": [
+      14,
+      10
+    ],
+    "ToastManager": [
+      4,
+      1
+    ],
+    "ToneScreen": [
+      4,
+      3
+    ],
+    "Toolbar": [
+      58,
+      59
+    ],
+    "TrackSheet": [
+      25,
+      90
+    ],
+    "TransportStrip": [
+      32,
+      10
+    ],
+    "UI": [
+      2,
+      5
+    ],
+    "WindowStateSaver": [
+      2,
+      8
+    ]
+  },
+  "reasons": {
+    "Cannot access value for name App": 137,
+    "Cannot access value for name BluetoothManager": 8,
+    "Cannot access value for name Synth": 297,
+    "Cannot access value for name cables": 1,
+    "Cannot access value for name canvas": 2,
+    "Cannot access value for name desiredForegroundColor": 2,
+    "Cannot access value for name deviceList": 1,
+    "Cannot access value for name fadeTime": 2,
+    "Cannot access value for name fixedChromeWidth": 1,
+    "Cannot access value for name grid": 4,
+    "Cannot access value for name isEnabled": 5,
+    "Cannot access value for name keyArea": 4,
+    "Cannot access value for name mainStackView": 5,
+    "Cannot access value for name mainWindow": 4,
+    "Cannot access value for name margin": 2,
+    "Cannot access value for name meta": 1,
+    "Cannot access value for name modelData": 4,
+    "Cannot access value for name nameDialog": 1,
+    "Cannot access value for name node": 1,
+    "Cannot access value for name panels": 1,
+    "Cannot access value for name pc": 3,
+    "Cannot access value for name pendingJsonImport": 1,
+    "Cannot access value for name pianoIcon": 5,
+    "Cannot access value for name presetGrid": 2,
+    "Cannot access value for name root": 30,
+    "Cannot access value for name screen": 14,
+    "Cannot access value for name selfDestroying": 1,
+    "Cannot access value for name swipeView": 6,
+    "Cannot access value for name t": 230,
+    "Cannot access value for name time": 1,
+    "Cannot access value for name title": 1,
+    "Cannot access value for name window": 1,
+    "Cannot access value for name windowName": 1,
+    "Cannot generate efficient code for LoadClosure": 3,
+    "Cannot generate efficient code for LoadElement with non-list base type <component>::def with type QVariant (adjusted to QJSValue, stored as QJSValue)": 1,
+    "Cannot generate efficient code for LoadElement with non-list base type <component>::swatchColors with type QVariant (adjusted to QJSValue, stored as QJSValue)": 1,
+    "Cannot generate efficient code for call to untyped JavaScript function": 24,
+    "Cannot generate efficient code for internal conversion with incompatible or ambiguous types: QQuickMaterialStyle::accent with type QVariant (adjusted to QVariant) -> QColor stored as QVariant": 6,
+    "Cannot generate efficient code for internal conversion with incompatible or ambiguous types: QQuickMaterialStyle::background with type QVariant (adjusted to QVariant) -> QColor stored as QVariant": 1,
+    "Cannot generate efficient code for internal conversion with incompatible or ambiguous types: QQuickMaterialStyle::foreground with type QVariant (adjusted to QVariant) -> QColor stored as QVariant": 130,
+    "Cannot generate efficient code for internal conversion with incompatible or ambiguous types: conversion to QVariant -> QColor stored as QVariant": 8,
+    "Cannot generate efficient code for iterator on non-list type": 2,
+    "Cannot generate efficient code for lookup of <component>::refresh(...) (stored as QJSValue)": 1,
+    "Cannot generate efficient code for lookup of <component>::resync(...) (stored as QJSValue)": 1,
+    "Cannot generate efficient code for storing an array in a non-sequence type": 16,
+    "Cannot load property accent from <component>::sel with type QVariant": 1,
+    "Cannot load property cond from <component>::s with type QVariant": 1,
+    "Cannot load property cond from <component>::sel with type QVariant": 1,
+    "Cannot load property contentWidth from <component>::parent with type QQuickItem": 2,
+    "Cannot load property dir from <component>::cfg with type QVariant": 1,
+    "Cannot load property div from <component>::cfg with type QVariant": 1,
+    "Cannot load property enumNames from <component>::meta with type QVariant": 2,
+    "Cannot load property exists from <component>::meta with type QVariant": 18,
+    "Cannot load property factory from <component>::modelData with type QVariant": 2,
+    "Cannot load property filled from <component>::parent with type QQuickItem": 2,
+    "Cannot load property filled from <component>::s with type QVariant": 1,
+    "Cannot load property filled from <component>::sel with type QVariant": 4,
+    "Cannot load property followsPatternSwing from <component>::cfg with type QVariant": 2,
+    "Cannot load property gate from <component>::sel with type QVariant": 2,
+    "Cannot load property gateScale from <component>::cfg with type QVariant": 1,
+    "Cannot load property hasPlock from <component>::s with type QVariant": 1,
+    "Cannot load property humanize from <component>::cfg with type QVariant": 1,
+    "Cannot load property icon from <component>::modelData with type QVariant": 1,
+    "Cannot load property implicitHeight from QQuickLoader::item with type QObject": 1,
+    "Cannot load property implicitWidth from QQuickLoader::item with type QObject": 1,
+    "Cannot load property inputs from <component>::kindDesc with type QVariant": 1,
+    "Cannot load property kind from <component>::modelData with type QVariant": 1,
+    "Cannot load property length from <component>::cfg with type QVariant": 3,
+    "Cannot load property length from <component>::exportSources with type QVariant": 1,
+    "Cannot load property length from <component>::exportTracks with type QVariant": 2,
+    "Cannot load property length from <component>::ids with type QVariant": 1,
+    "Cannot load property length from <component>::patchList with type QVariant": 1,
+    "Cannot load property length from <component>::populatedSlots with type QVariant": 1,
+    "Cannot load property length from <component>::stepData with type QVariant": 1,
+    "Cannot load property max from <component>::meta with type QVariant": 1,
+    "Cannot load property micro from <component>::sel with type QVariant": 1,
+    "Cannot load property midi from <component>::parent with type QQuickItem": 2,
+    "Cannot load property min from <component>::meta with type QVariant": 1,
+    "Cannot load property modelData from <component>::parent with type QQuickItem": 1,
+    "Cannot load property muted from <component>::s with type QVariant": 1,
+    "Cannot load property muted from <component>::sel with type QVariant": 1,
+    "Cannot load property name from <component>::kindDesc with type QVariant": 1,
+    "Cannot load property name from <component>::meta with type QVariant": 1,
+    "Cannot load property name from <component>::modelData with type QVariant": 5,
+    "Cannot load property note from <component>::sel with type QVariant": 1,
+    "Cannot load property noteToSlot from <component>::cfg with type QVariant": 4,
+    "Cannot load property patched from <component>::parent with type QQuickItem": 2,
+    "Cannot load property prob from <component>::s with type QVariant": 1,
+    "Cannot load property prob from <component>::sel with type QVariant": 1,
+    "Cannot load property probScale from <component>::cfg with type QVariant": 1,
+    "Cannot load property r from QQuickMaterialStyle::foreground with type QVariant": 2,
+    "Cannot load property ratchet from <component>::s with type QVariant": 2,
+    "Cannot load property ratchet from <component>::sel with type QVariant": 1,
+    "Cannot load property recording from <component>::parent with type QQuickItem": 1,
+    "Cannot load property root from <component>::pat with type QVariant": 1,
+    "Cannot load property scale from <component>::pat with type QVariant": 1,
+    "Cannot load property slide from <component>::sel with type QVariant": 1,
+    "Cannot load property slot from <component>::modelData with type QVariant": 3,
+    "Cannot load property state from QtObject::application with type QQmlApplication": 1,
+    "Cannot load property swing from <component>::pat with type QVariant": 1,
+    "Cannot load property target from <component>::cfg with type QVariant": 3,
+    "Cannot load property transpose from <component>::cfg with type QVariant": 1,
+    "Cannot load property type from <component>::meta with type QVariant": 1,
+    "Cannot load property vel from <component>::s with type QVariant": 1,
+    "Cannot load property vel from <component>::sel with type QVariant": 1,
+    "Cannot load property velScale from <component>::cfg with type QVariant": 3,
+    "Cannot load property visible from QtObject::inputMethod with type QObject": 1,
+    "Cannot load property x from <component>::modelData with type QVariant": 2,
+    "Cannot load property x from conversion to QVariant": 4,
+    "Cannot load property y from <component>::modelData with type QVariant": 1,
+    "Cannot load property y from <component>::pos with type QVariant": 1,
+    "Functions without type annotations won't be compiled": 84,
+    "No matching override found. Candidates:\ntype Color for argument 0 cannot be resolved\nFunction expects 2 arguments, but 1 were provided": 1,
+    "Type <component>::contentItem with type QQuickItem does not have a property highlightMoveDuration for writing": 1,
+    "Type UI::window with type QQuickWindowQmlImpl does not have a property setImmersive for calling": 1,
+    "method applyImmersive cannot be resolved": 1,
+    "method change cannot be resolved": 2,
+    "method initialize cannot be resolved": 2,
+    "method loadImportFrom cannot be resolved": 1,
+    "method restoreBackup cannot be resolved": 1,
+    "method saveSettings cannot be resolved": 1,
+    "method shareBackup cannot be resolved": 1,
+    "method writeBackupTo cannot be resolved": 1,
+    "method writeExportTo cannot be resolved": 1,
+    "method writeWavExportTo cannot be resolved": 1
+  }
+}

@@ -438,8 +438,16 @@ ApplicationWindow {
         initialItem: Page {
             header: Toolbar {
                 pager: swipeView
+                // Engine and preset, not the device name: which of your
+                // synths you are on is what the plug icon and the device
+                // picker are for, while *what the sound is* — engine, slot,
+                // name — is the thing you look up mid-session, and it was
+                // otherwise a page away on Home.
                 subtitle: Synth.connected
-                    ? (BluetoothManager.deviceName + (Synth.ready ? (" · " + Tr.t(Synth.engineName)) : (" · " + Tr.t("connecting…"))))
+                    ? (Synth.ready
+                       ? (Tr.t(Synth.engineName)
+                          + (UI.presetLabel.length > 0 ? (" · " + UI.presetLabel) : ""))
+                       : Tr.t("connecting…"))
                     : Tr.t("Not connected")
             }
 
@@ -549,6 +557,7 @@ ApplicationWindow {
                 ToneScreen {}
                 FilterEnvScreen {}
                 ModScreen {}
+                InputScreen {}
                 FxScreen {}
                 SequencerScreen {}
                 DrumsScreen {}
@@ -557,7 +566,6 @@ ApplicationWindow {
                 GraphScreen {}
                 PresetsScreen {}
                 PatchLibraryScreen {}
-                OsynthScreen {}
             }
 
             // The bottom performance strip: drum pads on the left, keyboard

@@ -29,6 +29,43 @@ int Settings::saveSetting(const QString& name, const QString& value) {
 void Settings::reloadCurrentSettings() {
   fillSettingsCacheDefaultValues();
   fillSettingsCacheCurrentValues();
+  // After the cache is whole, and here rather than in the constructor: a
+  // restored backup carries someone else's indices and comes back through this
+  // same funnel (App::onDatabaseRestoredAction).
+  migrateScreenOrder();
+}
+
+// UI.screens gained an Input page before FX and lost the osynth (Dev) page,
+// which moved every index from FX up by one and left index 12 naming nothing.
+// Two settings store one of those indices — the startup screen and the page
+// the last run was left on — and both would otherwise quietly point at the
+// wrong page. Remapped once, marked by screen_order_rev.
+//
+// The old order was: 0 Home, 1 Osc, 2 Flt, 3 Mod, 4 FX, 5 Seq, 6 Drum, 7 Arp,
+// 8 Loop, 9 Patch, 10 Pre, 11 Lib, 12 Dev.
+void Settings::migrateScreenOrder() {
+  if (settingsCache.value("screen_order_rev") == "1") return;
+  // Recorded before anything moves, and the migration abandoned if it cannot
+  // be: a remap that ran but failed to say so would run again on the next
+  // launch and shift the same index a second time. Failing here instead leaves
+  // every stored value exactly as it was, which is merely wrong rather than
+  // progressively wrong.
+  if (saveSetting(QStringLiteral("screen_order_rev"), QStringLiteral("1")) == 0) return;
+
+  const auto remap = [](const QString& value) {
+    bool ok = false;
+    const int idx = value.toInt(&ok);
+    if (!ok || idx < 4) return value;  // "last", Home..Mod: unmoved
+    if (idx == 12) return QStringLiteral("0");  // the page that is gone
+    if (idx > 12) return value;                 // not one of ours; leave it
+    return QString::number(idx + 1);
+  };
+
+  for (const QString& key :
+       {QStringLiteral("startup_screen"), QStringLiteral("last_swipeview_index")}) {
+    const QString moved = remap(settingsCache.value(key));
+    if (moved != settingsCache.value(key)) saveSetting(key, moved);
+  }
 }
 
 QString Settings::setting(const QString& name) const {
@@ -104,6 +141,10 @@ void Settings::fillSettingsCacheDefaultValues() {
   // in Main.qml/UI.qml; an out-of-range value falls back to Home there.
   settingsCache["startup_screen"] = "0";
   settingsCache["last_swipeview_index"] = "0";  // page left on the last run
+  // Which revision of UI.screens the two indices above were written against.
+  // Bumped whenever a page is inserted or removed, so migrateScreenOrder() can
+  // move them once and only once. "0" is the pre-Input-page order.
+  settingsCache["screen_order_rev"] = "0";
   // Horizontal drag = change page (SwipeView.interactive). Off by default:
   // nearly every page is covered in draggable controls, and a drag that starts
   // on one of them and is taken as a page swipe both misses the control and

@@ -57,7 +57,7 @@ Item {
         Label {
             width: parent.width
             horizontalAlignment: Text.AlignHCenter
-            text: root.meta.exists ? root.meta.name.split('.').pop() : ""
+            text: root.meta.exists ? UI.paramLabel(root.meta.name) : ""
             font.pointSize: UI.fontSize * 0.68
             elide: Text.ElideRight
             color: Material.foreground

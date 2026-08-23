@@ -200,7 +200,19 @@ Rectangle {
     }
 
     // Read back by App's key filter on every keystroke, so the switch is live.
-    function setTopRowDrums(on: bool): void {
+    // Deliberately left WITHOUT type annotations, unlike every other function
+    // here, so qmlcachegen leaves it interpreted.
+    //
+    // Annotated, it compiles — and the app then hangs on the first click of the
+    // drum toggle. Bisected to a four-way interaction: the hang needs this
+    // function compiled *and* at least one compiled function from each of three
+    // other groups in this file (see tools/qmlaot_bisect_keyboard.py for the
+    // sets). Any one of the four dropped and it runs fine, which is why this is
+    // a qmlcachegen defect rather than a wrong annotation — nothing about this
+    // signature is untrue. Leaving this one function interpreted breaks the
+    // interaction and costs a single call per click; skipping cachegen for the
+    // whole file would have cost ~122 compiled bindings.
+    function setTopRowDrums(on) {
         if (topRowDrums === on) return
         releaseSounding()
         topRowDrums = on
