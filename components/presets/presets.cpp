@@ -105,6 +105,29 @@ constexpr uint32_t kStateSettleMs = 5000;
 constexpr uint32_t kStateQuietMs = 200;
 constexpr uint32_t kStateMaxDeferMs = 180000;
 constexpr uint32_t kStatePollMs = 500;
+
+/* The same "wait for a gap in the audio" rule, applied to the writes the
+ * player asks for by name rather than to the ones the firmware decides on.
+ *
+ * The background writes above have always been gated and the explicit ones
+ * never were, which had it exactly backwards from the player's point of
+ * view: an autosave that glitches is a mystery, but a glitch on *save preset*
+ * is a glitch on the button you just pressed, while you were auditioning the
+ * sound you are saving. The stall is not marginal either — the DAC has four
+ * DMA buffers, 5.33 ms in total, and SPI_FLASH_ERASE_YIELD_DURATION_MS is 20,
+ * so one erase chunk holds the cache down for about four times the whole
+ * reservoir and parks core 1 with it.
+ *
+ * Short numbers, because unlike an autosave this one is *waiting on a person*
+ * — the button has been pressed and nothing visible happens until the file is
+ * written. 400 ms of patience buys the gap between two phrases; past that the
+ * write goes ahead and takes its glitch, which is the right trade when the
+ * alternative is a save that looks like it did not happen. looper.cpp refuses
+ * outright in the same situation, but a looper save is megabytes and a preset
+ * is kilobytes — deferring beats refusing at this size. */
+constexpr uint32_t kSaveQuietMs = 120;
+constexpr uint32_t kSaveWaitMs = 400;
+constexpr uint32_t kSavePollMs = 20;
 constexpr int kUserFirst = PRESETS_FACTORY_SLOTS;
 constexpr int kSlotCount = SYNTH_ENGINE_COUNT * PRESETS_PER_ENGINE;
 constexpr int kMaxPairs = (int)ParamStore::kMaxParams;
@@ -1760,6 +1783,30 @@ void state_tick(void) {
  * can decide to do — serialising the sequencer, writing the file — has to
  * happen on this task anyway: it is the single consumer of s_pairs, s_ids and
  * the graph staging buffer, and that is what makes those statics safe. */
+/* Hold the preset task until the output has been quiet for kSaveQuietMs, or
+ * until kSaveWaitMs runs out. See the constants for why the budget is small.
+ *
+ * Only the write paths call this. A *load* reads flash through the cache and
+ * costs nothing to speak of; it is erase and program that stop core 1. */
+void wait_for_quiet(const char* what) {
+    uint32_t waited = 0;
+    while (audio_io_quiet_ms() < kSaveQuietMs) {
+        if (waited >= kSaveWaitMs) {
+            /* Not silent, and not silent about it: this is the line that
+             * explains a click heard at the moment of saving. At INFO rather
+             * than DEBUG because it is the whole point of the wait, and at
+             * INFO rather than WARN because giving up after 400 ms is the
+             * designed outcome and not a fault. One line per save at most —
+             * the same task already logs the save itself. */
+            ESP_LOGI(TAG, "%s: no quiet window in %u ms — writing anyway",
+                     what, (unsigned)kSaveWaitMs);
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(kSavePollMs));
+        waited += kSavePollMs;
+    }
+}
+
 void preset_task(void*) {
     Req r;
     for (;;) {
@@ -1772,24 +1819,34 @@ void preset_task(void*) {
                 do_load(r.slot);
                 break;
             case OP_SAVE:
+                wait_for_quiet("preset save");
                 do_save(r.slot, r.name[0] != '\0' ? r.name : nullptr);
                 break;
             case OP_SEQ_LOAD:
                 do_seq_load(r.slot);
                 break;
             case OP_SEQ_SAVE:
+                wait_for_quiet("pattern save");
                 do_seq_save(r.slot);
                 break;
             case OP_SET_LOAD:
                 do_set_load(r.slot);
                 break;
             case OP_SET_SAVE:
+                wait_for_quiet("song save");
                 do_set_save(r.slot);
                 break;
             case OP_STATE_LOAD:
                 do_state_load();
                 break;
             case OP_STATE_SAVE:
+                /* Deliberately not gated on quiet, unlike the three saves
+                 * above. The routine path into this write is state_tick(),
+                 * which already waits; the only other way in is
+                 * presets_state_save_now(), whose caller is on its way to a
+                 * reboot with a 5 s deadline. Spending part of that deadline
+                 * listening for a gap would risk losing the session to save a
+                 * glitch nobody is around to hear. */
                 (void)do_state_save("forced");
                 if (s_state_done != nullptr) xSemaphoreGive(s_state_done);
                 break;

@@ -103,6 +103,7 @@
 #include "loop_stream.h"
 #include "synth_config.h"
 #include "synth_params.h"
+#include "synth_smooth.h"
 
 static const char* TAG = "looper";
 
@@ -397,12 +398,33 @@ TaskHandle_t s_ctl_task = nullptr;
  *
  * s_export_mutex is what makes a single struct enough: it is held across the
  * whole round trip, so there is never more than one request in flight and
- * loop_ctl can write its results straight back into it. The wait is
- * deliberately untimed — a request that timed out would leave loop_ctl about
- * to write into a buffer its caller had moved on from, and the honest fix for
- * that is not to have two. loop_ctl always answers: ctl_handle_export() gives
- * the semaphore on every path, and its longest single operation (a save) is
- * seconds, not forever. */
+ * loop_ctl can write its results straight back into it.
+ *
+ * The wait is bounded. It used to be portMAX_DELAY, on the reasoning that
+ * loop_ctl always answers — which is true of ctl_handle_export() itself but
+ * not of the task: the flag is serviced at the *end* of a pass that may first
+ * run a whole ctl_handle_load() off a card that has stopped responding. The
+ * caller is ble_cmd, and ble_cmd is also what flushes the ~20 Hz parameter
+ * events, so a wedged card took the entire control plane down with it and the
+ * app went silent with nothing to show for it. presets_state_save_now() had
+ * already settled the shape of the answer (drain, queue, bounded wait); this
+ * is that, plus the two things a looper timeout needs and a preset save does
+ * not:
+ *
+ *  - **Nothing loop_ctl writes may belong to the caller's stack.** A timed-out
+ *    caller returns and its frame goes away; loop_ctl may still be about to
+ *    fill the request. So the info reply lands in s_export_info, owned here,
+ *    and looper_export_info() copies it out only on success. `dst` stays the
+ *    caller's, and the contract is now explicit in looper.h: it must outlive
+ *    the call. Its one caller (ble_ctrl's s_dump) is a permanent allocation.
+ *
+ *  - **A late answer must not satisfy the next request.** Each call takes a
+ *    sequence number; loop_ctl publishes it as the ack before giving the
+ *    semaphore, and the caller keeps waiting until the ack is its own. The
+ *    drain before queuing handles the common case, the ack the race it
+ *    cannot cover. */
+constexpr uint32_t kExportWaitMs = 3000;
+
 struct ExportReq {
     bool read;      /* false: info; true: read */
     int source;     /* LOOPER_EXPORT_* */
@@ -412,10 +434,16 @@ struct ExportReq {
     uint32_t len;
     uint8_t* dst;
     looper_export_info_t* info;
+    uint32_t seq;   /* request id, matched against s_export_ack */
     uint32_t got;   /* out: bytes actually read */
     esp_err_t err;  /* out */
 };
 ExportReq s_export_req{};
+/* loop_ctl's landing pad for an info reply — see the handover note above on
+ * why this cannot be the caller's own struct. */
+looper_export_info_t s_export_info{};
+uint32_t s_export_seq = 0;                  /* next id; s_export_mutex held */
+std::atomic<uint32_t> s_export_ack{0};      /* id loop_ctl last answered */
 SemaphoreHandle_t s_export_mutex = nullptr; /* one caller at a time */
 SemaphoreHandle_t s_export_done = nullptr;  /* loop_ctl -> that caller */
 
@@ -426,6 +454,48 @@ bool a_rec = false;
 bool a_rec_pending = false;
 int a_rec_trk = 0;
 uint32_t a_pos = 0;
+
+/* ---- playback gain: per track, plus one for the transport ----
+ *
+ * loop.lvlN used to be read raw and held constant for the block, which made
+ * it the only audio gain in the tree without a slew — master.volume, the
+ * voice-manager mute, drums.level, every FX mix and in.gain are all ramped or
+ * smoothed. Muting a loud track was therefore a step discontinuity, and a
+ * slider drag a staircase at the BLE update rate.
+ *
+ * Block-rate one-poles, not per-sample interpolation, for the reason
+ * synth_smooth.h gives: at 750 blocks/s the residual staircase is far below
+ * audibility and the inner loop — which is a serial ADPCM dependency chain
+ * over PSRAM, the most expensive place in this file to add a multiply-add —
+ * keeps exactly the cost it had. Settled (the overwhelmingly common case)
+ * each one is a single float compare.
+ *
+ * They are advanced once per *block*, before the segment loop, because a
+ * block can be split at a loop wrap and a per-segment update would step twice
+ * at different rates across one buffer. */
+osynth::dsp::Smooth a_lvl_sm[LOOP_TRACKS];
+float a_lvl[LOOP_TRACKS] = {};
+
+/* Transport ramp. Stopping used to clear a_playing on a block boundary, which
+ * truncated whatever the tracks were playing mid-waveform — the loudest click
+ * the looper had, since it lands on the full mix of every filled track at
+ * once. The stop is now deferred behind this ramp: the *record* side of the
+ * command still happens immediately (the take must close where the player
+ * said it did), and only the playback side waits for the gain to reach zero.
+ *
+ * 1/32 per block is 32 blocks, ~43 ms, and the size of the step matters more
+ * than the length: the last one before silence is 1/32 of full scale, i.e.
+ * 30 dB down on the discontinuity this replaces. A ramp inside the block
+ * would remove even that, at the price of a multiply-add per sample per track
+ * in the decode loop — which is the one cost this file consistently refuses.
+ *
+ * Detach is deliberately *not* ramped. It is half of the buffer-free
+ * handshake (loop_ctl waits two render boundaries and then frees), and
+ * stretching the audio task's last read of those buffers over 43 ms would
+ * mean the handshake no longer bounds what it exists to bound. */
+constexpr float kStopStep = 1.0f / 32.0f;
+float a_out_g = 1.0f;
+bool a_stopping = false;
 
 /* Streamed-mode transport state (audio task only).
  *  a_win_off — bytes of the current pass already released from the track's
@@ -614,14 +684,42 @@ void audio_close_rec(bool keep_partial) {
     s_rec_trk_live.store(-1, std::memory_order_release);
 }
 
+/* The playback half of a stop, applied once the ramp has run out (or at once,
+ * when there is nothing sounding to ramp). Separated from the record half,
+ * which audio_close_rec() does immediately: where a take ends is the player's
+ * decision and must not move by 43 ms, while where the *sound* ends is this
+ * function's, and it is allowed to arrive late. */
+inline void audio_finish_stop() {
+    a_stopping = false;
+    a_out_g = 1.0f;
+    a_playing = false;
+    a_pos = 0;
+    audio_reset_dec();
+    audio_reset_windows();
+    /* Nothing is sounding now, so the next start belongs at whatever level
+     * the sliders currently say rather than sliding up to it. */
+    for (int t = 0; t < LOOP_TRACKS; ++t) osynth::dsp::smooth_reset(a_lvl_sm[t]);
+}
+
 void audio_apply_cmd(uint32_t cmd) {
+    /* Any command arriving mid-ramp completes the stop first, so everything
+     * below sees exactly the transport state it saw before the ramp existed.
+     * That matters most for kCmdRec, which distinguishes "record from here"
+     * from "punch in at the next wrap" by testing (!a_playing && a_pos == 0)
+     * — a test a half-finished stop would answer wrongly for ~43 ms. */
+    if (a_stopping) audio_finish_stop();
+
     switch (cmd & 0xFF00u) {
         case kCmdStop:
             audio_close_rec(true); /* the take stands; loop_ctl pads its tail */
-            a_playing = false;
-            a_pos = 0;
-            audio_reset_dec();
-            audio_reset_windows();
+            if (a_playing && s_loop_frames.load(std::memory_order_relaxed) > 0) {
+                /* Something is sounding: ramp it out and finish the stop when
+                 * the gain reaches zero. */
+                a_stopping = true;
+                a_out_g = 1.0f;
+            } else {
+                audio_finish_stop();
+            }
             break;
         case kCmdPlay:
             audio_close_rec(false);
@@ -1777,8 +1875,11 @@ void ctl_handle_export() {
         r.err = r.read ? ctl_export_read(r, &r.got)
                        : ctl_export_info(r.source, r.slot, r.info);
     }
-    /* Unconditional, and the last thing this function does: the caller is
-     * blocked on it with no timeout, so no path here may return without it. */
+    /* Unconditional, and the last thing this function does: a caller may be
+     * blocked on it, so no path here may return without it. The ack is
+     * published *before* the give, so a caller the give wakes always sees the
+     * sequence number that belongs to the results it is about to read. */
+    s_export_ack.store(r.seq, std::memory_order_release);
     xSemaphoreGive(s_export_done);
 }
 
@@ -1790,13 +1891,66 @@ esp_err_t export_call(ExportReq& req) {
     if (xTaskGetCurrentTaskHandle() == s_ctl_task) {
         return ESP_ERR_INVALID_STATE; /* would wait for itself */
     }
+    req.got = 0;
     xSemaphoreTake(s_export_mutex, portMAX_DELAY);
+    TickType_t left = pdMS_TO_TICKS(kExportWaitMs);
+
+    /* First, wait out anything still in loop_ctl's hands. A request that timed
+     * out was abandoned, not cancelled, and loop_ctl reads its work *out of
+     * s_export_req* as it goes — so overwriting that struct while one is in
+     * flight would hand it a request torn across two callers, and would then
+     * let its answer be mistaken for this call's. `ack == seq` is exactly
+     * "loop_ctl has finished the last one it was given"; in the ordinary case
+     * that is already true and this costs one atomic load. */
+    while (s_export_ack.load(std::memory_order_acquire) != s_export_seq &&
+           left > 0) {
+        const TickType_t t0 = xTaskGetTickCount();
+        if (xSemaphoreTake(s_export_done, left) != pdTRUE) {
+            left = 0;
+        } else {
+            const TickType_t spent = xTaskGetTickCount() - t0;
+            left = (spent < left) ? (TickType_t)(left - spent) : 0;
+        }
+    }
+    if (left == 0) {
+        /* Either a previous request is still outstanding or clearing it used
+         * the whole budget. Return without issuing: a request nobody stays to
+         * collect is only work for the next caller to wait out. */
+        xSemaphoreGive(s_export_mutex);
+        ESP_LOGW(TAG, "export handover timed out after %u ms — loop_ctl busy",
+                 (unsigned)kExportWaitMs);
+        return ESP_ERR_TIMEOUT;
+    }
+    /* Nothing outstanding, so any give still queued belongs to a request that
+     * has already been accounted for. Drop it, and the wait below starts
+     * empty. */
+    xSemaphoreTake(s_export_done, 0);
+
+    const uint32_t seq = ++s_export_seq;
+    req.seq = seq;
     s_export_req = req;
     s_flags.fetch_or(kFlagExport, std::memory_order_release);
     xTaskNotifyGive(s_ctl_task);
-    xSemaphoreTake(s_export_done, portMAX_DELAY);
-    const esp_err_t err = s_export_req.err;
-    req.got = s_export_req.got;
+
+    esp_err_t err = ESP_ERR_TIMEOUT;
+    if (xSemaphoreTake(s_export_done, left) == pdTRUE) {
+        /* The drain above means this can only be our own answer, and
+         * ctl_handle_export() publishes the ack before the give — but check
+         * it anyway, because the cost of being wrong here is returning
+         * another request's bytes as this one's. */
+        if (s_export_ack.load(std::memory_order_acquire) == seq) {
+            err = s_export_req.err;
+            req.got = s_export_req.got;
+        }
+    }
+    if (err == ESP_ERR_TIMEOUT) {
+        req.got = 0;
+        /* Not silent: loop_ctl could not reach the flag inside the window,
+         * which on an SD build is almost always the card. The caller answers
+         * BUSY and the app retries; the request stays outstanding and the
+         * next call waits it out above rather than tearing it. */
+        ESP_LOGW(TAG, "export handover timed out — loop_ctl did not answer");
+    }
     xSemaphoreGive(s_export_mutex);
     return err;
 }
@@ -2087,8 +2241,21 @@ extern "C" esp_err_t looper_init(void) {
      * connection, so this is a quiet correction rather than an event. */
     if (card_now) ps.set(LOOP_PID_MONO, 0.0f, ParamOrigin::Internal);
 #endif
+    /* Stand-in for a level that did not register, so the block-rate gain loop
+     * in looper_process() stays a straight walk over all eight tracks with no
+     * null test in it. Every add() above is checked, so this cannot be
+     * reached today; it exists because that loop now touches every track
+     * rather than only the filled ones, and "cannot happen" is a poor thing
+     * to have a render-path dereference resting on. Unity, not zero: a
+     * missing control should leave the track audible. */
+    static const std::atomic<float> s_lvl_unity{1.0f};
     for (int t = 0; t < LOOP_TRACKS; ++t) {
         s_lvl[t] = ps.valuePtr((uint16_t)LOOP_PID_LEVEL(t));
+        if (s_lvl[t] == nullptr) {
+            ESP_LOGE(TAG, "loop.lvl%d did not register — track pinned to unity",
+                     t + 1);
+            s_lvl[t] = &s_lvl_unity;
+        }
         s_buf[t].store(nullptr, std::memory_order_relaxed);
         s_cap_bytes[t] = 0;
     }
@@ -2152,8 +2319,15 @@ extern "C" esp_err_t looper_export_info(int source, int slot,
     req.read = false;
     req.source = source;
     req.slot = slot;
-    req.info = out;
-    return export_call(req);
+    /* Deliberately not `out`: a timed-out call returns while loop_ctl may
+     * still be about to fill this in, and `out` is a stack local in every
+     * caller. s_export_info is ours and outlives the request; loop_ctl is one
+     * task, so the copy below cannot interleave with the write that produced
+     * the matching ack. */
+    req.info = &s_export_info;
+    const esp_err_t err = export_call(req);
+    if (err == ESP_OK) *out = s_export_info;
+    return err;
 }
 
 extern "C" esp_err_t looper_export_read(int source, int slot, int track,
@@ -2182,6 +2356,19 @@ extern "C" void SYNTH_RENDER_IRAM looper_process(float* __restrict__ l,
     if (cmd != 0) audio_apply_cmd(cmd);
 
     uint32_t L = s_loop_frames.load(std::memory_order_relaxed);
+
+    /* Advance the stop ramp before the idle test, not after: loop_ctl can
+     * clear the set from under a ramp that is still running, and a stop left
+     * half-applied because the early-out swallowed it would sit there with
+     * a_playing true until the next command. */
+    if (a_stopping) {
+        a_out_g -= kStopStep;
+        if (a_out_g <= 0.0f || L == 0) {
+            audio_finish_stop();
+            L = s_loop_frames.load(std::memory_order_relaxed);
+        }
+    }
+
     if (!a_playing || (L == 0 && !a_rec)) {
         /* idle, or "playing" with nothing recorded yet */
         s_pos.store(a_pos, std::memory_order_relaxed);
@@ -2196,6 +2383,17 @@ extern "C" void SYNTH_RENDER_IRAM looper_process(float* __restrict__ l,
     /* Track source (S31): same latching rule as the format above. */
     const bool streamed = s_streamed.load(std::memory_order_relaxed);
 #endif
+
+    /* Per-track playback gain for this whole block, transport ramp folded in.
+     * Every track is advanced, including ones that are not mixed this pass:
+     * a smoother only tracks what it is fed, so skipping a muted or starved
+     * track would have it rejoin at a stale value and step. The int16 scale
+     * rides along so the decode loops multiply once, exactly as before. */
+    for (int t = 0; t < LOOP_TRACKS; ++t) {
+        a_lvl[t] = osynth::dsp::smooth_lin(
+                       a_lvl_sm[t], s_lvl[t]->load(std::memory_order_relaxed)) *
+                   a_out_g * (1.0f / 32768.0f);
+    }
 
     size_t i = 0;
     while (i < frames) {
@@ -2319,8 +2517,7 @@ extern "C" void SYNTH_RENDER_IRAM looper_process(float* __restrict__ l,
                         ls::g_underruns.fetch_add(1, std::memory_order_relaxed);
                         continue;
                     }
-                    const float g = s_lvl[t]->load(std::memory_order_relaxed) *
-                                    (1.0f / 32768.0f);
+                    const float g = a_lvl[t];
                     if (mono) {
                         osynth::adpcm::Ch& c = a_dec[t][0];
                         for (size_t k = 0; k < n; ++k) {
@@ -2357,8 +2554,7 @@ extern "C" void SYNTH_RENDER_IRAM looper_process(float* __restrict__ l,
 #endif
                 const uint8_t* tb = s_buf[t].load(std::memory_order_acquire);
                 if (tb == nullptr) continue;
-                const float g = s_lvl[t]->load(std::memory_order_relaxed) *
-                                (1.0f / 32768.0f);
+                const float g = a_lvl[t];
                 /* no level-0 skip: the decoder must stay in lock-step with
                  * the transport — ADPCM cannot re-enter mid-stream */
                 if (mono) {

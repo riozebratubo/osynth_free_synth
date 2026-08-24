@@ -18,6 +18,18 @@
  *    guarantee the audio task no longer dereferences valuePtr()s of a range
  *    being removed (the engine-switch protocol mutes and detaches the old
  *    engine first).
+ *  - describe() / valuePtr() / listIds() are lock-free and may run on a
+ *    *different* task from a concurrent add(). That is not hypothetical:
+ *    graph::register_slot() registers from ble_cmd, the engine-switch task
+ *    registers from its own, and presets, persist and ble_ctrl all read
+ *    metadata from theirs. The id table is therefore published with
+ *    release/acquire — a reader that sees an id registered is guaranteed to
+ *    see the whole ParamDesc behind it, rather than a half-written one whose
+ *    `name` is a pointer mid-store. What such a reader can still see is a
+ *    *stale* descriptor, if the slot was recycled by a switch after the
+ *    lookup: that is the same "an id does not identify a parameter across a
+ *    switch" property generation() exists for, and it costs wrong metadata,
+ *    never a bad dereference (a ParamDesc's strings are all static).
  */
 #pragma once
 
@@ -223,9 +235,13 @@ private:
     void notify(uint16_t id, float value, ParamOrigin origin);
 
     Entry entries_[kMaxParams];
-    int16_t index_[PID_SPACE_END]; /* id -> slot in entries_, -1 if none */
+    /* id -> slot in entries_, -1 if none. Atomic because it is the handle a
+     * lock-free reader follows into entries_: the store that publishes a slot
+     * is the release that makes the descriptor written before it visible. Same
+     * two bytes per id as the plain int16_t it replaced. */
+    std::atomic<int16_t> index_[PID_SPACE_END];
     ListenerSlot listeners_[kMaxListeners];
-    size_t count_ = 0;
+    std::atomic<size_t> count_{0};
     std::atomic<uint32_t> generation_{0};
 };
 

@@ -76,8 +76,17 @@ inline float line_tap(const Line& l) {
 /* x[n - d] with fractional d in [1, len-3], linear interpolation; call
  * before pushing sample n. */
 inline float line_read_frac(const Line& l, float d) {
-    const uint32_t di = (uint32_t)d;
+    uint32_t di = (uint32_t)d;
     const float frac = d - (float)di;
+    /* The wrap below corrects by exactly one length, so it only recovers a
+     * `di` that is already inside the line: past `l.w + l.len` the unsigned
+     * subtraction underflows and one correction leaves an index far outside
+     * the buffer. Every caller in the tree bounds `d` correctly today, but
+     * this primitive is shared by fx, fx_gpl and graph and the invariant
+     * lived only in the comment above — one compare is cheaper than that
+     * staying true by inspection. Also fences a negative or non-finite `d`,
+     * whose conversion here is undefined. */
+    if (di >= l.len) di = l.len - 1;
     uint32_t i0 = l.w + l.len - di;
     if (i0 >= l.len) i0 -= l.len;
     const uint32_t i1 = (i0 == 0) ? l.len - 1 : i0 - 1;
@@ -89,6 +98,12 @@ inline float line_read_frac(const Line& l, float d) {
  * Schroeder bank and an early-reflection field are built from, where the
  * delay never moves and the interpolator would only cost cycles. */
 inline float line_read(const Line& l, uint32_t d) {
+    /* Same one-length wrap and therefore the same bound as line_read_frac():
+     * the taps here are scaled by a `size` parameter at block rate rather
+     * than being compile-time constants, so "the read never exceeds the
+     * allocation" is a property of five separate reverb topologies rather
+     * than of this function. */
+    if (d >= l.len) d = l.len - 1;
     uint32_t i = l.w + l.len - d;
     if (i >= l.len) i -= l.len;
     return (float)l.buf[i] * (1.0f / 32768.0f);

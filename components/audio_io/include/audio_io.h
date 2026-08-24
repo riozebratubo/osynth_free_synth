@@ -142,6 +142,19 @@ typedef struct {
      * microphone 46 dB down and a data pin nobody drives both read 0.00. Here
      * the first is a small number and the second is exactly zero. */
     uint32_t mic_raw_or[2];
+    /* Blocks the primary sink refused, cumulative, and the esp_err_t of the
+     * most recent one (0 = none since boot).
+     *
+     * A counter rather than a log line, because the log line was on the audio
+     * task. It was rate-limited to roughly one a second rather than latched,
+     * so a sink that had stopped accepting blocks bought a fresh ~9 ms of
+     * blocking console write every second — on top of whatever the fault was
+     * already doing to the output. Reporting it here costs the audio task a
+     * counter increment and moves the printing to the heartbeat, which is a
+     * control task and can afford it. Not read-and-reset: this is a running
+     * total, and what matters is whether it is climbing. */
+    uint32_t sink_errors;
+    int32_t sink_last_err;
 } audio_io_stats_t;
 
 /* Called once per block from the render chain (audio task only) with the

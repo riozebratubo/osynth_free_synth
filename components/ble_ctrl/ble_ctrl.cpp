@@ -160,7 +160,7 @@ enum : uint8_t {
      * synth only ever sends what was just asked for. */
     OP_LOOP_DUMP = 0x3D,
     /* The user chord set (S41). Twelve slots of eight bytes is not
-     * parameter space � a parameter is one float � and it is far too
+     * parameter space — a parameter is one float — and it is far too
      * small to deserve the chunking the sequencer opcodes need, so it is
      * one opcode that carries the whole set in a single frame either way.
      * Direction byte first, like every other read-and-write op here. */
@@ -1190,6 +1190,11 @@ uint8_t dump_status(esp_err_t err) {
         /* "Not now": a take is open, or the flash backend wants the transport
          * stopped. Both clear on their own, which is what BUSY means here. */
         case ESP_ERR_INVALID_STATE: return ST_BUSY;
+        /* Also "not now", and the same retry: loop_ctl could not reach the
+         * request inside its window — almost always a card that has stopped
+         * answering mid-pass (looper.h). MALFORMED, which this used to fall
+         * through to, would tell the app its own frame was wrong. */
+        case ESP_ERR_TIMEOUT: return ST_BUSY;
         default: return ST_MALFORMED;
     }
 }
@@ -1737,7 +1742,14 @@ int ctrl_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt* ctxt,
     (void)conn;
     (void)attr;
     if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return BLE_ATT_ERR_UNLIKELY;
-    CmdBuf cmd;
+    /* Zeroed, not merely filled to `len`. xQueueSend copies the whole struct
+     * whatever the frame's length, so without this every short frame carries
+     * ~250 bytes of this task's stack into the queue. handle_frame() never
+     * reads past cmd.len, so nothing acts on them — but they are the NimBLE
+     * host task's stack, they sit in a queue any command can be dumped from
+     * while debugging, and the memset is cheaper than reasoning about that
+     * every time this function is read. */
+    CmdBuf cmd = {};
     uint16_t len = 0;
     if (ble_hs_mbuf_to_flat(ctxt->om, cmd.data, sizeof(cmd.data), &len) != 0) {
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;

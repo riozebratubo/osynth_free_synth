@@ -36,8 +36,27 @@ extern float g_sine[kSineN + 1]; /* +1: wraparound sample for interpolation */
 /* LUT sine; phase01 must be in [0, 1). */
 inline float sine01(float phase01) {
     const float x = phase01 * (float)detail::kSineN;
-    const uint32_t i = (uint32_t)x;
-    const float frac = x - (float)i;
+    uint32_t i = (uint32_t)x;
+    float frac = x - (float)i;
+    /* Every caller wraps before it gets here — but a wrap can hand over
+     * exactly 1.0f, which is out of the documented range and reads one
+     * element past the table. `p -= floorf(p)` on a p a hair below zero is
+     * the case: it produces 1 - eps, and below 1 the float32 ulp is 2^-24,
+     * so anything within ~6e-8 of the boundary rounds to 1.0f. The graph's
+     * phase-modulation path (graph_render.cpp) crosses zero at audio rate
+     * and hits that every few million samples.
+     *
+     * Clamping to the top interval is exact rather than approximate:
+     * g_sine[kSineN] is sin(2*pi), so frac = 1 returns the guard sample
+     * itself, which is the same value phase 1.0 should give.
+     *
+     * The unsigned compare also fences a negative or non-finite phase, whose
+     * float-to-int conversion is undefined and can produce an arbitrary
+     * index — a wild read rather than a wrong sample. */
+    if (i >= detail::kSineN) {
+        i = detail::kSineN - 1;
+        frac = 1.0f;
+    }
     return detail::g_sine[i] + frac * (detail::g_sine[i + 1] - detail::g_sine[i]);
 }
 
@@ -90,13 +109,36 @@ inline float fast_tanh(float x) {
 }
 
 /* Triangle wavefolder: reflects at ±1 instead of clipping, so overdrive
- * adds harmonics rather than removing them. */
+ * adds harmonics rather than removing them.
+ *
+ * Closed form, not the reflect-until-it-fits loop this used to be. That loop
+ * removed exactly 4 from |x| per pass, so its cost was O(|x|) — and above
+ * |x| ~ 2^25 it did not terminate at all, because adding 4 to a float that
+ * large is a no-op and the two reflections became each other's inverse.
+ * ±inf never terminated either.
+ *
+ * That was reachable, not theoretical. A graph patch of osc -> filter ->
+ * filter -> shaper -> out costs exactly the 440-point budget, svf_coef()
+ * clamps k at 0.04 (Q ~ 25), and two resonant stages put ~625 into a shaper
+ * whose drive reaches 24 — ~3750 passes per sample per voice, which is the
+ * audio task missing every deadline it has. The master FX drive (up to 64x)
+ * has the same shape on a hot bus.
+ *
+ * The identity below is the same curve: a period-4 triangle that is the
+ * identity on [-1, 1] and reflects at each ±1 crossing. Verified against the
+ * old loop at the reflection points and beyond (±1, ±1.5, 2.5, 3.5, 5, 7).
+ * The in-range fast path is what almost every sample takes and is one
+ * compare pair, as it was before.
+ *
+ * Non-finite input returns silence rather than propagating: the old loop
+ * passed NaN straight through to the bus, where soft_clip() and the int16
+ * conversion turn it into undefined behaviour a few stages later. */
 inline float fold(float x) {
-    while (x > 1.0f || x < -1.0f) {
-        if (x > 1.0f) x = 2.0f - x;
-        if (x < -1.0f) x = -2.0f - x;
-    }
-    return x;
+    if (x > -1.0f && x < 1.0f) return x; /* also rejects NaN, handled below */
+    if (!std::isfinite(x)) return 0.0f;
+    float y = (x + 1.0f) * 0.25f; /* period 4 -> period 1, zero at x = -1 */
+    y = (y - floorf(y)) * 4.0f;   /* [0, 4) */
+    return (y > 2.0f ? 4.0f - y : y) - 1.0f;
 }
 
 /* ---- white noise (xorshift32) ---- */

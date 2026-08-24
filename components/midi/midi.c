@@ -25,6 +25,8 @@
 #include <stddef.h>
 
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "engine_additive.h"
 #include "engine_fm.h"
@@ -205,15 +207,66 @@ static bool cc_apply(const cc_entry_t* map, size_t len, uint8_t cc,
     return false;
 }
 
-/* NRPN state (omni: one global selection). CC 99/98 select a parameter id
- * (MSB = id >> 7, LSB = id & 0x7F — ids fit 14 bits by construction),
- * CC 6/38 carry the 14-bit data value, applied on the LSB (38) so a partial
- * value never fires a listener (e.g. an engine switch via 0x0001). Senders
- * must emit the full 99/98/6/38 sequence (`sendmidi ... nrpn <id> <val>`
- * does). An RPN selection (CC 101/100) cancels the NRPN selection. */
-static uint8_t s_nrpn_msb = 0x7F; /* 0x7F/0x7F: nothing selected */
-static uint8_t s_nrpn_lsb = 0x7F;
-static uint8_t s_nrpn_data_msb = 0;
+/* NRPN state. CC 99/98 select a parameter id (MSB = id >> 7, LSB = id & 0x7F —
+ * ids fit 14 bits by construction), CC 6/38 carry the 14-bit data value,
+ * applied on the LSB (38) so a partial value never fires a listener (e.g. an
+ * engine switch via 0x0001). Senders must emit the full 99/98/6/38 sequence
+ * (`sendmidi ... nrpn <id> <val>` does). An RPN selection (CC 101/100) cancels
+ * the NRPN selection.
+ *
+ * One latch per *source*, not one globally, because this router has several
+ * producers running concurrently on their own tasks — the TinyUSB task or the
+ * USB host client task, the serial-MIDI task, ble_cmd, and seqarp's clock
+ * task re-entering with its own emissions. A single latch is four bytes of
+ * read-modify-write state carried across four separate messages, so two
+ * streams sending NRPN at once interleave: the 6/38 of one lands on the 99/98
+ * of the other. NRPN reaches *any* registered parameter by id, so the damage
+ * is not confined to whatever those two senders were aiming at.
+ *
+ * A transaction belongs to the stream that sent it, which is exactly what
+ * keying on the delivering task gives — with no signature change to the
+ * router's entry points, which several components call. Two concurrent NRPN
+ * senders is the realistic case (a DIN cable and a USB controller); four slots
+ * covers every producer that exists, and a fifth would share the last one,
+ * which is what the whole file did before.
+ *
+ * The claim is the only part that races, and the spinlock covers it. Once a
+ * slot is owned, only its own task touches it. */
+#define NRPN_SOURCES 4
+
+typedef struct {
+    void* owner;      /* task handle of the stream; NULL = unclaimed */
+    uint8_t msb, lsb; /* 0x7F/0x7F: nothing selected */
+    uint8_t data_msb;
+} nrpn_state_t;
+
+static nrpn_state_t s_nrpn[NRPN_SOURCES] = {
+    {NULL, 0x7F, 0x7F, 0}, {NULL, 0x7F, 0x7F, 0},
+    {NULL, 0x7F, 0x7F, 0}, {NULL, 0x7F, 0x7F, 0},
+};
+static portMUX_TYPE s_nrpn_mux = portMUX_INITIALIZER_UNLOCKED;
+
+/* The latch belonging to whichever task delivered this message, claiming a
+ * slot on first sight. Never NULL: past four producers the last slot is
+ * shared, which is no worse than the single global latch this replaced. */
+static nrpn_state_t* nrpn_for_caller(void) {
+    void* const me = (void*)xTaskGetCurrentTaskHandle();
+    nrpn_state_t* slot = &s_nrpn[NRPN_SOURCES - 1];
+    portENTER_CRITICAL(&s_nrpn_mux);
+    for (int i = 0; i < NRPN_SOURCES; ++i) {
+        if (s_nrpn[i].owner == me) {
+            slot = &s_nrpn[i];
+            break;
+        }
+        if (s_nrpn[i].owner == NULL) {
+            s_nrpn[i].owner = me;
+            slot = &s_nrpn[i];
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&s_nrpn_mux);
+    return slot;
+}
 
 static bool cc_route(uint8_t cc, uint8_t value) {
     if (cc_apply(CC_TABLE(k_cc_common), cc, value)) return true;
@@ -305,22 +358,21 @@ void midi_route_note(uint8_t status, uint8_t d1, uint8_t d2,
                 case 1: /* mod wheel: the matrix `wheel` source (S9) */
                     synth_mod_set_wheel((float)d2 * (1.0f / 127.0f));
                     break;
-                case 6:
+                case 6: {
                     /* NRPN data entry MSB: stored, applied on the LSB.
                      * Ignored while nothing is selected, so a stray CC 6 —
                      * an RPN sequence, a generic controller a DAW happens to
                      * map there — cannot sit in the latch and corrupt the top
                      * 7 bits of whatever NRPN write comes next. */
-                    if (s_nrpn_msb != 0x7F || s_nrpn_lsb != 0x7F) {
-                        s_nrpn_data_msb = d2;
-                    }
+                    nrpn_state_t* n = nrpn_for_caller();
+                    if (n->msb != 0x7F || n->lsb != 0x7F) n->data_msb = d2;
                     break;
+                }
                 case 38: { /* NRPN data entry LSB: apply the 14-bit value */
-                    if (s_nrpn_msb == 0x7F && s_nrpn_lsb == 0x7F) break;
-                    const uint16_t pid =
-                        ((uint16_t)s_nrpn_msb << 7) | s_nrpn_lsb;
-                    const uint16_t val =
-                        ((uint16_t)s_nrpn_data_msb << 7) | d2;
+                    nrpn_state_t* n = nrpn_for_caller();
+                    if (n->msb == 0x7F && n->lsb == 0x7F) break;
+                    const uint16_t pid = ((uint16_t)n->msb << 7) | n->lsb;
+                    const uint16_t val = ((uint16_t)n->data_msb << 7) | d2;
                     if (synth_param_set_nrpn_midi(pid, val)) {
                         ESP_LOGD(TAG, "nrpn 0x%04x = %u", pid, val);
                     } else {
@@ -336,20 +388,26 @@ void midi_route_note(uint8_t status, uint8_t d1, uint8_t d2,
                  * value can never inherit the MSB of the previous one. A
                  * sender that streams LSB-only updates (CC 38 alone) after a
                  * full sequence still works: only 98/99 clear it. */
-                case 98: /* NRPN select LSB */
-                    s_nrpn_lsb = d2;
-                    s_nrpn_data_msb = 0;
+                case 98: { /* NRPN select LSB */
+                    nrpn_state_t* n = nrpn_for_caller();
+                    n->lsb = d2;
+                    n->data_msb = 0;
                     break;
-                case 99: /* NRPN select MSB */
-                    s_nrpn_msb = d2;
-                    s_nrpn_data_msb = 0;
+                }
+                case 99: { /* NRPN select MSB */
+                    nrpn_state_t* n = nrpn_for_caller();
+                    n->msb = d2;
+                    n->data_msb = 0;
                     break;
+                }
                 case 100: /* RPN select: cancels any NRPN selection */
-                case 101:
-                    s_nrpn_msb = 0x7F;
-                    s_nrpn_lsb = 0x7F;
-                    s_nrpn_data_msb = 0;
+                case 101: {
+                    nrpn_state_t* n = nrpn_for_caller();
+                    n->msb = 0x7F;
+                    n->lsb = 0x7F;
+                    n->data_msb = 0;
                     break;
+                }
                 case 120: /* all sound off */
                     voice_manager_all_sound_off();
                     /* Chord mode holds a table of keys and a reference count

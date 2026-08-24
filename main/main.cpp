@@ -64,6 +64,7 @@
 #include "synth_mod.h"
 #include "synth_params.h"
 #include "synth_voice.h"
+#include "synth_warn.h"
 #include "usb_dev.h"
 #include "usb_host_midi.h"
 
@@ -447,10 +448,71 @@ extern "C" void app_main(void) {
                       * the margin is deliberate: truncating this line would
                       * take out exactly the number that says the input is
                       * not clocking. */
+    char sink_seg[64];
+    /* Deadline misses as of the previous beat, for the warning below. The
+     * first beat only records the baseline: the blocks either side of
+     * codec_init() reliably miss a few, that is a boot transient rather than
+     * a patch being too expensive, and a warning that fires on every boot is
+     * a warning nobody reads by the time it matters. */
+    uint32_t last_underruns = 0;
+    bool underrun_primed = false;
+    bool underrun_warned = false;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(SYNTH_HEARTBEAT_MS));
+        /* Anything the render path wanted to say since the last beat. It
+         * cannot say it itself — a console write from the audio task is a
+         * dropout (synth_warn.h) — so this is where those lines appear. */
+        osynth::dsp::render_warn_drain();
         audio_io_get_stats(&st);
         const synth_engine_t* eng = engines_get(engines_active_type());
+        /* Appended only when the sink has actually refused a block, so a
+         * healthy board's heartbeat stays the length it has always been.
+         * Worth separating from `underruns` beside it: this count climbing
+         * while that one stays flat means the sink is rejecting blocks the
+         * render produced on time, which is a different fault from the render
+         * missing its deadline and used to look identical from here. */
+        if (st.sink_errors != 0) {
+            snprintf(sink_seg, sizeof(sink_seg), " | SINK ERR %u (%s)",
+                     (unsigned)st.sink_errors,
+                     esp_err_to_name((esp_err_t)st.sink_last_err));
+        } else {
+            sink_seg[0] = '\0';
+        }
+
+        /* The render chain missed deadlines during this window.
+         *
+         * This is the backstop for what graph_compile.h's budget structurally
+         * cannot check. That budget prices a patch against a reservation
+         * table, and two entries in it are known not to be worst cases — the
+         * FX bus is measured with its default units on rather than all
+         * fourteen, and the drum bus is reserved at zero. What the switches
+         * and the pattern will be after the patch is accepted is not a
+         * property of the patch, so no compile-time check can see this
+         * coming. The alternative to saying it here is the user diagnosing an
+         * underrun by ear, which is the exact outcome the budget exists to
+         * prevent.
+         *
+         * Said once per run, not once per beat: it is a standing condition,
+         * and repeating it every second would push the log out of the window
+         * where the rest of the diagnosis lives. The per-stage percentages on
+         * the heartbeat line itself are what to read after it — they say
+         * which stage to take the load out of. */
+        if (st.underruns != last_underruns) {
+            if (!underrun_primed) {
+                underrun_primed = true;
+            } else if (!underrun_warned) {
+                underrun_warned = true;
+                ESP_LOGW(TAG,
+                         "render missed its deadline (%u blocks) — the bus is "
+                         "over budget for what is switched on. Watch the "
+                         "[voi fx loop] split on the line below; if a modular "
+                         "patch is loaded, its cost was priced against "
+                         "graph_compile.h's reservation table, which does not "
+                         "cover a fully loaded FX bus or a busy drum kit.",
+                         (unsigned)(st.underruns - last_underruns));
+            }
+            last_underruns = st.underruns;
+        }
 #if SYNTH_ENABLE_USB
         /* Occupancy of the USB EP-IN FIFO as a percentage of its depth, over
          * the heartbeat window. The class driver steers this toward 50% by
@@ -560,7 +622,7 @@ extern "C" void app_main(void) {
                  "alive | heap free %u (min %u) | audio blocks %u, underruns %u, "
                  "dsp %.1f%% (pk %.1f%%) [voi %.1f fx %.1f loop %.1f] | "
                  "out pk %.2f, sat %u | voices %u/%d (+%d drum) | engine %s | "
-                 "ble %s%s%s",
+                 "ble %s%s%s%s",
                  (unsigned)esp_get_free_heap_size(),
                  (unsigned)esp_get_minimum_free_heap_size(),
                  (unsigned)st.blocks_rendered, (unsigned)st.underruns,
@@ -570,7 +632,7 @@ extern "C" void app_main(void) {
                  (unsigned)voice_manager_active_voices(),
                  SYNTH_VOICES, drums_active_voices(),
                  eng != nullptr ? eng->name : "none",
-                 ble_ctrl_state_name(), usb_seg, in_seg);
+                 ble_ctrl_state_name(), usb_seg, in_seg, sink_seg);
     }
 #endif
 }

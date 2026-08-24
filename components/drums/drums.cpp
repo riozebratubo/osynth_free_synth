@@ -60,6 +60,13 @@ constexpr int kVoices = 8;
 constexpr int kTrigRing = 32;
 /* A choke does not cut dead — that clicks. It ramps out over this long. */
 constexpr float kChokeMs = 2.5f;
+/* Nor does a steal, or a kit swap. Those cannot ramp the voice — something
+ * else is taking it over this instant — so they leave a decaying copy of its
+ * last output behind instead. A time constant, not a length: at 1.5 ms the
+ * tail is 29 dB down after 5 ms and past the 16-bit floor after about 12,
+ * which is short enough never to read as a second sound and long enough to
+ * have no edge of its own. */
+constexpr float kDeclickMs = 1.5f;
 /* Below this the decay envelope has nothing left to say; free the voice. */
 constexpr float kSilence = 1.0f / 4096.0f;
 constexpr int kMaxKits = 9; /* factory + 8 from the SD card */
@@ -119,12 +126,21 @@ struct Voice {
     float env = 0.0f;
     float env_coef = 1.0f;
     uint32_t delay = 0; /* frames still to wait before the first sample */
+    /* Declick tail, held across the voice being taken away from whatever was
+     * playing on it. See steal_declick(). Zero when there is nothing to
+     * decay, which is almost always. */
+    float fade_l = 0.0f, fade_r = 0.0f;
     uint8_t format = DRUM_FMT_ULAW;
     uint8_t slot = 0;
     uint8_t choke = 0;
     bool active = false;
 };
 Voice s_voice[kVoices];
+
+/* One-pole coefficient for the steal/kit-swap declick, ~1.5 ms. Filled once
+ * in drums_init() rather than derived per steal: this is a constant, and the
+ * audio task is the wrong place to reach into flash for expf() to say so. */
+float s_declick_coef = 0.0f;
 
 /* ---- trigger ring (producers: any control task) ---- */
 struct Trig {
@@ -247,6 +263,45 @@ void SYNTH_RENDER_IRAM refresh_slots(const drum_kit_t* kit) {
     }
 }
 
+/* Take over a sounding voice without cutting it dead.
+ *
+ * alloc_voice() steals the quietest voice when all eight are busy, and
+ * start_voice() then overwrites pos, data and env — so whatever that voice
+ * was emitting went to zero in one sample. Stealing the quietest limits the
+ * damage; it does not remove it, and with a crash, a ride and a pair of hats
+ * all ringing, "quietest" can still be well above audibility. The choke path
+ * ten lines below already refuses to do this ("a choke does not cut dead —
+ * that clicks") and rings its victim out over kChokeMs; a steal had no
+ * equivalent.
+ *
+ * The tail is the voice's last output value decaying to zero with a kDeclickMs
+ * time constant — so it is inaudible within about 5 ms and the pass below
+ * drops it a few blocks later. That is the standard declick and it is all
+ * this needs to be: what makes the step audible is the discontinuity, not the
+ * missing sample content. Kept on the Voice being taken over rather than in a
+ * pool of its own, because there is exactly one tail per steal and the slot
+ * is right there.
+ *
+ * The same treatment covers the kit swap in drums_pre_fx(), which silences
+ * every voice at once because their sample pointers are about to be freed:
+ * this captures a *value*, not a pointer, so the tail outlives the kit. */
+void SYNTH_RENDER_IRAM steal_declick(Voice& v) {
+    if (!v.active || v.data == nullptr || v.frames == 0) return;
+    /* Still waiting out its delay: it has emitted nothing, so there is no
+     * discontinuity to cover. */
+    if (v.delay > 0) return;
+    const uint32_t i0 = (uint32_t)v.pos;
+    if (i0 >= v.frames - 1) return; /* ran off the end; already silent */
+    const float frac = v.pos - (float)i0;
+    const float a = sample_at(v.data, v.format, i0);
+    const float b = sample_at(v.data, v.format, i0 + 1);
+    const float s = (a + (b - a) * frac) * v.env;
+    /* Accumulated, not assigned: a voice stolen twice inside one block would
+     * otherwise drop the first tail and reintroduce the step it was covering. */
+    v.fade_l += s * v.gain_l;
+    v.fade_r += s * v.gain_r;
+}
+
 int alloc_voice() {
     int best = -1;
     float quietest = 1e30f;
@@ -281,6 +336,11 @@ void start_voice(const drum_kit_t* kit, int slot, int vel, uint32_t delay) {
     const int idx = alloc_voice();
     if (idx < 0) return;
     Voice& v = s_voice[idx];
+    /* Before anything below overwrites it: if this slot was sounding, it was
+     * stolen, and the step that leaves has to be covered. Costs nothing in
+     * the common case — alloc_voice() returns an inactive voice whenever one
+     * is free, and steal_declick() returns immediately on those. */
+    steal_declick(v);
     const float amp = (float)vel * (1.0f / 127.0f);
     v.data = s.data;
     v.frames = s.frames;
@@ -314,6 +374,31 @@ void SYNTH_RENDER_IRAM render_voices(const drum_kit_t* kit, size_t frames) {
     memset(s_dr, 0, frames * sizeof(float));
     (void)kit;
     int live = 0;
+
+    /* Declick tails from stolen voices, ahead of the voices themselves — a
+     * slot can be both fading out from what it was and playing what took it
+     * over, and the two simply sum. One compare per voice per block when
+     * nothing is fading, which is the ordinary case; the decay itself never
+     * enters the sample loop below. */
+    for (int i = 0; i < kVoices; ++i) {
+        Voice& v = s_voice[i];
+        if (v.fade_l == 0.0f && v.fade_r == 0.0f) continue;
+        float fl = v.fade_l, fr = v.fade_r;
+        for (size_t n = 0; n < frames; ++n) {
+            s_dl[n] += fl;
+            s_dr[n] += fr;
+            fl *= s_declick_coef;
+            fr *= s_declick_coef;
+        }
+        /* Under the 16-bit floor: stop rather than decay forever, so the
+         * compare above goes back to being the whole cost. */
+        if (fabsf(fl) < kSilence && fabsf(fr) < kSilence) {
+            fl = 0.0f;
+            fr = 0.0f;
+        }
+        v.fade_l = fl;
+        v.fade_r = fr;
+    }
 
     for (int i = 0; i < kVoices; ++i) {
         Voice& v = s_voice[i];
@@ -515,6 +600,11 @@ void SYNTH_RENDER_IRAM drums_pre_fx(float* l, float* r, size_t frames) {
     if (SYNTH_UNLIKELY(s_kill_voices.load(std::memory_order_acquire) ||
                        kit != s_last_kit)) {
         for (int i = 0; i < kVoices; ++i) {
+            /* Same declick as a steal, and needed more here: this drops every
+             * sounding voice at once, so the step is the whole drum bus. The
+             * tail is a captured *value*, so it stays valid after the old
+             * kit's sample data is freed. */
+            steal_declick(s_voice[i]);
             s_voice[i].active = false;
             s_voice[i].data = nullptr;
         }
@@ -699,6 +789,7 @@ esp_err_t drums_kit_select(int index) {
 
 esp_err_t drums_init(void) {
     build_ulaw_table();
+    s_declick_coef = expf(-1.0f / (kDeclickMs * 1e-3f * kSampleRate));
 
     /* The factory kit must be parsed before the parameters are built: slot
      * pan defaults come from it. A failure here is not fatal — the bus just

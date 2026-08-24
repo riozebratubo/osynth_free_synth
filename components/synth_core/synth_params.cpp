@@ -22,6 +22,17 @@ static const char* TAG = "params";
  * The value hot path (get/set/valuePtr reads) is atomic and lock-free. */
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 
+/* index_ is read on the audio task (synth_mod_begin_block -> describe), so it
+ * has to lower to an inline load, not a libatomic call that could take a lock
+ * inside the render deadline. Both toolchains define
+ * __GCC_ATOMIC_SHORT_LOCK_FREE as 2 today — Xtensa has L16UI/S16I and the
+ * RISC-V build has the A extension — and this is what says so out loud, so a
+ * target or toolchain where it stops being true fails the build instead of
+ * quietly putting a function call in the audio path. Widening index_ to
+ * int32_t is the fix if it ever fires; it costs 4 KB of DRAM. */
+static_assert(std::atomic<int16_t>::is_always_lock_free,
+              "ParamStore::index_ must be lock-free: the audio task reads it");
+
 ParamStore& ParamStore::instance() {
     static ParamStore store;
     return store;
@@ -29,13 +40,18 @@ ParamStore& ParamStore::instance() {
 
 ParamStore::ParamStore() {
     for (size_t i = 0; i < PID_SPACE_END; ++i) {
-        index_[i] = -1;
+        index_[i].store(-1, std::memory_order_relaxed);
     }
 }
 
 ParamStore::Entry* ParamStore::entryFor(uint16_t id) {
     if (id >= PID_SPACE_END) return nullptr;
-    int16_t slot = index_[id];
+    /* Acquire, pairing with the release in add(): a reader on another task
+     * that sees this slot published sees the descriptor stored into it first,
+     * rather than one whose `name` pointer is still half written. Free at
+     * run time on both targets — it is the compiler's reordering this stops,
+     * not the core's. */
+    const int16_t slot = index_[id].load(std::memory_order_acquire);
     return (slot >= 0) ? &entries_[slot] : nullptr;
 }
 
@@ -52,7 +68,7 @@ bool ParamStore::add(const ParamDesc& desc) {
     bool duplicate = false;
     bool full = true;
     portENTER_CRITICAL(&s_mux);
-    if (index_[desc.id] >= 0) {
+    if (index_[desc.id].load(std::memory_order_relaxed) >= 0) {
         duplicate = true;
     } else {
         for (size_t slot = 0; slot < kMaxParams; ++slot) {
@@ -60,8 +76,12 @@ bool ParamStore::add(const ParamDesc& desc) {
                 entries_[slot].desc = desc;
                 entries_[slot].used = true;
                 entries_[slot].value.store(desc.def, std::memory_order_relaxed);
-                index_[desc.id] = static_cast<int16_t>(slot);
-                ++count_;
+                /* Last, and a release: this store is what makes the id
+                 * findable, so everything above it has to be visible to a
+                 * reader that follows it. */
+                index_[desc.id].store(static_cast<int16_t>(slot),
+                                      std::memory_order_release);
+                count_.fetch_add(1, std::memory_order_relaxed);
                 full = false;
                 break;
             }
@@ -95,11 +115,15 @@ size_t ParamStore::removeRange(uint16_t first, uint16_t last_exclusive) {
     size_t removed = 0;
     portENTER_CRITICAL(&s_mux);
     for (uint16_t id = first; id < last_exclusive; ++id) {
-        int16_t slot = index_[id];
+        const int16_t slot = index_[id].load(std::memory_order_relaxed);
         if (slot >= 0) {
+            /* Unpublish first, so no reader can start following this id into
+             * a slot add() is about to hand to a different parameter. One
+             * already inside entryFor() keeps a valid pointer to a valid
+             * descriptor either way — see the threading note in the header. */
+            index_[id].store(-1, std::memory_order_release);
             entries_[slot].used = false;
-            index_[id] = -1;
-            --count_;
+            count_.fetch_sub(1, std::memory_order_relaxed);
             ++removed;
         }
     }
@@ -165,13 +189,13 @@ const ParamDesc* ParamStore::describe(uint16_t id) const {
 }
 
 size_t ParamStore::count() const {
-    return count_;
+    return count_.load(std::memory_order_relaxed);
 }
 
 size_t ParamStore::listIds(uint16_t* out, size_t max) const {
     size_t n = 0;
     for (uint16_t id = 0; id < PID_SPACE_END && n < max; ++id) {
-        if (index_[id] >= 0) out[n++] = id;
+        if (index_[id].load(std::memory_order_acquire) >= 0) out[n++] = id;
     }
     return n;
 }
@@ -228,7 +252,17 @@ void ParamStore::notify(uint16_t id, float value, ParamOrigin origin) {
 
 void ParamStore::dump() const {
     static const char* kTypeNames[] = {"float", "int", "enum", "bool"};
-    ESP_LOGI(TAG, "registry: %u parameter(s)", (unsigned)count_);
+    /* Headroom, not just the count. Overflow is per-parameter and partial —
+     * add() drops the one that did not fit and says so — and the components
+     * that treat a partial registration as fatal (the engines, the drum bus,
+     * seqarp) are ESP_ERROR_CHECKed at boot, so the store filling up presents
+     * as a bootloop rather than as a missing control. This line is what makes
+     * the margin visible before that happens: it is printed at the peak of
+     * boot registration, and the peak that matters at run time is a full
+     * modular graph, which is larger. Raise kMaxParams if it gets close. */
+    const size_t n = count();
+    ESP_LOGI(TAG, "registry: %u parameter(s), %u of %u slots free",
+             (unsigned)n, (unsigned)(kMaxParams - n), (unsigned)kMaxParams);
     for (uint16_t id = 0; id < PID_SPACE_END; ++id) {
         const Entry* e = entryFor(id);
         if (e == nullptr) continue;

@@ -103,6 +103,7 @@
 #include "synth_params.h"
 #include "synth_reverb_algo.h"
 #include "synth_smooth.h"
+#include "synth_warn.h"
 
 /* The reverb algorithms. Below synth_config.h on purpose: SYNTH_ENABLE_FX_GPL
  * is defined there, and an unguarded fx_gpl.h would drag GPL declarations
@@ -843,7 +844,41 @@ inline float gated(float on, float mix) { return on >= 0.5f ? mix : 0.0f; }
 
 constexpr float kMixSlew = 0.08f;      /* per block: ~90 ms for a full swing */
 constexpr float kSilent = 1e-3f;
-constexpr uint32_t kScrubChunk = 4096; /* samples zeroed per block while dry */
+
+/* Samples zeroed per block while dry — a budget for the *whole bus*, not for
+ * each unit.
+ *
+ * It used to be per unit, and every unit on the chain is called every block,
+ * so the ceiling was the sum of all of them rather than this number. That is
+ * not a corner case: the mixes all decay with the same kMixSlew, so switching
+ * several units off together — a preset that clears the enable switches, an
+ * app "bypass all" — drops them through kSilent within a block or two of each
+ * other and starts every scrub at once. Delay (144 016 samples across two
+ * lines), granular (36 016), reverb (~39 000 for freeverb, more for the GPL
+ * algorithms), chorus and flanger overlap for the first several blocks: five
+ * units x 8 KB = 40 KB of PSRAM memset inside a 1.33 ms block, on top of the
+ * bus, the voices, the drums and the looper. That is over budget on an S3 and
+ * tight on a P4 — an underrun caused by the machinery that exists to stop a
+ * click.
+ *
+ * Shared, the common case is unchanged: one unit switched off still gets the
+ * whole 4096 and finishes in exactly the blocks it used to. Only the pile-up
+ * is bounded, and it costs elapsed time rather than deadline — the scrubs
+ * serialise, so total time is the same sum of samples over the same rate no
+ * matter how they are ordered.
+ *
+ * What that lengthens is the window in which re-enabling a unit can still
+ * replay stale audio, because unit_gate() abandons a scrub the moment the
+ * target comes back up. Worst case moves from ~48 ms (delay alone) to ~73 ms
+ * (delay, then granular, then reverb). Both are far under the ~90 ms the mix
+ * crossfade takes to become audible on the way back in, which is the deadline
+ * that actually matters here. */
+constexpr uint32_t kScrubChunk = 4096;
+
+/* What is left of this block's kScrubChunk. Refreshed at the top of
+ * fx_process(); drawn down by every scrub_step() in the chain, including the
+ * reverb's second cursor. Audio task only. */
+uint32_t s_scrub_budget = 0;
 
 struct UnitState {
     float mix = 0.0f; /* smoothed */
@@ -853,9 +888,12 @@ struct UnitState {
     uint32_t sp = 0;
 };
 
-/* Zeroes up to kScrubChunk samples across the unit's lines; true when done. */
+/* Zeroes as much of the unit's lines as this block's shared budget allows;
+ * true when the unit is done. A block whose budget was already spent by an
+ * earlier unit makes no progress and returns false, which is exactly what a
+ * caller wants: the unit stays dry and tries again next block. */
 bool SYNTH_RENDER_IRAM scrub_step(UnitState& u, Line* const* lines, size_t n) {
-    uint32_t budget = kScrubChunk;
+    uint32_t budget = s_scrub_budget;
     while (budget > 0 && u.sl < n) {
         Line* l = lines[u.sl];
         if (l->buf == nullptr || u.sp >= l->len) {
@@ -869,6 +907,7 @@ bool SYNTH_RENDER_IRAM scrub_step(UnitState& u, Line* const* lines, size_t n) {
         u.sp += c;
         budget -= c;
     }
+    s_scrub_budget = budget;
     return u.sl >= n;
 }
 
@@ -1685,9 +1724,12 @@ void SYNTH_RENDER_IRAM vocoder_process(float* __restrict__ bl,
                       audio_io_in_mono(s_voc_mod, frames);
     if (!live && !frozen && !v.warned) {
         v.warned = true;
-        ESP_LOGW(TAG,
-                 "vocoder: no audio input on this build — it has nothing to "
-                 "analyse and will stay silent");
+        /* Queued, not printed: this runs on the audio task, where the console
+         * write would itself be a dropout (synth_warn.h). */
+        osynth::dsp::render_warn(
+            TAG,
+            "vocoder: no audio input on this build — it has nothing to "
+            "analyse and will stay silent");
     }
 
     /* One-pole follower coefficients. Attack and release are separate because
@@ -2459,7 +2501,31 @@ struct ReverbFx {
      * off, this clears a topology nobody is listening to yet. Sharing one
      * cursor would have the later reason silently cancel the earlier one. */
     UnitState sw;
-    bool switching = false;
+
+    /* ---- algorithm change, as a fade rather than a cut ----
+     *
+     * Dropping straight into the scrub was a step on the *dry* path, which is
+     * the half nobody notices when writing this. The unit renders
+     * `(1-m)*dry + wet`; a block that returns early renders `dry` at unity.
+     * At fx.rev.mix = 0.5 that is +6 dB on the dry signal in one sample, and
+     * -6 dB again ~40 ms later when the scrub finishes. Two clicks, on a
+     * control whose whole point is that the wet tail changes character.
+     *
+     * `sw_f` rides on top of the unit gate and takes `m` to zero before the
+     * topology changes and back afterwards. At sw_f = 0 the mix law already
+     * gives dry = 1, wet = 0 — exactly what the scrub phase emits — so the
+     * three phases join continuously and nothing steps. Coming back needs no
+     * fade of its own on the wet side (the lines are zero, so the new
+     * algorithm builds up from silence); what sw_f is restoring is the dry
+     * gain, which does have to ramp.
+     *
+     * The old algorithm keeps rendering all the way through the fade-out,
+     * which is what makes its tail decay rather than vanish: `run` below is
+     * `algo`, the committed selection, never the requested one. */
+    enum : uint8_t { kSwIdle, kSwOut, kSwScrub, kSwIn };
+    uint8_t sw_phase = kSwIdle;
+    uint8_t want = 0xFF; /* the selection sw_phase is working toward */
+    float sw_f = 1.0f;   /* 1 = the committed algorithm is fully present */
 
     Line pre_l, pre_r;                 /* shared pre-delay, in front of all */
     float tone_l = 0.0f, tone_r = 0.0f;
@@ -2484,6 +2550,14 @@ bool s_rev_dusk_ok = false;
  * time you enable the effect, which is the worst kind to go looking for. */
 constexpr size_t kRevLineMax = 48;
 Line* s_rev_lines[kRevLineMax];
+
+/* Algorithm-change fade, per block. 1/8 gives ~11 ms each way — the same
+ * ramp the voice manager's engine-switch mute uses, and for the same reason:
+ * it is long enough to bury a full-scale gain step and short enough that the
+ * gap either side of the scrub does not grow noticeably. The scrub between
+ * them is 10-40 blocks on its own, so this adds about a third to a change
+ * nobody is playing through. */
+constexpr float kSwStep = 0.125f;
 
 inline float comb_next(Comb& c, float in, float fb, float damp) {
     const float out = line_tap(c.line);
@@ -2588,42 +2662,129 @@ void SYNTH_RENDER_IRAM reverb_process(float* __restrict__ bl,
      * clamps 2 and 3 down to 1 already, so reaching here means the algorithm
      * exists but could not allocate, and a reverb the player can hear beats
      * a reverb that is correct about being absent. */
-    int algo = (int)pv(REV_ALGO);
-    if (algo < 0 || algo >= kRevAlgoCount) algo = kAlgoFreeverb;
-    osynth::fx::RevAlgorithm* impl = rev_impl(algo);
-    if (algo != kAlgoFreeverb && impl == nullptr) algo = kAlgoFreeverb;
+    int sel = (int)pv(REV_ALGO);
+    if (sel < 0 || sel >= kRevAlgoCount) sel = kAlgoFreeverb;
+    if (sel != kAlgoFreeverb && rev_impl(sel) == nullptr) sel = kAlgoFreeverb;
 
-    const float m =
+    float m =
         unit_gate(v.u, gated(pv(REV_ON), pvm(REV_MIX)), s_rev_lines, v.nlines);
     if (m < 0.0f) {
         for (int i = 0; i < 8; ++i) v.cl[i].store = v.cr[i].store = 0.0f;
         v.tone_l = v.tone_r = 0.0f;
+        /* Switched off, so an algorithm change costs nothing to commit: there
+         * is no tail to fade and no dry gain to step. Doing it here rather
+         * than deferring also keeps `u`'s bypass scrub honest — that scrub
+         * walks s_rev_lines, and leaving a change pending would have it
+         * finish clearing a line set the array no longer describes.
+         *
+         * The new set still has to be cleared before anything is heard of it,
+         * and the phase machine is how: parking in kSwScrub with the fade
+         * already down means re-enabling scrubs first and rises in second,
+         * which is the same path a change made while playing takes. */
+        if (v.algo != (uint8_t)sel) {
+            v.algo = (uint8_t)sel;
+            v.nlines = (uint8_t)rev_collect_lines(v.algo);
+            osynth::fx::RevAlgorithm* a = rev_impl(v.algo);
+            if (a != nullptr) a->reset();
+            v.sw.sl = 0;
+            v.sw.sp = 0;
+            v.sw_f = 0.0f;
+            v.sw_phase = ReverbFx::kSwScrub;
+        }
+        v.want = v.algo;
         return;
     }
 
     /* Changing topology mid-tail. The new algorithm's lines hold whatever the
      * last selection left in them, and there is no arrangement of a few
-     * hundred KB of memset that fits in a 1.33 ms block, so the unit goes
-     * quiet and scrubs a chunk per block — about 40 ms at the largest
-     * algorithm. A brief gap on an algorithm change is what the plugins these
-     * came from do too; a burst of somebody else's reverb tail is not. */
-    if (algo != v.algo) {
-        v.algo = (uint8_t)algo;
-        v.nlines = (uint8_t)rev_collect_lines(algo);
-        if (impl != nullptr) {
-            impl->reset();
-        } else {
-            for (int i = 0; i < 8; ++i) v.cl[i].store = v.cr[i].store = 0.0f;
-        }
-        v.tone_l = v.tone_r = 0.0f;
+     * hundred KB of memset that fits in a 1.33 ms block, so the unit fades
+     * out, scrubs a chunk per block — about 40 ms at the largest algorithm —
+     * and fades back in. A brief gap on an algorithm change is what the
+     * plugins these came from do too; a burst of somebody else's reverb tail
+     * is not, and nor is a step on the dry path either side of the gap (see
+     * the sw_f note on ReverbFx).
+     *
+     * The requested selection is latched every block, so changing your mind
+     * mid-switch lands on the last thing you picked rather than queuing. */
+    v.want = (uint8_t)sel;
+    if (v.algo == 0xFF) {
+        /* First block ever: no old algorithm to fade out of, and the lines
+         * are calloc'd silent. Commit straight into the scrub with the fade
+         * already down, so the unit rises in over kSwStep like every other
+         * change instead of arriving at full mix. */
+        v.algo = v.want;
+        v.nlines = (uint8_t)rev_collect_lines(v.algo);
         v.sw.sl = 0;
         v.sw.sp = 0;
-        v.switching = true;
+        v.sw_f = 0.0f;
+        v.sw_phase = ReverbFx::kSwScrub;
+    } else if (v.sw_phase == ReverbFx::kSwIdle && v.want != v.algo) {
+        v.sw_phase = ReverbFx::kSwOut;
     }
-    if (v.switching) {
-        if (scrub_step(v.sw, s_rev_lines, v.nlines)) v.switching = false;
-        return; /* dry through; the wet is not ready to be heard */
+
+    switch (v.sw_phase) {
+        case ReverbFx::kSwOut:
+            v.sw_f -= kSwStep;
+            if (v.sw_f <= 0.0f) {
+                v.sw_f = 0.0f;
+                /* Commit. Nothing is audible at sw_f = 0, so this is the one
+                 * point where the topology may change without a step. */
+                v.algo = v.want;
+                v.nlines = (uint8_t)rev_collect_lines(v.algo);
+                osynth::fx::RevAlgorithm* a = rev_impl(v.algo);
+                if (a != nullptr) {
+                    a->reset();
+                } else {
+                    for (int i = 0; i < 8; ++i) {
+                        v.cl[i].store = v.cr[i].store = 0.0f;
+                    }
+                }
+                v.tone_l = v.tone_r = 0.0f;
+                v.sw.sl = 0;
+                v.sw.sp = 0;
+                v.sw_phase = ReverbFx::kSwScrub;
+                /* Not `break`. Falling through would run the algorithm just
+                 * committed over lines the scrub has not reached yet, and
+                 * then mix the result at sw_f = 0 — the same silence this
+                 * returns, for the cost of a block of the most expensive
+                 * stage on the bus, spent priming state that is about to be
+                 * zeroed underneath it. */
+                return;
+            }
+            break;
+        case ReverbFx::kSwScrub:
+            if (scrub_step(v.sw, s_rev_lines, v.nlines)) {
+                /* Changed selection again while the lines were being cleared:
+                 * go back out rather than in. sw_f is already 0, so kSwOut
+                 * commits on its very next block and nothing is heard of the
+                 * algorithm nobody ended up choosing. */
+                v.sw_phase = (v.want != v.algo) ? ReverbFx::kSwOut
+                                                : ReverbFx::kSwIn;
+            }
+            return; /* dry through — sw_f is 0, so this is continuous */
+        case ReverbFx::kSwIn:
+            v.sw_f += kSwStep;
+            if (v.sw_f >= 1.0f) {
+                v.sw_f = 1.0f;
+                v.sw_phase = ReverbFx::kSwIdle;
+            }
+            break;
+        default:
+            break;
     }
+    m *= v.sw_f;
+
+    /* What actually renders below is the committed algorithm, not the
+     * requested one: during kSwOut they differ, and the old one has a tail
+     * that has to keep decaying while it fades.
+     *
+     * v.algo only ever takes a value `sel` was validated into, so the null
+     * check cannot fire — it is kept because the dispatch below dereferences
+     * `impl` for every algorithm but freeverb, and that invariant lives three
+     * assignments away rather than on this line. */
+    int algo = v.algo;
+    osynth::fx::RevAlgorithm* impl = rev_impl(algo);
+    if (algo != kAlgoFreeverb && impl == nullptr) algo = kAlgoFreeverb;
 
     /* ---- shared front: pre-delay ---- */
     const float pre_ms = osynth::dsp::smooth_lin(v.s_pre, pvm(REV_PRE));
@@ -3313,9 +3474,24 @@ esp_err_t fx_init(void) {
     ParamStore& ps = ParamStore::instance();
     const size_t added = ps.add(kParams, P_COUNT);
     if (added != P_COUNT) {
-        ESP_LOGE(TAG, "registered %u/%u params", (unsigned)added,
-                 (unsigned)P_COUNT);
-        return ESP_FAIL;
+        /* ESP_OK with the bus left down, not ESP_FAIL. main.cpp
+         * ESP_ERROR_CHECKs this call, so failing would turn a full parameter
+         * store into a bootloop — on an instrument whose voices, drums,
+         * sequencer and looper are all fine and only its effects are not.
+         *
+         * Safe to do here specifically, and not in the engines next door:
+         * fx.h exposes exactly two functions, and fx_process() returns on
+         * `s_up` before anything reads the s_p[] pointers that a partial
+         * registration would have left null. Leaving it false is a bus that
+         * is bypassed, which is the same answer this file already gives an
+         * effect whose delay line could not be allocated. */
+        ESP_LOGE(TAG,
+                 "registered %u/%u params — FX bus disabled for this boot "
+                 "(the parameter store is full; see the registry headroom "
+                 "line above)",
+                 (unsigned)added, (unsigned)P_COUNT);
+        ps.removeRange(osynth::PID_FX_BASE, osynth::PID_SEQARP_BASE);
+        return ESP_OK;
     }
     for (size_t i = 0; i < P_COUNT; ++i) {
         s_p[i] = ps.valuePtr(kParams[i].id);
@@ -3385,6 +3561,38 @@ esp_err_t fx_init(void) {
 
 void SYNTH_RENDER_IRAM fx_process(float* l, float* r, size_t frames) {
     if (!s_up || l == nullptr || r == nullptr) return;
+    /* Three units on this bus stage through block-sized statics — the two
+     * noise-reduction sources (s_nr_src_l/r) and the reverb's pre-delay tap
+     * (s_rev_wl/wr). The vocoder and nr_process each tested `frames` for
+     * themselves; anr_process did too, and reverb_process did not, which made
+     * the contract something you had to reconstruct by reading five units.
+     * Testing it once here is what the contract actually is — the render
+     * callback passes exactly SYNTH_BLOCK_SIZE — and it covers whatever gets
+     * added to the chain next.
+     *
+     * Clamped rather than refused, so an over-long block still comes out
+     * effected for as much of itself as the scratch can hold; logged once,
+     * because if this ever fires it is a caller bug and the tail of every
+     * block is silently going past the FX bus untouched. */
+    if (frames > SYNTH_BLOCK_SIZE) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            /* Deferred to a control task (synth_warn.h), which also costs the
+             * message its two numbers: SYNTH_BLOCK_SIZE is a build constant
+             * and the caller's frame count is whatever it is, so naming the
+             * constant is enough to find the caller that disagreed with it. */
+            osynth::dsp::render_warn(
+                TAG,
+                "fx_process called with more than SYNTH_BLOCK_SIZE frames — "
+                "clamping; the rest of every block is bypassing the bus");
+        }
+        frames = SYNTH_BLOCK_SIZE;
+    }
+    /* One bypass-scrub allowance for the whole chain, spent in call order by
+     * whichever units are dry this block — see kScrubChunk. */
+    s_scrub_budget = kScrubChunk;
+
     /* First: every unit below reads its parameters through pvm(), which
      * consumes what this writes. */
     lfo_update(frames);

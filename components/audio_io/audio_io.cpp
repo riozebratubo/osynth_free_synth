@@ -435,10 +435,14 @@ void SYNTH_RENDER_IRAM audio_task(void*) {
         }
 
         /* Blocking write: the sink's DMA (or timer) is the real clock. */
-        esp_err_t err = s_sink->write(s_out, SYNTH_BLOCK_SIZE);
-        if (err != ESP_OK && (s_stats.blocks_rendered % 750u) == 1u) {
-            ESP_LOGW(TAG, "sink '%s' write failed: %s", s_sink->name,
-                     esp_err_to_name(err));
+        const esp_err_t err = s_sink->write(s_out, SYNTH_BLOCK_SIZE);
+        if (SYNTH_UNLIKELY(err != ESP_OK)) {
+            /* Counted, not logged — see sink_errors in audio_io.h. The
+             * heartbeat prints it, with the name this err resolves to. */
+            portENTER_CRITICAL(&s_stats_mux);
+            s_stats.sink_errors++;
+            s_stats.sink_last_err = (int32_t)err;
+            portEXIT_CRITICAL(&s_stats_mux);
         }
     }
 }

@@ -82,36 +82,103 @@ namespace osynth::graph {
  * SYNTH_VOICES x SYNTH_BLOCK_SIZE floats. */
 inline constexpr int kMaxBufs = 6;
 
-/* Reject above this many cost units (1000 = the whole per-block budget at
- * full polyphony).
+/* ---- what the graph is allowed to cost ----
  *
- * Measured on an ESP32-S3 at 240 MHz, 8 voices, block 64 (S28 calibration):
+ * The budget is what is left of the block after everything *else* in
+ * render_chain() has taken its share, so it is derived here from a
+ * reservation per stage rather than written down as a number. Two reasons for
+ * the arithmetic being in the code instead of in the paragraph it used to
+ * live in: the total can no longer drift away from the reasons for it, and a
+ * stage that gets measured later is one line to change rather than a sum to
+ * redo by hand.
  *
- *   FX bus, always on, default reverb        18.3 %
- *   looper                                    0.4 %
- *   idle per-block overhead                   1.0 %
- *   peak / EMA ratio, observed          1.30 - 1.40
+ * Scale: 1000 units = the whole per-block CPU budget at full polyphony, so
+ * one unit is 0.1 % of the block and the percentages below convert by x10.
+ *
+ * Measured on an ESP32-S3 at 240 MHz, 8 voices, block 64 (S28 calibration),
+ * except where marked. The stages are exactly the calls render_chain() makes,
+ * in order — that list is the thing this table has to stay in step with. */
+namespace budget {
+
+/* The block is not allowed to run to 100 %: the render is bursty and the
+ * check has only the EMA to work with, so the ceiling is on the *peak* and
+ * the observed peak/EMA ratio converts it. 1.30-1.40 observed; the worst is
+ * the one to reserve against. */
+inline constexpr float kPeakCeilingPct = 90.0f;
+inline constexpr float kPeakEmaRatio = 1.40f;
+
+/* audio_in_capture(), for every compiled device. audio_io.cpp puts one device
+ * at ~0.7 % of the block and reads *every* device every block by design, so a
+ * two-input board pays twice. Reserved on all builds rather than only where
+ * an input is compiled: a build-dependent budget would mean a patch saved on
+ * one board being refused on another, which is a worse failure than 14 units
+ * of headroom on a board with no input socket. */
+inline constexpr float kInputPct = 1.4f;
+
+/* fx_process(). Measured with the bus in its default state — which has the
+ * reverb on — and NOT with all fourteen units enabled at once.
+ *
+ * This is the number the old note claimed was a worst case and was not. It is
+ * left at the measurement rather than inflated to a guess, because a guess is
+ * how this constant went wrong twice already; what changed is that it no
+ * longer *says* it covers the worst case. A patch that fits with the default
+ * bus and underruns once you switch on the delay, the granular delay and the
+ * vocoder is a real and currently unguarded case — see kUnmeasuredNote. */
+inline constexpr float kFxPct = 18.3f;
+
+/* looper_process(). Measured idle. Eight tracks of serial ADPCM decode out of
+ * PSRAM is not this number, and nobody has measured what it is. */
+inline constexpr float kLooperPct = 0.4f;
+
+/* drums_pre_fx() + drums_post_fx() + drums_render_click().
+ *
+ * Unmeasured, and reserved at zero, which is what the budget was already
+ * doing by leaving the drum bus out of its table entirely — this line exists
+ * so that the omission is visible in the arithmetic instead of absent from
+ * it. The per-voice kernel is cheap by construction (two table reads, a lerp,
+ * two multiply-accumulates and a decay multiply — no filter, no envelope
+ * generator; see drums.cpp), so eight of them are not a large fraction of a
+ * synth voice's cost. "Not large" is not a measurement. */
+inline constexpr float kDrumsPct = 0.0f;
+
+/* Per-block overhead outside every stage: the clear, the master gain ramp,
+ * the metering, the int16 conversion and the sink write. */
+inline constexpr float kIdlePct = 1.0f;
+
+inline constexpr float kReservedPct =
+    kInputPct + kFxPct + kLooperPct + kDrumsPct + kIdlePct;
+inline constexpr float kGraphPct =
+    kPeakCeilingPct / kPeakEmaRatio - kReservedPct;
+
+} // namespace budget
+
+/* Reject a patch above this many cost units.
  *
  * The first cut of this constant was 700, written as though the graph were
  * the only thing rendering. It is not: a patch at 700 would have sat near
- * 89 % EMA and peaked past 100 %, i.e. continuous underruns waved through
- * by the very check that exists to prevent them.
+ * 89 % EMA and peaked past 100 %, i.e. continuous underruns waved through by
+ * the very check that exists to prevent them. The second was 440, which had
+ * the right shape but priced only three of the six stages above.
  *
- * Working back from a peak ceiling of ~90 % at the *worst* observed ratio:
- * EMA <= 90 / 1.40 = 64 %, less 18.7 % for FX and looper, less ~1 % idle,
- * leaves ~44 %. At the calibrated scale (1 unit = 0.1 % of the block) that
- * is 440 units. The factory patch costs 307, so a patch has roughly one
- * more oscillator of room — tight, and an honest reflection of what is left
- * after the FX bus takes its 18 %.
+ * As the reservations stand this comes out at 431 (the truncation is in the
+ * safe direction). The factory patch costs 307, so a patch still has roughly
+ * one more oscillator of room.
  *
- * Deliberately reserved against *worst-case* FX rather than whatever is
- * switched on right now: the compile-time check cannot know what the FX
- * mixes will be later, and a patch that fits until you add reverb is a
- * worse failure than one refused up front. Raising this is legitimate for a
- * rig that runs the FX bus dry — but do it with a measurement, not a guess.
- * Both previous values of this constant came from guesses, and both were
- * wrong by more than the margin they were guarding. */
-inline constexpr uint16_t kCostBudget = 440;
+ * kUnmeasuredNote: two of the reservations above are honest about not being
+ * worst cases — the FX bus is priced at its default rather than fully loaded,
+ * and the drum bus is priced at zero. A patch inside this budget can still
+ * underrun in combination with those, and the compile-time check cannot see
+ * it coming, because what the FX switches and the drum pattern will be later
+ * is not a property of the patch. What catches it instead is the runtime
+ * warning in main.cpp's heartbeat, which names this constant when the
+ * measured load actually goes over. Closing the gap properly needs bench
+ * numbers for a loaded FX bus and a busy kit — tools/graph_cost_calib.py is
+ * the harness. Change these with a measurement, not a guess: both previous
+ * values of this constant came from guesses, and both were wrong by more than
+ * the margin they were guarding. */
+inline constexpr uint16_t kCostBudget = (uint16_t)(budget::kGraphPct * 10.0f);
+static_assert(kCostBudget > 0 && kCostBudget < 1000,
+              "graph budget must leave room for the rest of the render chain");
 
 struct PlanNode {
     Kind kind;

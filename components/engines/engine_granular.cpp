@@ -68,6 +68,7 @@
 #include "synth_mod.h"
 #include "synth_params.h"
 #include "synth_smooth.h"
+#include "synth_warn.h"
 
 #if SYNTH_ENABLE_AUDIO_IN
 #include "audio_io.h"
@@ -714,9 +715,13 @@ void SYNTH_RENDER_IRAM gran_begin_block(size_t frames) {
 #endif
     if (b.src == SRC_IN && !b.ring_ok && !s_warned_no_in) {
         s_warned_no_in = true;
-        ESP_LOGW(TAG,
-                 "grn.src = in, but this build has no capture ring — the "
-                 "engine stays silent until grn.src is set back to synth");
+        /* Queued for a control task to print (synth_warn.h): this is the
+         * per-block path, and a console write here would answer "why is the
+         * engine silent" with a dropout on top of the silence. */
+        osynth::dsp::render_warn(
+            TAG,
+            "grn.src = in, but this build has no capture ring — the "
+            "engine stays silent until grn.src is set back to synth");
     }
     report_input_level(b.src);
 }

@@ -42,6 +42,13 @@ std::atomic<float> s_wheel{0.0f};
 /* Cached slot-param value pointers: [slot][src, dest, amount]. */
 const std::atomic<float>* s_pv[SYNTH_MOD_SLOTS][3];
 
+/* False until every one of those resolved. The block path below dereferences
+ * them unconditionally, so a partial registration — the parameter store
+ * running out of room — would fault the audio task on its first block rather
+ * than costing a control. One compare per block buys the matrix the same
+ * "disabled, not fatal" degradation the FX bus takes. */
+bool s_ready = false;
+
 struct PlanSlot {
     uint16_t dest;
     uint8_t src;      /* per-voice source; SYNTH_MOD_SRC_OFF when folded */
@@ -81,15 +88,22 @@ extern "C" esp_err_t synth_mod_init(void) {
     ParamStore& ps = ParamStore::instance();
     const size_t added = ps.add(kParams, kCount);
     if (added != kCount) {
-        ESP_LOGE(TAG, "registered %u/%u params", (unsigned)added,
-                 (unsigned)kCount);
-        return ESP_FAIL;
+        /* ESP_OK with the matrix down, for the same reason fx_init() does it:
+         * main.cpp ESP_ERROR_CHECKs this, and a full parameter store should
+         * not be a bootloop on an instrument that would otherwise play. */
+        ESP_LOGE(TAG,
+                 "registered %u/%u params — mod matrix disabled for this boot "
+                 "(the parameter store is full)",
+                 (unsigned)added, (unsigned)kCount);
+        ps.removeRange(SYNTH_PID_MOD_BASE, osynth::PID_LOOPER_BASE);
+        return ESP_OK;
     }
     for (int k = 0; k < SYNTH_MOD_SLOTS; ++k) {
         s_pv[k][0] = ps.valuePtr(SYNTH_PID_MOD_SRC(k));
         s_pv[k][1] = ps.valuePtr(SYNTH_PID_MOD_DEST(k));
         s_pv[k][2] = ps.valuePtr(SYNTH_PID_MOD_AMOUNT(k));
     }
+    s_ready = true;
     ESP_LOGI(TAG,
              "mod matrix up: %d slots (src/dest/amount), sources "
              "env2/lfo1/lfo2/vel/note/bend/wheel",
@@ -108,6 +122,10 @@ extern "C" float synth_mod_wheel(void) {
 }
 
 extern "C" void SYNTH_RENDER_IRAM synth_mod_begin_block(float bend_norm) {
+    if (!s_ready) { /* registration failed at boot; no slots to resolve */
+        s_nplan = 0;
+        return;
+    }
     const float wheel = s_wheel.load(std::memory_order_relaxed);
     int n = 0;
     for (int k = 0; k < SYNTH_MOD_SLOTS; ++k) {

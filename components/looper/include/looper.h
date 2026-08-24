@@ -134,7 +134,19 @@ void looper_process(float* l, float* r, size_t frames);
  * INVALID_STATE): any export while a take is open, since the buffer or the
  * file is being written under it, and a *slot* export on the flash backend
  * while the transport runs, which is the same XIP-stall rule save and load
- * already answer to (loop_store_needs_stopped). */
+ * already answer to (loop_store_needs_stopped).
+ *
+ * The block is bounded, and ESP_ERR_TIMEOUT is a normal answer: loop_ctl
+ * services this at the end of a pass that may first run a whole set load off
+ * a card that has stopped responding, and the caller is the same task that
+ * flushes BLE parameter events. Treat it as "not now" and retry.
+ *
+ * That bound puts one requirement on the caller: **`dst` must outlive the
+ * call.** A request that times out is abandoned, not cancelled — loop_ctl may
+ * still be about to write into it — so it cannot be a stack buffer in a frame
+ * that is about to go away. A static or a kept allocation is what this wants
+ * (ble_ctrl's dump window is one). Nothing else the caller owns is written:
+ * the info reply lands in looper-owned storage and is copied out on success. */
 #define LOOPER_EXPORT_LIVE 0 /* the set that is loaded now */
 #define LOOPER_EXPORT_SLOT 1 /* a saved slot (flash: 0 only; SD: 0..7) */
 
