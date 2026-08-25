@@ -55,6 +55,12 @@ std::atomic<uint32_t> s_evt_tail{0}; /* next read slot (audio task) */
 portMUX_TYPE s_evt_mux = portMUX_INITIALIZER_UNLOCKED;
 std::atomic<uint32_t> s_evt_dropped{0};
 
+/* Note-start tap (S43) -- see voice_manager_block_note(). Written and cleared
+ * inside drain_events(), read later in the same render callback by the FX
+ * bus, both on the audio task, so a plain byte is the whole synchronisation
+ * story. */
+uint8_t s_block_note = 0;
+
 void push_event(EvType type, uint8_t note, uint8_t velocity) {
     bool dropped = false;
     portENTER_CRITICAL(&s_evt_mux);
@@ -244,6 +250,10 @@ void ev_note_on(const synth_engine_t* eng, uint8_t note, uint8_t velocity) {
 }
 
 void drain_events(const synth_engine_t* eng) {
+    /* Cleared here rather than after the FX bus has read it: this is the one
+     * place that knows a new block's events are about to be applied, and the
+     * value has to survive from here to fx_process() in the same callback. */
+    s_block_note = 0;
     uint32_t tail = s_evt_tail.load(std::memory_order_relaxed);
     const uint32_t head = s_evt_head.load(std::memory_order_acquire);
     while (tail != head) {
@@ -251,6 +261,9 @@ void drain_events(const synth_engine_t* eng) {
         switch (e.type) {
             case EvType::NoteOn:
                 ev_note_on(eng, e.note, e.velocity);
+                /* Loudest of the block: a chord is one retrigger, not one per
+                 * note. */
+                if (e.velocity > s_block_note) s_block_note = e.velocity;
                 break;
             case EvType::NoteOff:
                 for (auto& v : s_voices) {
@@ -391,6 +404,10 @@ extern "C" void voice_manager_set_muted(bool muted) {
 
 extern "C" bool voice_manager_muted(void) {
     return s_mute_now.load(std::memory_order_relaxed) == 0.0f;
+}
+
+extern "C" uint8_t SYNTH_RENDER_IRAM voice_manager_block_note(void) {
+    return s_block_note;
 }
 
 extern "C" void voice_manager_note_on(uint8_t note, uint8_t velocity) {

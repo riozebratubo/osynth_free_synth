@@ -1,0 +1,288 @@
+/* ---- mic noise reduction (S42): per bin, not per band ----------------------
+ *
+ * The third and last of the noise-reduction units, and the one to reach for
+ * when the complaint is "it is quiet between words but the hiss is still there
+ * underneath my voice". Neither of the other two can fix that:
+ *
+ *   fx.nr   is a downward expander. One detector, one gain, applied to every
+ *           frequency at once. The moment the voice crosses the threshold that
+ *           gain is 1 and every bit of noise in the band comes back with it.
+ *           Measured on a real recording it improves signal-to-noise by
+ *           0.0 dB — it cleans the gaps, which is all a gate has ever done.
+ *   fx.anr  is the right family, at a dozen bands that overlap heavily by
+ *           construction (the difference bank sums to unity, and that is what
+ *           it costs). A voice in one region opens the gain across a wide
+ *           swathe of neighbours, so it manages about 4.5 dB underneath.
+ *
+ * The idea both are missing is that *speech is sparse in frequency*. At any
+ * instant a voice occupies a fraction of the spectrum; every bin it is not in
+ * is noise-only and can still be pushed down, mid-syllable. Resolving that
+ * needs bins, not bands, and bins need a transform.
+ *
+ * ---- the shape ----
+ *
+ * 256-point frames, 50% overlap, sqrt-Hann on the way in and again on the way
+ * out (WOLA, which sums to unity at this hop). 129 bins, 187 Hz apart, one
+ * frame per two audio blocks. 512 was measurably better in the gaps and worse
+ * everywhere that matters, at twice the latency; 128 gave up the resolution
+ * that is the entire point. The 50% hop was within 0.5 dB of 75% on every
+ * measure and costs half the transforms, which on this target is the number
+ * that decides whether a unit ships.
+ *
+ * Per bin, per frame:
+ *
+ *   lambda   the noise power, tracked as a minimum over `adapt` in
+ *            kMnrBuckets buckets — Martin's minimum statistics, and the same
+ *            structure fx.anr uses, including the one-pole ahead of the
+ *            minimum. That smoother is not optional: a raw periodogram bin
+ *            wanders by tens of dB frame to frame on stationary noise, and the
+ *            minimum of the wander is not the level of anything. kMnrBias
+ *            corrects minimum back to mean.
+ *   gamma    P / lambda, the a-posteriori SNR: what is here now against what
+ *            is usually here.
+ *   xi       the a-priori SNR, by the decision-directed estimator (Ephraim &
+ *            Malah 1984): mostly last frame's *result* — g^2 * gamma — and a
+ *            little of this frame's raw excess. This one line is what
+ *            separates a spectral subtractor that sounds like a denoiser from
+ *            one that sounds like wind chimes. Estimating xi from the current
+ *            frame alone makes it swing wildly on the noise's own fluctuation,
+ *            each bin opening and closing independently; leaning on the
+ *            previous *decision* is a feedback path that holds a bin steady
+ *            unless something really arrived in it. kMnrDdTauS is how long it
+ *            leans, and it trades musical noise against transient response.
+ *   g        xi / (1 + xi), the Wiener gain, floored at `fx.mnr.floor`.
+ *
+ * Floored for the same reason fx.nr.floor exists: a bin taken to nothing is
+ * what a listener hears as an artefact, where a bin left 24 dB down is heard
+ * as a quiet room.
+ *
+ * ---- mono, and the delay ----
+ *
+ * The source is folded to mono, cleaned, and written to both channels. The
+ * vocoder's reasoning applies unchanged — this exists to clean a microphone
+ * and osynth's is mono — and it halves the transform count, which is what
+ * makes the unit affordable at all. `bus` mode will fold a stereo patch; that
+ * is why `input` is the default.
+ *
+ * A frame cannot be analysed until it has arrived, so the cleaned signal comes
+ * out kFftN samples behind. In `input` mode that is handled the way the other
+ * two handle their correction — the input's contribution is removed from the
+ * bus and the cleaned version added in its place:
+ *
+ *     bus += m * (cleaned(t - N) - input(t))
+ *
+ * which leaves the bus carrying synth(t) + cleaned(t - N). The input is 5.3 ms
+ * late against the synth beside it and nothing is comb-filtered, because the
+ * undelayed copy is removed rather than mixed with. Adding the *difference*
+ * delayed instead — the obvious-looking alternative — would leave x(t) and
+ * -x(t-N) both on the bus, which is a comb filter with teeth every 187 Hz.
+ */
+
+constexpr int kMnrHop = kFftN / 2;      /* 50% overlap */
+constexpr int kMnrBuckets = 4;          /* 8 measured identical; 2 lost 3 dB */
+constexpr float kMnrOversub = 3.0f;     /* what `amount` = 1 subtracts */
+constexpr float kMnrBias = 1.6f;        /* minimum -> mean, per bin */
+constexpr float kMnrDdTauS = 0.06f;     /* decision-directed memory */
+constexpr float kMnrSmTauS = 0.12f;     /* smoother ahead of the minimum */
+constexpr float kMnrHuge = 1e30f;       /* "this bucket took nothing" */
+constexpr float kMnrEps = 1e-20f;       /* power, not amplitude */
+constexpr float kMnrGamMax = 1e6f;      /* keeps a silent lambda finite */
+
+struct MnrFx {
+    /* Built once by mnr_build(); sqrt-Hann, so analysis and synthesis windows
+     * multiply to a Hann that sums to unity at this hop. */
+    float win[kFftN];
+    float in[kFftN];        /* the last kFftN source samples, oldest first */
+    float ola[kFftN];       /* overlap-add accumulator */
+    float out[kMnrHop];     /* finished samples waiting to be handed back */
+    int in_fill = 0;        /* samples written since the last frame */
+    int out_rd = 0;
+    int out_have = 0;
+    /* Per bin. buck is [bin][bucket] rather than [bucket][bin] so that one
+     * bin's whole working set is contiguous — the loop below touches every
+     * field of a bin together and then never returns to it. */
+    float sm[kFftBins];
+    float lam[kFftBins];
+    float buck[kFftBins][kMnrBuckets];
+    float gp[kFftBins];     /* last frame's gain, for the decision-directed xi */
+    float gamp[kFftBins];   /* ...and last frame's a-posteriori SNR */
+    uint32_t cnt = 0;       /* frames into the current bucket */
+    bool primed = false;
+    bool dirty = false;     /* state worth clearing on the way down */
+    UnitState u;
+};
+
+MnrFx s_mnr;
+
+void mnr_build() {
+    for (int i = 0; i < kFftN; ++i) {
+        const float h =
+            0.5f * (1.0f - cosf(2.0f * 3.14159265f * (float)i / (float)kFftN));
+        s_mnr.win[i] = sqrtf(h);
+    }
+}
+
+void mnr_reset(MnrFx& c) {
+    if (!c.dirty) return;
+    for (int i = 0; i < kFftN; ++i) {
+        c.in[i] = 0.0f;
+        c.ola[i] = 0.0f;
+    }
+    for (int i = 0; i < kMnrHop; ++i) c.out[i] = 0.0f;
+    for (int k = 0; k < kFftBins; ++k) {
+        c.sm[k] = 0.0f;
+        c.lam[k] = 0.0f;
+        c.gp[k] = 1.0f;
+        c.gamp[k] = 1.0f;
+        for (int w = 0; w < kMnrBuckets; ++w) c.buck[k][w] = kMnrHuge;
+    }
+    c.in_fill = 0;
+    c.out_rd = 0;
+    c.out_have = 0;
+    c.cnt = 0;
+    c.primed = false;
+    c.dirty = false;
+}
+
+/* One frame: window, transform, scale every bin, transform back, overlap-add.
+ * Everything that is not per-bin has been hoisted into the caller. */
+void SYNTH_RENDER_IRAM mnr_frame(MnrFx& c, float over, float gmin, float k_sm,
+                                 float a_dd, bool learn, bool boundary) {
+    /* Off the stack for the reason fx_fft.cpp's scratch is: 2 KB here plus
+     * 1 KB there does not fit in a 6 KB audio task that also runs a reverb. */
+    static float buf[kFftN];
+    static float re[kFftBins], im[kFftBins];
+    for (int i = 0; i < kFftN; ++i) buf[i] = c.in[i] * c.win[i];
+    osynth::fx::fft_real(buf, re, im);
+
+    for (int k = 0; k < kFftBins; ++k) {
+        const float p = re[k] * re[k] + im[k] * im[k];
+        if (!c.primed) {
+            c.sm[k] = p;
+            /* lam holds the raw minimum; kMnrBias is applied once, below. */
+            c.lam[k] = p;
+            for (int w = 0; w < kMnrBuckets; ++w) c.buck[k][w] = p;
+        } else {
+            c.sm[k] += k_sm * (p - c.sm[k]);
+            if (learn) {
+                /* Held: the profile is what is arriving, not a minimum of it.
+                 * The buckets are filled too, so releasing `learn` resumes
+                 * tracking from here instead of from a window of nothing. */
+                c.lam[k] = c.sm[k];
+                for (int w = 0; w < kMnrBuckets; ++w) c.buck[k][w] = c.sm[k];
+            } else {
+                if (c.sm[k] < c.buck[k][0]) c.buck[k][0] = c.sm[k];
+                if (boundary) {
+                    float best = kMnrHuge;
+                    for (int w = 0; w < kMnrBuckets; ++w) {
+                        if (c.buck[k][w] < best) best = c.buck[k][w];
+                    }
+                    if (best < kMnrHuge) c.lam[k] = best;
+                    for (int w = kMnrBuckets - 1; w > 0; --w) {
+                        c.buck[k][w] = c.buck[k][w - 1];
+                    }
+                    c.buck[k][0] = kMnrHuge;
+                }
+            }
+        }
+
+        /* `amount` is over-subtraction, exactly as it is on fx.anr: it inflates
+         * the estimate rather than scaling the gain, so turning it up buys a
+         * deeper cut where there is noise and still leaves a loud bin alone. */
+        float lam_e = c.lam[k] * kMnrBias * over;
+        if (lam_e < kMnrEps) lam_e = kMnrEps;
+        float gam = p / lam_e;
+        if (gam > kMnrGamMax) gam = kMnrGamMax;
+        const float ex = (gam > 1.0f) ? (gam - 1.0f) : 0.0f;
+        float xi = a_dd * c.gp[k] * c.gp[k] * c.gamp[k] + (1.0f - a_dd) * ex;
+        if (xi < 1e-10f) xi = 1e-10f;
+        float g = xi / (1.0f + xi);
+        if (g < gmin) g = gmin;
+        c.gp[k] = g;
+        c.gamp[k] = gam;
+        re[k] *= g;
+        im[k] *= g;
+    }
+
+    osynth::fx::fft_real_inv(re, im, buf);
+    for (int i = 0; i < kFftN; ++i) c.ola[i] += buf[i] * c.win[i];
+}
+
+void SYNTH_RENDER_IRAM mnr_process(float* __restrict__ bl,
+                                   float* __restrict__ br, size_t frames) {
+    MnrFx& c = s_mnr;
+    const float m = unit_gate(c.u, pv(MNR_ON), nullptr, 0);
+    if (m < 0.0f) {
+        /* Off: the frame in flight describes a room that will have moved by
+         * the time this is switched back on, and the overlap-add tail would
+         * arrive 5 ms into the next thing said. */
+        mnr_reset(c);
+        return;
+    }
+
+    /* Same source contract as the other two (S39b) — the note in
+     * anr_process() covers why these are not __restrict__. */
+    const bool from_input = ((int)pv(MNR_SRC) == 1);
+    const float* sl = bl;
+    const float* sr = br;
+    if (from_input) {
+        if (frames > SYNTH_BLOCK_SIZE ||
+            !audio_io_in_fx_block(s_nr_src_l, s_nr_src_r, frames)) {
+            mnr_reset(c);
+            return;
+        }
+        sl = s_nr_src_l;
+        sr = s_nr_src_r;
+    }
+    c.dirty = true;
+
+    const float over = fmaxf(pvm(MNR_AMOUNT) * kMnrOversub, 1e-3f);
+    const float gmin = powf(10.0f, pvm(MNR_FLOOR) * (1.0f / 20.0f));
+    const bool learn = pv(MNR_LEARN) >= 0.5f;
+
+    /* A frame is the clock for everything above, exactly as a block is for the
+     * other two units. */
+    const float fr_s = (float)kMnrHop / kSr;
+    const float k_sm = 1.0f - expf(-fr_s / kMnrSmTauS);
+    const float a_dd = expf(-fr_s / kMnrDdTauS);
+    uint32_t bucket = (uint32_t)(pvm(MNR_ADAPT) / (float)kMnrBuckets / fr_s);
+    if (bucket < 1) bucket = 1;
+
+    for (size_t i = 0; i < frames; ++i) {
+        /* Read the source before writing the bus: in `bus` mode these alias. */
+        const float xl = sl[i], xr = sr[i];
+        c.in[kMnrHop + c.in_fill] = 0.5f * (xl + xr);
+        ++c.in_fill;
+        if (c.in_fill >= kMnrHop) {
+            c.in_fill = 0;
+            const bool boundary = (++c.cnt >= bucket);
+            if (boundary) c.cnt = 0;
+            mnr_frame(c, over, gmin, k_sm, a_dd, learn, boundary);
+            c.primed = true;
+            /* The first half of the accumulator is finished — no later frame
+             * reaches it — so it becomes the output, and both buffers slide.
+             * The hop is exactly half the frame, which is what makes this two
+             * copies rather than a pair of ring cursors. */
+            for (int j = 0; j < kMnrHop; ++j) {
+                c.out[j] = c.ola[j];
+                c.ola[j] = c.ola[j + kMnrHop];
+                c.ola[j + kMnrHop] = 0.0f;
+                c.in[j] = c.in[j + kMnrHop];
+            }
+            c.out_rd = 0;
+            c.out_have = kMnrHop;
+        }
+        /* Never underruns once primed: a frame lands on exactly the sample
+         * that would have emptied this. Before the first one it is silent,
+         * which is the unit's latency and not a fault. */
+        float y = 0.0f;
+        if (c.out_have > 0) {
+            y = c.out[c.out_rd++];
+            --c.out_have;
+        }
+        /* The input's contribution replaced by the cleaned one, or the bus
+         * crossfaded to it — settled above, by where xl came from. */
+        bl[i] += m * (y - xl);
+        br[i] += m * (y - xr);
+    }
+}

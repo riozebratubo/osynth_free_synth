@@ -50,6 +50,21 @@ bool voice_manager_muted(void);
  * BLE), never the audio task. velocity is 1..127; velocity 0 is NOT treated
  * as note off — the MIDI router does that conversion. */
 void voice_manager_note_on(uint8_t note, uint8_t velocity);
+
+/* Note-start tap (S43): the velocity (1..127) of a note that *started a
+ * voice* during the block currently being rendered, or 0 for "none did".
+ * Several note-ons in one block report the loudest, so a chord reads as one
+ * event, which is what a retrigger wants.
+ *
+ * The sibling of drums_block_hit(), with the same contract and the same
+ * caveat about when it may be read: voice_manager_render() drains its event
+ * queue at block start, and main.cpp calls it before fx_process(), so the FX
+ * bus sees this block's note-ons. Reading it from anywhere else, or before
+ * voice_manager_render() has run in this callback, gets the previous block.
+ *
+ * The vocoder's sample replay is the caller -- it restarts the recorded
+ * phrase on each note. */
+uint8_t voice_manager_block_note(void);
 void voice_manager_note_off(uint8_t note);
 void voice_manager_all_notes_off(void); /* release everything (CC 123) */
 void voice_manager_all_sound_off(void); /* immediate silence (CC 120) */

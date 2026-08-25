@@ -89,12 +89,14 @@
 #include <cmath>
 #include <cstring>
 
+#include "esp_attr.h" /* NOINLINE_ATTR: the microphone chain, below */
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_memory_utils.h"
 #include "sdkconfig.h"
 
 #include "audio_io.h" /* the vocoder's modulator: the selected audio input (S38) */
+#include "synth_voice.h" /* voice_manager_block_note(): the vocoder's retrigger */
 #include "drums.h"   /* the sidechain key: which drum slot sounded this block */
 #include "seqarp.h"  /* seqarp_bpm() / beat grid: note-division sync (S34) */
 #include "synth_config.h"
@@ -104,6 +106,8 @@
 #include "synth_reverb_algo.h"
 #include "synth_smooth.h"
 #include "synth_warn.h"
+
+#include "fx_fft.h" /* the mic NR's transform (S42) */
 
 /* The reverb algorithms. Below synth_config.h on purpose: SYNTH_ENABLE_FX_GPL
  * is defined there, and an unguarded fx_gpl.h would drag GPL declarations
@@ -195,13 +199,14 @@ constexpr int kPhsStagesMax = 12; /* allpass sections per channel */
  * is what puts the bypass at the top-left of the card instead of after the
  * knobs it governs. */
 enum PIdx {
+    MNR_ON, MNR_SRC, MNR_AMOUNT, MNR_FLOOR, MNR_ADAPT, MNR_LEARN,
     ANR_ON, ANR_SRC, ANR_AMOUNT, ANR_FLOOR, ANR_BANDS, ANR_LOW, ANR_HIGH,
     ANR_ADAPT, ANR_ATTACK, ANR_RELEASE, ANR_LEARN,
     NR_ON, NR_SRC, NR_HPF, NR_HUM, NR_THRESH, NR_RATIO, NR_FLOOR, NR_ATTACK,
     NR_HOLD, NR_RELEASE,
     VOC_ON, VOC_MIX, VOC_BANDS, VOC_LOW, VOC_HIGH, VOC_Q, VOC_ATTACK,
-    VOC_RELEASE, VOC_SHIFT, VOC_SIB, VOC_GATE, VOC_LEVEL, VOC_CARRIER,
-    VOC_FREEZE,
+    VOC_RELEASE, VOC_SHIFT, VOC_SIB, VOC_GATE, VOC_NORM, VOC_CLARITY,
+    VOC_LEVEL, VOC_CARRIER, VOC_FREEZE, VOC_LOOP,
     CHO_ON, CHO_MIX, CHO_RATE, CHO_DEPTH,
     DLY_ON, DLY_MIX, DLY_TIME, DLY_FB, DLY_TONE, DLY_PP, DLY_DIV, DLY_COMP,
     GRN_ON, GRN_MIX, GRN_SIZE, GRN_DENS, GRN_PITCH, GRN_FB, GRN_SPRAY,
@@ -219,6 +224,7 @@ enum PIdx {
     COMP_ON, COMP_THRESH, COMP_RATIO, COMP_ATTACK, COMP_RELEASE, COMP_MAKEUP,
     COMP_MIX, COMP_KEY, COMP_SLOT,
     ST_WIDTH, ST_BASS, ST_MONO, ST_AMP, ST_PAN,
+    LIM_ON, LIM_CEIL, LIM_GAIN, LIM_RELEASE,
     LFO1_DEST, LFO1_WAVE, LFO1_RATE, LFO1_SYNC, LFO1_DEPTH, LFO1_PHASE,
     LFO2_DEST, LFO2_WAVE, LFO2_RATE, LFO2_SYNC, LFO2_DEPTH, LFO2_PHASE,
     P_COUNT
@@ -245,13 +251,30 @@ const char* const kDrvModes[] = {"tanh", "fold", "clip", "tube"};
  * across my synth": the unit runs on the block audio_io mixed in at the fx
  * position and adds only the difference back — so nothing reaching the bus is
  * a function of anything but the input. It needs `in.route` = fx, and
- * is inert otherwise — the reasoning is above FX_PID_ANR_SRC in fx.h. */
+ * is inert otherwise — the reasoning is above FX_PID_ANR_SRC in fx.h.
+ *
+ * It is also the *default* for both units (S39c), which is why entry 0 being
+ * the pre-control behaviour is now only an enum-ordering rule and no longer
+ * describes what a fresh patch does. Cleaning a microphone is what anyone who
+ * switches one of these on is trying to do; denoising the synth's own bus is
+ * the specialist case, and it is the one that has a held pad to lose. */
 const char* const kNrSrcs[] = {"bus", "input"};
 
 /* Mains hum (S39). Append-only, and the two entries are regions of the world
  * rather than a frequency knob: 50 and 60 Hz is the whole list, nobody is
  * hunting for 53, and a notch that can be mistuned is a notch that will be. */
 const char* const kNrHum[] = {"off", "50 Hz", "60 Hz"};
+
+/* How much noise the `noise` and `bus+noise` carriers add (S43). Not 0.5,
+ * which is what this was, and the difference is not a taste call: noise and a
+ * pitched carrier are not comparable at equal amplitude through a filter
+ * bank. A saw carries energy only at its harmonics, so most bands see very
+ * little of it; white noise feeds every band fully. Measured through this
+ * bank, noise at 0.5 produced 1.19x the output of a saw at 0.4 -- so
+ * `bus+noise` was mostly noise, and every preset using it ran into the output
+ * clipper. At 0.25 it sits around 0.6x the bus: a supplement for the
+ * unpitched consonants, which is what it is for, rather than a takeover. */
+constexpr float kVocNoiseGain = 0.25f;
 
 /* Vocoder carrier (S38). Append-only. `noise` alone is what makes a whisper
  * or an unpitched consonant work — a band bank can only shape what it is
@@ -420,10 +443,24 @@ static_assert(enum_bytes(kLfoDests, kLfoDestCount) <= kLfoDestBudget,
               "app would silently show a truncated list");
 
 const ParamDesc kParams[P_COUNT] = {
+    /* ---- mic noise reduction (S42) ---- */
+    {FX_PID_MNR_ON, "fx.mnr.on", ParamType::Bool, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0},
+    {FX_PID_MNR_SRC, "fx.mnr.src", ParamType::Enum, ParamCurve::Linear,
+     0.0f, (float)(kNrSrcCount - 1), 1.0f /* input */, kNrSrcs, kNrSrcCount},
+    {FX_PID_MNR_AMOUNT, "fx.mnr.amount", ParamType::Float, ParamCurve::Linear,
+     0.0f, 1.0f, 0.6f, nullptr, 0}, /* 1 = subtract 3x the estimated floor */
+    {FX_PID_MNR_FLOOR, "fx.mnr.floor", ParamType::Float, ParamCurve::Linear,
+     -48.0f, 0.0f, -24.0f, nullptr, 0}, /* dB, the deepest a bin may be cut */
+    {FX_PID_MNR_ADAPT, "fx.mnr.adapt", ParamType::Float, ParamCurve::Exp,
+     0.2f, 20.0f, 1.5f, nullptr, 0},    /* s — the minimum-tracking window */
+    {FX_PID_MNR_LEARN, "fx.mnr.learn", ParamType::Bool, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0},
+
     {FX_PID_ANR_ON, "fx.anr.on", ParamType::Bool, ParamCurve::Linear,
      0.0f, 1.0f, 0.0f, nullptr, 0},
     {FX_PID_ANR_SRC, "fx.anr.src", ParamType::Enum, ParamCurve::Linear,
-     0.0f, (float)(kNrSrcCount - 1), 0.0f /* bus */, kNrSrcs, kNrSrcCount},
+     0.0f, (float)(kNrSrcCount - 1), 1.0f /* input */, kNrSrcs, kNrSrcCount},
     {FX_PID_ANR_AMOUNT, "fx.anr.amount", ParamType::Float, ParamCurve::Linear,
      0.0f, 1.0f, 0.6f, nullptr, 0}, /* 1 = subtract 3x the estimated floor */
     {FX_PID_ANR_FLOOR, "fx.anr.floor", ParamType::Float, ParamCurve::Linear,
@@ -435,7 +472,7 @@ const ParamDesc kParams[P_COUNT] = {
     {FX_PID_ANR_HIGH, "fx.anr.high", ParamType::Float, ParamCurve::Exp,
      2000.0f, 16000.0f, 9000.0f, nullptr, 0}, /* last crossover, Hz */
     {FX_PID_ANR_ADAPT, "fx.anr.adapt", ParamType::Float, ParamCurve::Exp,
-     0.5f, 60.0f, 8.0f, nullptr, 0},   /* s — how fast the floor may rise */
+     0.5f, 60.0f, 3.0f, nullptr, 0},   /* s — how fast the floor may rise */
     {FX_PID_ANR_ATTACK, "fx.anr.attack", ParamType::Float, ParamCurve::Exp,
      1.0f, 100.0f, 5.0f, nullptr, 0},    /* ms — a band reopening */
     {FX_PID_ANR_RELEASE, "fx.anr.release", ParamType::Float, ParamCurve::Exp,
@@ -445,13 +482,13 @@ const ParamDesc kParams[P_COUNT] = {
     {FX_PID_NR_ON, "fx.nr.on", ParamType::Bool, ParamCurve::Linear,
      0.0f, 1.0f, 0.0f, nullptr, 0},
     {FX_PID_NR_SRC, "fx.nr.src", ParamType::Enum, ParamCurve::Linear,
-     0.0f, (float)(kNrSrcCount - 1), 0.0f /* bus */, kNrSrcs, kNrSrcCount},
+     0.0f, (float)(kNrSrcCount - 1), 1.0f /* input */, kNrSrcs, kNrSrcCount},
     {FX_PID_NR_HPF, "fx.nr.hpf", ParamType::Float, ParamCurve::Exp,
      20.0f, 400.0f, 80.0f, nullptr, 0}, /* the registered minimum is the bypass */
     {FX_PID_NR_HUM, "fx.nr.hum", ParamType::Enum, ParamCurve::Linear,
      0.0f, (float)(kNrHumCount - 1), 0.0f, kNrHum, kNrHumCount},
     {FX_PID_NR_THRESH, "fx.nr.thresh", ParamType::Float, ParamCurve::Linear,
-     -80.0f, 0.0f, -45.0f, nullptr, 0}, /* dB, peak */
+     -80.0f, 0.0f, -24.0f, nullptr, 0}, /* dB, peak — see nr_process() */
     {FX_PID_NR_RATIO, "fx.nr.ratio", ParamType::Float, ParamCurve::Exp,
      1.0f, 20.0f, 4.0f, nullptr, 0},    /* downward expansion below thresh */
     {FX_PID_NR_FLOOR, "fx.nr.floor", ParamType::Float, ParamCurve::Linear,
@@ -482,13 +519,48 @@ const ParamDesc kParams[P_COUNT] = {
      -12.0f, 12.0f, 0.0f, nullptr, 0}, /* formant shift, semitones */
     {FX_PID_VOC_SIB, "fx.voc.sib", ParamType::Float, ParamCurve::Linear,
      0.0f, 1.0f, 0.35f, nullptr, 0},   /* consonants over the bank */
+    /* 0.02, not the 0.06 this defaulted to through S42. The control is an
+     * absolute floor subtracted from every band envelope, and speech runs
+     * band envelopes of roughly 0.02-0.09 in this unit's domain, so 0.06
+     * (a 0.012 floor) was standing in the middle of the voice rather than
+     * under it: measured against a speech-like modulator it left 38-45% of
+     * the spectral envelope, and the two thirds it removed is precisely the
+     * information that makes words legible. 0.02 keeps 77-81% and still cuts
+     * the between-words leakage about threefold in a quiet room.
+     *
+     * Turn it back up when the room is the problem rather than the words --
+     * that is what it is for -- but reach for fx.mnr first, which was built
+     * to remove noise from *under* the voice instead of gating around it. */
     {FX_PID_VOC_GATE, "fx.voc.gate", ParamType::Float, ParamCurve::Linear,
-     0.0f, 1.0f, 0.06f, nullptr, 0},   /* modulator noise floor */
+     0.0f, 1.0f, 0.02f, nullptr, 0},   /* modulator noise floor */
+    /* On by default: without it every one of the four controls above is also
+     * a large volume control, which is the thing that made this unit hard to
+     * set up. See the normalization note in vocoder_process(). */
+    {FX_PID_VOC_NORM, "fx.voc.norm", ParamType::Bool, ParamCurve::Linear,
+     0.0f, 1.0f, 1.0f, nullptr, 0},
+    /* Off by default: it is the classic-vocoder/legible-speech fork, and the
+     * classic sound is what the unit is for out of the box. The preset card
+     * turns it on for the sets that are about words. */
+    {FX_PID_VOC_CLARITY, "fx.voc.clarity", ParamType::Bool, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0},
+    /* 2.5, down from the 4 that stood while fx.voc.gate defaulted to 0.06.
+     * The two are coupled and have to move together: the gate decides how
+     * much of the modulator's envelope reaches the bank at all, so opening it
+     * from 0.06 to 0.02 roughly doubled what arrives here. Left at 4 the unit
+     * ran its own soft_clip() backstop on ordinary speech, which is the
+     * "harsh and hissy" this pair was reported as. */
     {FX_PID_VOC_LEVEL, "fx.voc.level", ParamType::Float, ParamCurve::Linear,
-     0.0f, 16.0f, 4.0f, nullptr, 0},   /* make-up; a vocoder starts quiet */
+     0.0f, 16.0f, 2.5f, nullptr, 0},   /* make-up; a vocoder starts quiet */
     {FX_PID_VOC_CARRIER, "fx.voc.carrier", ParamType::Enum, ParamCurve::Linear,
      0.0f, 2.0f, 0.0f /* bus */, kVocCarriers, 3},
     {FX_PID_VOC_FREEZE, "fx.voc.freeze", ParamType::Bool, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0},
+    /* Off = the phrase plays once per note and then the vocoder falls silent
+     * over a still-sounding carrier; on = it repeats until the note ends. Off
+     * by default because a spoken phrase said twice is a stutter, and speech
+     * is what the capture is for; a rhythmic syllable is the case that wants
+     * the other setting. */
+    {FX_PID_VOC_LOOP, "fx.voc.loop", ParamType::Bool, ParamCurve::Linear,
      0.0f, 1.0f, 0.0f, nullptr, 0},
     /* Bypass. Gates the mix below rather than replacing it — see the
      * enable-switch note in fx.h. */
@@ -752,6 +824,20 @@ const ParamDesc kParams[P_COUNT] = {
     {FX_PID_ST_PAN, "fx.st.pan", ParamType::Float, ParamCurve::Linear,
      -1.0f, 1.0f, 0.0f, nullptr, 0}, /* the auto-pan destination */
 
+    /* ---- master limiter (S43) ---- */
+    {FX_PID_LIM_ON, "fx.lim.on", ParamType::Bool, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0},
+    /* -2 dBFS, not 0, and the number is not arbitrary: soft_clip()'s knee is
+     * at 0.8, which is -1.94 dBFS, so a ceiling set above it hands the sink
+     * a signal the sink then shapes anyway. Just under the knee is where
+     * this unit is the only thing acting on the peaks. */
+    {FX_PID_LIM_CEIL, "fx.lim.ceil", ParamType::Float, ParamCurve::Linear,
+     -24.0f, 0.0f, -2.0f, nullptr, 0}, /* dBFS */
+    {FX_PID_LIM_GAIN, "fx.lim.gain", ParamType::Float, ParamCurve::Linear,
+     0.0f, 24.0f, 0.0f, nullptr, 0},   /* dB into the ceiling — loudness */
+    {FX_PID_LIM_RELEASE, "fx.lim.release", ParamType::Float, ParamCurve::Exp,
+     10.0f, 1000.0f, 150.0f, nullptr, 0}, /* ms; attack is zero by design */
+
     /* ---- FX LFOs (S34) ---- */
     {FX_PID_LFO1_DEST, "fx.lfo1.dest", ParamType::Enum, ParamCurve::Linear,
      0.0f, (float)(kLfoDestCount - 1), 0.0f /* off */, kLfoDests,
@@ -1004,28 +1090,84 @@ inline MixGains mix_gains(float m, bool comp, float makeup) {
  *
  * which buys the one property that matters for a unit that spends most of its
  * life doing nothing: with every g_k at 1 the output is the input, sample for
- * sample — no filterbank colouration, no phase smear to explain away. A bank
- * summed the ordinary way is only approximately flat, and "approximately
- * flat" is an audible dulling that would sit on the patch whether or not
- * there was any noise to remove. The price is at the other end — the deepest
- * achievable cut is bounded by how well the bank sums back — and that end is
- * capped by `fx.anr.floor` anyway, which no useful setting takes past -30 dB.
+ * sample — no filterbank colouration, no phase smear to explain away.
  *
- * Band shapes: the first is a lowpass and the last a highpass, both
- * Butterworth, so `low` and `high` are crossovers and not centres. That is
- * what makes the bank cover the whole spectrum, and it matters more here than
- * anywhere else in this file: rumble under `low` and hiss over `high` are
- * precisely the two places noise lives, and a bank of bandpasses alone would
- * have left both of them untouched. Everything between is a *unity-peak*
- * bandpass — BpN, not Bp, because the residual form adds each band back at
- * its own gain and a plain Bp peaks at Q, which would subtract two and a half
- * times what it measured.
+ * ---- the bank (S39c) ----
+ *
+ * That residual form only pays off if the bands sum back to x, because with
+ * every g_k at `fx.anr.floor` the output is
+ *
+ *     x + (gmin - 1) * sum_k band_k(x)
+ *
+ * and whatever the bank fails to account for is *not attenuated at all*. It
+ * is the floor of the whole unit, not a detail. The first version of this
+ * bank was a Butterworth lowpass, a run of constant-Q unity-peak bandpasses
+ * and a Butterworth highpass, on the reasoning that skirts crossing at -3 dB
+ * sum back to something flat. They do not: adjacent bandpasses cross at
+ * different phases, and measured on a real recording that bank summed to
+ * -9 dB at 100 Hz, +3 dB through the midrange and -5 dB at 8 kHz, leaving
+ * 18% of the input outside the bank entirely. The unit could not cut by more
+ * than about 8 dB however `fx.anr.floor` was set — and past -10 dB, setting
+ * it *deeper* made the output louder, because the bands that summed hot were
+ * being over-subtracted while the residue sat there untouched.
+ *
+ * So the bank telescopes instead. bands-1 Butterworth lowpasses, geometrically
+ * spaced, and each band is the difference of two neighbouring ones:
+ *
+ *     band_0     = LP_0(x)
+ *     band_k     = LP_k(x) - LP_k-1(x)
+ *     band_n-1   = x - LP_n-2(x)
+ *
+ * The sum is x identically — an algebraic identity, not a filter design, so
+ * it holds sample for sample at every frequency, for any spacing, any band
+ * count, any Q. All g_k at 1 gives x; all g_k at gmin gives gmin*x exactly;
+ * `fx.anr.floor` means what it says. `low` and `high` are still the first and
+ * last crossover, naming the same two frequencies they named before, and the
+ * bank still covers the whole spectrum — rumble under `low` and hiss over
+ * `high` are precisely where noise lives. It is also *cheaper*: bands-1
+ * filters per channel where the old bank ran bands.
+ *
+ * What it costs is selectivity. Neighbouring bands overlap heavily — at
+ * twelve bands a band's neighbour is only ~2.5 dB down at its centre — so the
+ * profile is a blurred picture of the spectrum rather than a sharp one. That
+ * is a good trade twice over: noise floors are smooth in frequency, so there
+ * is little detail to lose, and a gain curve that cannot vary sharply between
+ * neighbours is exactly the curve that does not produce the isolated
+ * opening-and-closing bands this class of algorithm is known for. It is also
+ * why `fx.anr.bands` now barely changes the result — 8, 12 and 16 land within
+ * 0.1 dB of each other on stationary noise.
  *
  * ---- the estimator ----
  *
- * A sliding-window minimum, in two buckets held one window each. The floor of
- * a band is its minimum over a few seconds, not its average: an average
- * includes the speech, the minimum does not. `fx.anr.adapt` is the window.
+ * A sliding-window minimum over the band's level, held in kAnrSubWins buckets
+ * that between them cover `fx.anr.adapt`. The floor of a band is its minimum
+ * over a few seconds, not its average: an average includes the speech, the
+ * minimum does not.
+ *
+ * The level it takes the minimum *of* is smoothed first (kAnrEstTauS), and
+ * that one-pole is what makes the whole unit work. Without it the minimum is
+ * taken over raw per-block magnitudes, and a block is 1.33 ms — a sixth of a
+ * cycle at the bottom crossover. What such a block measures is not the level
+ * of the band, it is where in its waveform the band happened to be, and the
+ * minimum of *that* over a few thousand blocks is a number far below anything
+ * present in the signal. Measured on a stationary recording the gap between a
+ * band's median block and its minimum block ran from 5 dB at the top of the
+ * bank to 28 dB at the bottom, so the unit believed the noise floor was up to
+ * 28 dB quieter than it was and subtracted next to nothing — while kAnrBias,
+ * one constant, tried to correct a bias that was not one number but twelve.
+ * With 150 ms of smoothing ahead of it that spread is 1-3 dB across the whole
+ * bank, which is a bias small enough and uniform enough for kAnrBias to be
+ * the fixed factor it was always documented as.
+ *
+ * Only the *estimator* reads the smoothed level. The gain below reads the raw
+ * block magnitude, because that half has to move at the speed of a syllable:
+ * running the gain off the smoothed level too costs another 5 dB of noise cut
+ * and, worse, holds each band shut for 150 ms into every word.
+ *
+ * Buckets rather than the two the first version held, so the first usable
+ * profile lands one bucket after switch-on rather than one whole window — at
+ * the default `adapt` that is 0.75 s instead of 8 s of a unit that is on,
+ * lit, and audibly doing nothing.
  *
  * Two things guard it. They were written for `src` = bus, where a held pad
  * looks exactly like a fan, and they are not dropped when the unit is pointed
@@ -1036,14 +1178,22 @@ inline MixGains mix_gains(float m, bool comp, float makeup) {
  *   - a band is offered to the bucket only while it is within
  *     kAnrSignalRatio of the current estimate. Above that it is signal, and
  *     signal has no business in a noise profile.
- *   - if two whole windows go by with nothing offered — something loud has
- *     been sitting in that band the entire time — the estimate may climb
- *     toward the raw minimum, by no more than kAnrCreep per window. Without
- *     an escape the unit locks out completely on any input that starts loud;
- *     with an unbounded one, a long pad is learned and fades away under the
- *     player's hands. Bounded, a pad 40 dB up takes the better part of a
- *     minute to be mistaken for noise, while a floor that genuinely rises
- *     6 dB is tracked in one window.
+ *   - if a whole window goes by with nothing offered in any bucket —
+ *     something loud has been sitting in that band the entire time — the
+ *     estimate may climb toward the raw minimum, by no more than kAnrCreep
+ *     per kAnrCreepRefS. Without an escape the unit locks out completely on
+ *     any input that starts loud; with an unbounded one, a long pad is
+ *     learned and fades away under the player's hands. Bounded, a pad 40 dB
+ *     up takes the better part of a minute to be mistaken for noise, while a
+ *     floor that genuinely rises 6 dB is tracked in one window — that one is
+ *     the offer test's job, not the creep's, which is why slowing the creep
+ *     down does not slow down tracking a floor that really moved.
+ *
+ *     Per *second*, note, not per bucket: the rate at which a held note is
+ *     mistaken for a fan is a promise to the player, and it must not change
+ *     just because `fx.anr.adapt` was moved. Anchored to the bucket instead,
+ *     shortening `adapt` from 8 s to 3 s would have made that creep ten times
+ *     faster and eaten a held pad in nine seconds.
  *
  * The estimate carries kAnrBias, because the minimum of a fluctuating noise
  * sits below its average and subtracting the minimum would leave most of the
@@ -1078,22 +1228,32 @@ inline MixGains mix_gains(float m, bool comp, float makeup) {
 constexpr float kAnrSignalRatio = 4.0f; /* +12 dB over the estimate is signal */
 constexpr float kAnrBias = 1.5f;        /* minimum -> average, see above */
 constexpr float kAnrCreep = 2.0f;       /* ceiling on a locked-out band's climb */
+constexpr float kAnrCreepRefS = 8.0f;   /* ...per this many seconds, not per bucket */
 constexpr float kAnrLearnMs = 80.0f;    /* the window while `learn` is held */
 constexpr float kAnrOversub = 3.0f;     /* what `amount` = 1 subtracts */
-constexpr float kAnrEndK = 1.41421356f; /* Butterworth: the two end bands */
+constexpr float kAnrXoverK = 1.41421356f; /* Butterworth: every crossover */
+constexpr float kAnrEstTauS = 0.15f;    /* the smoother ahead of the minimum */
+constexpr int kAnrSubWins = 4;          /* buckets the window is split into */
 constexpr float kAnrHuge = 1e30f;       /* "this bucket took nothing" */
 constexpr float kAnrSeed = 1e-6f;       /* keeps the offer test alive at zero */
 constexpr float kAnrEps = 1e-7f;      /* under this a band is empty, not quiet */
 
 struct AnrBand {
+    /* The band's *crossover* lowpass, not the band itself: the bank is a
+     * telescoping difference (see above), so band k is this lowpass minus the
+     * one below it. The top band has no filter of its own and leaves these
+     * unused. */
     osynth::dsp::Svf l, r;
     osynth::dsp::SvfCoef c;
-    osynth::dsp::SvfMode mode = osynth::dsp::SvfMode::BpN;
     float acc = 0.0f;      /* sum |band| over the block, both channels */
+    float sm = 0.0f;       /* acc/frames, smoothed — what the estimator sees */
     float noise = 0.0f;    /* the estimate, biased, in the units of acc */
-    float cur = kAnrHuge;  /* this window's offered minimum */
-    float prev = kAnrHuge; /* the previous window's */
-    float raw = kAnrHuge;  /* this window's minimum, offered or not */
+    /* Brace-initialised by hand, so the count is not free to drift: a short
+     * initialiser list would zero-fill the rest, and a bucket holding 0 reads
+     * as "this window measured a floor of nothing" rather than as empty. */
+    static_assert(kAnrSubWins == 4, "buck[] initialiser lists one per bucket");
+    float buck[kAnrSubWins] = {kAnrHuge, kAnrHuge, kAnrHuge, kAnrHuge};
+    float raw = kAnrHuge;  /* this bucket's minimum, offered or not */
     float g = 1.0f;        /* smoothed gain, block boundary */
     float d = 0.0f;        /* (g - 1), ramped across the block */
     float dstep = 0.0f;
@@ -1132,18 +1292,13 @@ void anr_rebuild(AnrFx& a, int bands, float low, float high) {
      * ratio arithmetic divides by ~0. */
     if (high < low * 4.0f) high = low * 4.0f;
 
-    const float ratio = powf(high / low, 1.0f / (float)(bands - 1));
-    /* Adjacent -3 dB skirts landing on their neighbours' centres — the same
-     * constant-Q figure the vocoder's bank uses, for the same reason: it is
-     * the spacing at which a bank sums back to something flat. */
-    const float k = (ratio - 1.0f) / sqrtf(ratio);
+    /* `bands` bands need bands-1 crossovers, and `low`/`high` are the first
+     * and the last of them — the same thing they named before, since the old
+     * bank's end members were a lowpass at `low` and a highpass at `high`. */
+    const float ratio = powf(high / low, 1.0f / (float)(bands - 2));
     float f = low;
-    for (int i = 0; i < bands; ++i) {
-        const bool end = (i == 0) || (i == bands - 1);
-        a.b[i].c = osynth::dsp::svf_coef_k(f, end ? kAnrEndK : k, kSr);
-        a.b[i].mode = (i == 0) ? osynth::dsp::SvfMode::Lp
-                      : (i == bands - 1) ? osynth::dsp::SvfMode::Hp
-                                         : osynth::dsp::SvfMode::BpN;
+    for (int i = 0; i < bands - 1; ++i) {
+        a.b[i].c = osynth::dsp::svf_coef_k(f, kAnrXoverK, kSr);
         f *= ratio;
     }
     a.n = bands;
@@ -1174,7 +1329,9 @@ void SYNTH_RENDER_IRAM anr_process(float* __restrict__ bl,
          * than being carried across to quietly mean something else. */
         for (int k = 0; k < kAnrBandsMax; ++k) {
             a.b[k].noise = 0.0f;
-            a.b[k].cur = a.b[k].prev = a.b[k].raw = kAnrHuge;
+            a.b[k].sm = 0.0f;
+            for (int w = 0; w < kAnrSubWins; ++w) a.b[k].buck[w] = kAnrHuge;
+            a.b[k].raw = kAnrHuge;
             a.b[k].primed = false;
             a.b[k].settled = false;
         }
@@ -1201,8 +1358,20 @@ void SYNTH_RENDER_IRAM anr_process(float* __restrict__ bl,
 
     const bool learn = pv(ANR_LEARN) >= 0.5f;
     const float win_s = learn ? (kAnrLearnMs * 0.001f) : pvm(ANR_ADAPT);
-    uint32_t win = (uint32_t)(win_s / blk_s);
+    /* The window is held as kAnrSubWins buckets rather than two, so the first
+     * profile lands one *bucket* after switch-on instead of one whole window.
+     * The look-back is still `adapt`; only the granularity changed. */
+    uint32_t win = (uint32_t)(win_s / (float)kAnrSubWins / blk_s);
     if (win < 1) win = 1;
+    /* One-pole ahead of the minimum tracker. Without it the "minimum" is the
+     * minimum of the *waveform's* wander inside 1.33 ms, which at the bottom
+     * of the bank is 25 dB below the level it is supposed to be measuring. */
+    const float k_est = 1.0f - expf(-blk_s / kAnrEstTauS);
+    /* kAnrCreep is a rate and has to stay one: anchored to the bucket it would
+     * speed up whenever `adapt` was shortened, and the promise in the note
+     * above — a pad 40 dB up surviving the better part of a minute — is wall
+     * clock. */
+    const float creep = powf(kAnrCreep, (float)win * blk_s / kAnrCreepRefS);
 
     /* What this unit is looking at (S39b). In `bus` mode these alias bl/br,
      * which is deliberate and is why they are not themselves __restrict__: a
@@ -1226,10 +1395,33 @@ void SYNTH_RENDER_IRAM anr_process(float* __restrict__ bl,
         for (size_t i = 0; i < frames; ++i) {
             const float xl = sl[i], xr = sr[i];
             float cl = 0.0f, cr = 0.0f;
-            for (int k = 0; k < n; ++k) {
+            /* The running crossover output, which is also band k-1's upper
+             * edge. Starting it at zero is what makes band 0 a plain
+             * lowpass. */
+            float pl = 0.0f, pr = 0.0f;
+            for (int k = 0; k < n - 1; ++k) {
                 AnrBand& b = a.b[k];
-                const float yl = osynth::dsp::svf_next(b.l, b.c, b.mode, xl);
-                const float yr = osynth::dsp::svf_next(b.r, b.c, b.mode, xr);
+                const float ll = osynth::dsp::svf_next(
+                    b.l, b.c, osynth::dsp::SvfMode::Lp, xl);
+                const float lr = osynth::dsp::svf_next(
+                    b.r, b.c, osynth::dsp::SvfMode::Lp, xr);
+                const float yl = ll - pl;
+                const float yr = lr - pr;
+                pl = ll;
+                pr = lr;
+                b.acc += fabsf(yl) + fabsf(yr);
+                cl += b.d * yl;
+                cr += b.d * yr;
+                b.d += b.dstep;
+            }
+            {
+                /* Whatever the last crossover did not take. This is the term
+                 * that closes the telescope: every band below has already
+                 * cancelled against its neighbour, so what is left of the
+                 * sum is exactly x. */
+                AnrBand& b = a.b[n - 1];
+                const float yl = xl - pl;
+                const float yr = xr - pr;
                 b.acc += fabsf(yl) + fabsf(yr);
                 cl += b.d * yl;
                 cr += b.d * yr;
@@ -1270,26 +1462,38 @@ void SYNTH_RENDER_IRAM anr_process(float* __restrict__ bl,
              * only from *something*: an empty band is not a quiet one, and
              * an estimate of zero rejects every signal that follows it. */
             if (mag > kAnrEps) {
+                b.sm = mag;
                 b.noise = mag * kAnrBias;
-                b.cur = b.prev = b.raw = mag;
+                for (int w = 0; w < kAnrSubWins; ++w) b.buck[w] = mag;
+                b.raw = mag;
                 b.primed = true;
             }
         } else {
-            if (mag < b.raw) b.raw = mag;
-            if (learn || mag < b.noise * kAnrSignalRatio + kAnrSeed) {
-                if (mag < b.cur) b.cur = mag;
+            /* Everything the estimator looks at is the *smoothed* level; the
+             * gain below still reads the raw one, because that is the half
+             * that has to move at the speed of a syllable. */
+            b.sm += k_est * (mag - b.sm);
+            if (b.sm < b.raw) b.raw = b.sm;
+            if (learn || b.sm < b.noise * kAnrSignalRatio + kAnrSeed) {
+                if (b.sm < b.buck[0]) b.buck[0] = b.sm;
             }
             if (boundary) {
-                if (b.cur < kAnrHuge || b.prev < kAnrHuge) {
-                    b.noise = fminf(b.cur, b.prev) * kAnrBias;
-                } else {
-                    /* Two windows with nothing plausible in either. Climb,
-                     * but by no more than kAnrCreep — see the estimator note
-                     * above. */
-                    b.noise = fminf(b.raw * kAnrBias, b.noise * kAnrCreep);
+                float best = kAnrHuge;
+                for (int w = 0; w < kAnrSubWins; ++w) {
+                    if (b.buck[w] < best) best = b.buck[w];
                 }
-                b.prev = b.cur;
-                b.cur = kAnrHuge;
+                if (best < kAnrHuge) {
+                    b.noise = best * kAnrBias;
+                } else {
+                    /* A whole window with nothing plausible anywhere in it.
+                     * Climb, but no faster than kAnrCreep — see the estimator
+                     * note above. */
+                    b.noise = fminf(b.raw * kAnrBias, b.noise * creep);
+                }
+                for (int w = kAnrSubWins - 1; w > 0; --w) {
+                    b.buck[w] = b.buck[w - 1];
+                }
+                b.buck[0] = kAnrHuge;
                 b.raw = kAnrHuge;
                 /* A window that closed on silence did not measure a floor,
                  * it measured the absence of one. Throwing it away and
@@ -1341,6 +1545,27 @@ void SYNTH_RENDER_IRAM anr_process(float* __restrict__ bl,
  *   the expander  everything below fx.nr.thresh is pushed down at
  *                 fx.nr.ratio, no further than fx.nr.floor, and not until
  *                 fx.nr.hold has run out.
+ *
+ * ---- where the threshold has to sit (S39c) ----
+ *
+ * `thresh` is the one number in this unit that cannot be guessed from first
+ * principles, because it is an absolute level and the thing it has to sit
+ * above is a property of the room and the gain, not of the algorithm. It
+ * shipped at -45 dBFS, which is a sensible figure for a quiet line source and
+ * a useless one for the microphone this unit exists to clean: osynth's own
+ * mic at `in.micgain` 1.33 in an ordinary room puts this detector at about
+ * -29 dBFS on the ambience alone. A threshold 16 dB underneath that is never
+ * crossed from below, so `hold` re-armed on every block, the expander sat
+ * fully open for the entire recording and the unit did — measurably, on a
+ * 10 s capture — 0.4 dB of nothing.
+ *
+ * -24 dBFS is the default now: above that mic's floor with a few dB to spare,
+ * below anything anyone would call speech. It is still a number the player
+ * has to own — halve the gain and it wants moving with it — but it is now
+ * wrong in the direction that is audible and adjustable rather than the
+ * direction that looks like a broken feature. Note that it is a *peak*
+ * detector reading after the high-pass, so it sits a few dB above the RMS
+ * level the master meter shows.
  *
  * `floor` is the control that separates this from a gate, and it is the one
  * worth understanding. A gate closes; a room that goes absolutely silent
@@ -1577,6 +1802,321 @@ void SYNTH_RENDER_IRAM nr_process(float* __restrict__ bl,
     c.gain = target;
 }
 
+/* ---- mic noise reduction (S42): per bin, not per band ----------------------
+ *
+ * The third and last of the noise-reduction units, and the one to reach for
+ * when the complaint is "it is quiet between words but the hiss is still there
+ * underneath my voice". Neither of the other two can fix that:
+ *
+ *   fx.nr   is a downward expander. One detector, one gain, applied to every
+ *           frequency at once. The moment the voice crosses the threshold that
+ *           gain is 1 and every bit of noise in the band comes back with it.
+ *           Measured on a real recording it improves signal-to-noise by
+ *           0.0 dB — it cleans the gaps, which is all a gate has ever done.
+ *   fx.anr  is the right family, at a dozen bands that overlap heavily by
+ *           construction (the difference bank sums to unity, and that is what
+ *           it costs). A voice in one region opens the gain across a wide
+ *           swathe of neighbours, so it manages about 4.5 dB underneath.
+ *
+ * The idea both are missing is that *speech is sparse in frequency*. At any
+ * instant a voice occupies a fraction of the spectrum; every bin it is not in
+ * is noise-only and can still be pushed down, mid-syllable. Resolving that
+ * needs bins, not bands, and bins need a transform.
+ *
+ * ---- the shape ----
+ *
+ * 256-point frames, 50% overlap, sqrt-Hann on the way in and again on the way
+ * out (WOLA, which sums to unity at this hop). 129 bins, 187 Hz apart, one
+ * frame per two audio blocks. 512 was measurably better in the gaps and worse
+ * everywhere that matters, at twice the latency; 128 gave up the resolution
+ * that is the entire point. The 50% hop was within 0.5 dB of 75% on every
+ * measure and costs half the transforms, which on this target is the number
+ * that decides whether a unit ships.
+ *
+ * Per bin, per frame:
+ *
+ *   lambda   the noise power, tracked as a minimum over `adapt` in
+ *            kMnrBuckets buckets — Martin's minimum statistics, and the same
+ *            structure fx.anr uses, including the one-pole ahead of the
+ *            minimum. That smoother is not optional: a raw periodogram bin
+ *            wanders by tens of dB frame to frame on stationary noise, and the
+ *            minimum of the wander is not the level of anything. kMnrBias
+ *            corrects minimum back to mean.
+ *   gamma    P / lambda, the a-posteriori SNR: what is here now against what
+ *            is usually here.
+ *   xi       the a-priori SNR, by the decision-directed estimator (Ephraim &
+ *            Malah 1984): mostly last frame's *result* — g^2 * gamma — and a
+ *            little of this frame's raw excess. This one line is what
+ *            separates a spectral subtractor that sounds like a denoiser from
+ *            one that sounds like wind chimes. Estimating xi from the current
+ *            frame alone makes it swing wildly on the noise's own fluctuation,
+ *            each bin opening and closing independently; leaning on the
+ *            previous *decision* is a feedback path that holds a bin steady
+ *            unless something really arrived in it. kMnrDdTauS is how long it
+ *            leans, and it trades musical noise against transient response.
+ *   g        xi / (1 + xi), the Wiener gain, floored at `fx.mnr.floor`.
+ *
+ * Floored for the same reason fx.nr.floor exists: a bin taken to nothing is
+ * what a listener hears as an artefact, where a bin left 24 dB down is heard
+ * as a quiet room.
+ *
+ * ---- mono, and the delay ----
+ *
+ * The source is folded to mono, cleaned, and written to both channels. The
+ * vocoder's reasoning applies unchanged — this exists to clean a microphone
+ * and osynth's is mono — and it halves the transform count, which is what
+ * makes the unit affordable at all. `bus` mode will fold a stereo patch; that
+ * is why `input` is the default.
+ *
+ * A frame cannot be analysed until it has arrived, so the cleaned signal comes
+ * out kFftN samples behind. In `input` mode that is handled the way the other
+ * two handle their correction — the input's contribution is removed from the
+ * bus and the cleaned version added in its place:
+ *
+ *     bus += m * (cleaned(t - N) - input(t))
+ *
+ * which leaves the bus carrying synth(t) + cleaned(t - N). The input is 5.3 ms
+ * late against the synth beside it and nothing is comb-filtered, because the
+ * undelayed copy is removed rather than mixed with. Adding the *difference*
+ * delayed instead — the obvious-looking alternative — would leave x(t) and
+ * -x(t-N) both on the bus, which is a comb filter with teeth every 187 Hz.
+ */
+
+/* The transform's geometry belongs to fx_fft.h; everything below is named in
+ * terms of it, and this file's units live in an anonymous namespace of their
+ * own rather than in osynth::fx. */
+using osynth::fx::kFftBins;
+using osynth::fx::kFftN;
+
+constexpr int kMnrHop = kFftN / 2;      /* 50% overlap */
+constexpr int kMnrBuckets = 4;          /* 8 measured identical; 2 lost 3 dB */
+constexpr float kMnrOversub = 3.0f;     /* what `amount` = 1 subtracts */
+constexpr float kMnrBias = 1.6f;        /* minimum -> mean, per bin */
+constexpr float kMnrDdTauS = 0.06f;     /* decision-directed memory */
+constexpr float kMnrSmTauS = 0.12f;     /* smoother ahead of the minimum */
+constexpr float kMnrHuge = 1e30f;       /* "this bucket took nothing" */
+constexpr float kMnrEps = 1e-20f;       /* power, not amplitude */
+constexpr float kMnrGamMax = 1e6f;      /* keeps a silent lambda finite */
+
+struct MnrFx {
+    /* Built once by mnr_build(); sqrt-Hann, so analysis and synthesis windows
+     * multiply to a Hann that sums to unity at this hop. */
+    float win[kFftN];
+    float in[kFftN];        /* the last kFftN source samples, oldest first */
+    float ola[kFftN];       /* overlap-add accumulator */
+    float out[kMnrHop];     /* finished samples waiting to be handed back */
+    int in_fill = 0;        /* samples written since the last frame */
+    int out_rd = 0;
+    int out_have = 0;
+    /* Per bin. buck is [bin][bucket] rather than [bucket][bin] so that one
+     * bin's whole working set is contiguous — the loop below touches every
+     * field of a bin together and then never returns to it. */
+    float sm[kFftBins];
+    float lam[kFftBins];
+    float buck[kFftBins][kMnrBuckets];
+    float gp[kFftBins];     /* last frame's gain, for the decision-directed xi */
+    float gamp[kFftBins];   /* ...and last frame's a-posteriori SNR */
+    uint32_t cnt = 0;       /* frames into the current bucket */
+    bool primed = false;
+    bool dirty = false;     /* state worth clearing on the way down */
+    UnitState u;
+};
+
+MnrFx s_mnr;
+
+void mnr_build() {
+    for (int i = 0; i < kFftN; ++i) {
+        const float h =
+            0.5f * (1.0f - cosf(2.0f * 3.14159265f * (float)i / (float)kFftN));
+        s_mnr.win[i] = sqrtf(h);
+    }
+}
+
+void mnr_reset(MnrFx& c) {
+    if (!c.dirty) return;
+    for (int i = 0; i < kFftN; ++i) {
+        c.in[i] = 0.0f;
+        c.ola[i] = 0.0f;
+    }
+    for (int i = 0; i < kMnrHop; ++i) c.out[i] = 0.0f;
+    for (int k = 0; k < kFftBins; ++k) {
+        c.sm[k] = 0.0f;
+        c.lam[k] = 0.0f;
+        c.gp[k] = 1.0f;
+        c.gamp[k] = 1.0f;
+        for (int w = 0; w < kMnrBuckets; ++w) c.buck[k][w] = kMnrHuge;
+    }
+    c.in_fill = 0;
+    c.out_rd = 0;
+    c.out_have = 0;
+    c.cnt = 0;
+    c.primed = false;
+    c.dirty = false;
+}
+
+/* One frame: window, transform, scale every bin, transform back, overlap-add.
+ * Everything that is not per-bin has been hoisted into the caller. */
+/* Deliberately NOT SYNTH_RENDER_IRAM (S42); S43 drew the same line through
+ * the vocoder and the limiter, so see the microphone-chain note above
+ * VocBand for the rule the three now share. IRAM is full: the FX bus alone holds 41 KB of it, and this unit's
+ * 2.6 KB was 2150 bytes more than the image had left. Something had to give,
+ * and this is the right thing to give for three reasons — it is the newest
+ * code, so nothing else was working before it and stopped; it is opt-in and
+ * off by default, where the units it would have displaced run on every patch;
+ * and it is the only unit here that already carries 5.3 ms of latency, so it
+ * is the one with somewhere to absorb a cache miss.
+ *
+ * What that costs is the jitter immunity the note above SYNTH_RENDER_IRAM in
+ * synth_config.h describes: with `fx.mnr` on, BLE or LittleFS traffic can put
+ * a flash-cache miss in the middle of a frame. The frame is one per two
+ * blocks rather than per block, and 2.7 ms of budget is a lot of misses, so
+ * this should be inaudible — but it is a real difference from the rest of the
+ * bus and the first thing to suspect if this unit alone crackles under app
+ * traffic. Marking it back up means finding the IRAM somewhere else; turning
+ * OSYNTH_RENDER_IN_IRAM off entirely is the blunt instrument that frees all
+ * of it, at the cost of every other unit's immunity. */
+void mnr_frame(MnrFx& c, float over, float gmin, float k_sm,
+                                 float a_dd, bool learn, bool boundary) {
+    /* Off the stack for the reason fx_fft.cpp's scratch is: 2 KB here plus
+     * 1 KB there does not fit in a 6 KB audio task that also runs a reverb. */
+    static float buf[kFftN];
+    static float re[kFftBins], im[kFftBins];
+    for (int i = 0; i < kFftN; ++i) buf[i] = c.in[i] * c.win[i];
+    osynth::fx::fft_real(buf, re, im);
+
+    for (int k = 0; k < kFftBins; ++k) {
+        const float p = re[k] * re[k] + im[k] * im[k];
+        if (!c.primed) {
+            c.sm[k] = p;
+            /* lam holds the raw minimum; kMnrBias is applied once, below. */
+            c.lam[k] = p;
+            for (int w = 0; w < kMnrBuckets; ++w) c.buck[k][w] = p;
+        } else {
+            c.sm[k] += k_sm * (p - c.sm[k]);
+            if (learn) {
+                /* Held: the profile is what is arriving, not a minimum of it.
+                 * The buckets are filled too, so releasing `learn` resumes
+                 * tracking from here instead of from a window of nothing. */
+                c.lam[k] = c.sm[k];
+                for (int w = 0; w < kMnrBuckets; ++w) c.buck[k][w] = c.sm[k];
+            } else {
+                if (c.sm[k] < c.buck[k][0]) c.buck[k][0] = c.sm[k];
+                if (boundary) {
+                    float best = kMnrHuge;
+                    for (int w = 0; w < kMnrBuckets; ++w) {
+                        if (c.buck[k][w] < best) best = c.buck[k][w];
+                    }
+                    if (best < kMnrHuge) c.lam[k] = best;
+                    for (int w = kMnrBuckets - 1; w > 0; --w) {
+                        c.buck[k][w] = c.buck[k][w - 1];
+                    }
+                    c.buck[k][0] = kMnrHuge;
+                }
+            }
+        }
+
+        /* `amount` is over-subtraction, exactly as it is on fx.anr: it inflates
+         * the estimate rather than scaling the gain, so turning it up buys a
+         * deeper cut where there is noise and still leaves a loud bin alone. */
+        float lam_e = c.lam[k] * kMnrBias * over;
+        if (lam_e < kMnrEps) lam_e = kMnrEps;
+        float gam = p / lam_e;
+        if (gam > kMnrGamMax) gam = kMnrGamMax;
+        const float ex = (gam > 1.0f) ? (gam - 1.0f) : 0.0f;
+        float xi = a_dd * c.gp[k] * c.gp[k] * c.gamp[k] + (1.0f - a_dd) * ex;
+        if (xi < 1e-10f) xi = 1e-10f;
+        float g = xi / (1.0f + xi);
+        if (g < gmin) g = gmin;
+        c.gp[k] = g;
+        c.gamp[k] = gam;
+        re[k] *= g;
+        im[k] *= g;
+    }
+
+    osynth::fx::fft_real_inv(re, im, buf);
+    for (int i = 0; i < kFftN; ++i) c.ola[i] += buf[i] * c.win[i];
+}
+
+/* Out of IRAM with mnr_frame() above — the note there covers why. */
+void mnr_process(float* __restrict__ bl, float* __restrict__ br,
+                 size_t frames) {
+    MnrFx& c = s_mnr;
+    const float m = unit_gate(c.u, pv(MNR_ON), nullptr, 0);
+    if (m < 0.0f) {
+        /* Off: the frame in flight describes a room that will have moved by
+         * the time this is switched back on, and the overlap-add tail would
+         * arrive 5 ms into the next thing said. */
+        mnr_reset(c);
+        return;
+    }
+
+    /* Same source contract as the other two (S39b) — the note in
+     * anr_process() covers why these are not __restrict__. */
+    const bool from_input = ((int)pv(MNR_SRC) == 1);
+    const float* sl = bl;
+    const float* sr = br;
+    if (from_input) {
+        if (frames > SYNTH_BLOCK_SIZE ||
+            !audio_io_in_fx_block(s_nr_src_l, s_nr_src_r, frames)) {
+            mnr_reset(c);
+            return;
+        }
+        sl = s_nr_src_l;
+        sr = s_nr_src_r;
+    }
+    c.dirty = true;
+
+    const float over = fmaxf(pvm(MNR_AMOUNT) * kMnrOversub, 1e-3f);
+    const float gmin = powf(10.0f, pvm(MNR_FLOOR) * (1.0f / 20.0f));
+    const bool learn = pv(MNR_LEARN) >= 0.5f;
+
+    /* A frame is the clock for everything above, exactly as a block is for the
+     * other two units. */
+    const float fr_s = (float)kMnrHop / kSr;
+    const float k_sm = 1.0f - expf(-fr_s / kMnrSmTauS);
+    const float a_dd = expf(-fr_s / kMnrDdTauS);
+    uint32_t bucket = (uint32_t)(pvm(MNR_ADAPT) / (float)kMnrBuckets / fr_s);
+    if (bucket < 1) bucket = 1;
+
+    for (size_t i = 0; i < frames; ++i) {
+        /* Read the source before writing the bus: in `bus` mode these alias. */
+        const float xl = sl[i], xr = sr[i];
+        c.in[kMnrHop + c.in_fill] = 0.5f * (xl + xr);
+        ++c.in_fill;
+        if (c.in_fill >= kMnrHop) {
+            c.in_fill = 0;
+            const bool boundary = (++c.cnt >= bucket);
+            if (boundary) c.cnt = 0;
+            mnr_frame(c, over, gmin, k_sm, a_dd, learn, boundary);
+            c.primed = true;
+            /* The first half of the accumulator is finished — no later frame
+             * reaches it — so it becomes the output, and both buffers slide.
+             * The hop is exactly half the frame, which is what makes this two
+             * copies rather than a pair of ring cursors. */
+            for (int j = 0; j < kMnrHop; ++j) {
+                c.out[j] = c.ola[j];
+                c.ola[j] = c.ola[j + kMnrHop];
+                c.ola[j + kMnrHop] = 0.0f;
+                c.in[j] = c.in[j + kMnrHop];
+            }
+            c.out_rd = 0;
+            c.out_have = kMnrHop;
+        }
+        /* Never underruns once primed: a frame lands on exactly the sample
+         * that would have emptied this. Before the first one it is silent,
+         * which is the unit's latency and not a fault. */
+        float y = 0.0f;
+        if (c.out_have > 0) {
+            y = c.out[c.out_rd++];
+            --c.out_have;
+        }
+        /* The input's contribution replaced by the cleaned one, or the bus
+         * crossfaded to it — settled above, by where xl came from. */
+        bl[i] += m * (y - xl);
+        br[i] += m * (y - xr);
+    }
+}
+
 /* ---- vocoder (S38): the input's spectrum imposed on the synth bus ----
  *
  * A classic analysis/synthesis vocoder, and the first unit on this bus whose
@@ -1604,21 +2144,229 @@ void SYNTH_RENDER_IRAM nr_process(float* __restrict__ bl,
  * signal, not something to hear. Speaking into a vocoder while monitoring your
  * own voice dry would be the wrong default and is one route setting away.
  *
- * `fx.voc.freeze` holds the band envelopes where they are. The input stops
- * being read (so it costs *less* while frozen), the carrier keeps flowing, and
- * the synth sustains whatever vowel was last said — the app's Hold-to-sample
- * button is this parameter inverted: recording while pressed, frozen on
- * release. Sibilance is live HF by definition and does not survive a freeze.
+ * `fx.voc.freeze` records a phrase and replays it under every note (S43).
+ * Held down it is live and recording; released it becomes the modulator, and
+ * each note-on restarts it from the beginning. Play a chord and the synth
+ * says the phrase; play another and it says it again. Past the end of the
+ * recording there is nothing to analyse, so a note held longer than the
+ * phrase simply stops speaking — the vocoder goes quiet over a carrier that
+ * is still sounding, which is what silence into a vocoder has always meant.
+ * `fx.voc.loop` is the other reading of the same gesture: the phrase repeats
+ * for as long as the note is held, which is what a rhythmic capture wants and
+ * what a spoken one does not.
+ *
+ * It replaced a spectral freeze, and the reason is worth keeping. That
+ * version held the band envelopes where they stood, which is one frame of
+ * spectrum: a single vowel. It failed twice over. Frozen live, the envelopes
+ * follow fx.voc.release (25-40 ms) and nobody releases a button while still
+ * making the sound, so it captured the silence after the word — measured, 12
+ * bands above the gate at the instant speech stopped and none 100 ms later.
+ * Given a peak-hold to reach back through that gap, each band then took its
+ * maximum from a *different* moment, which is the union of every vowel said
+ * and therefore flat — and a flat set of band gains is a flat filter, so the
+ * carrier passed through untouched. Both failures are one fact seen twice: a
+ * vowel is a shape across the bank at a single instant, and holding one is
+ * not what "capture a sample" means to anyone holding the button.
+ *
+ * Sibilance survives here where it could not survive a freeze: it is live HF
+ * from whatever the modulator currently is, and in sample mode that is the
+ * recording, so the consonants come back with it.
  *
  * Silence in, silence out, and that is correct rather than a failure: a
  * vocoder with nothing said into it has nothing to say. A build with no audio
  * input at all warns once and behaves the same way.
+ *
+ * ---------------------------------------------------------------------------
+ * Gain staging (S43), and why this unit used to be so hard to set up
+ *
+ * Both banks read SvfMode::Bp, which in this SVF is the *un-normalized*
+ * bandpass: its gain at the band centre is Q, not 1. Their outputs are then
+ * multiplied together — an envelope from the analysis bank times a sample
+ * from the synthesis bank — so the wet path carried a Q^2 term. Q here is not
+ * a control of its own either; voc_rebuild() derives it from the band count
+ * and the span as well, so *four* knobs moved the output level:
+ *
+ *   fx.voc.q     0 -> 1        ~ +28 dB   (Q_eff spans 5x, squared)
+ *   fx.voc.bands 10 -> 16      ~ +13 dB   (q_nat rises as the bands narrow)
+ *   a narrowed low/high span   ~ +5 dB
+ *   speaking louder            linear and unbounded — no modulator AGC
+ *
+ * Every one of those reads as a *tone* control, so the unit had to be
+ * re-gained after each of them, and a phrase leant into arrived at the sink's
+ * soft_clip() as distortion. Two changes, and neither is a compensation
+ * curve bolted on top:
+ *
+ *  - BpN, not Bp. The normalized bandpass is unity at the centre whatever Q
+ *    is, so a bank whose skirts meet sums back to something flat *whatever
+ *    the band count and span are*. fx.voc.q is now a timbre control and only
+ *    that. The magnitudes it used to carry are restored by kVocQRef, a
+ *    frozen Q standing where the derived one was — see the note there, and
+ *    note especially that getting this wrong once made the unit quiet and
+ *    unintelligible rather than merely mis-levelled, because `fx.voc.gate`
+ *    is an absolute threshold that has to stay in the same domain.
+ *
+ *  - fx.voc.norm scales the band envelopes so the bank always sees a
+ *    reference speaking loudness (kVocNormRef, and it has to be a value a
+ *    voice really reaches), by dividing out the broadband
+ *    follower the sibilance path already maintained. That is what makes a
+ *    setting portable between two people, two mics and two input gains — and
+ *    it is what makes a stored preset mean anything at all, since without it
+ *    the "right" fx.voc.level depends on how far away you are sitting. The
+ *    boost is capped at kVocNormRef/kVocNormFloor so a silent room is not
+ *    amplified into the patch; the gate still runs first, in the modulator's
+ *    own domain, so what gets normalized is what survived it.
+ *
+ * The wet path ends in soft_clip(). That is a backstop and not a sound: with
+ * the two changes above a hot phrase lands near unity rather than 20 dB over
+ * it, and anything left is the master limiter's job. It is here rather than
+ * downstream so that an overload never reaches the delay and reverb lines,
+ * which store int16 and would keep replaying it.
  */
+
+/* The bank's frozen Q (S43). SvfMode::BpN is exactly SvfMode::Bp divided by
+ * the band's Q, so every magnitude in this unit moved by that factor when the
+ * banks changed -- including, fatally, its position relative to `fx.voc.gate`,
+ * which is an absolute threshold and did not move with it. At the registered
+ * defaults the envelopes shrank 4.67x while the gate stayed at 0.012, so most
+ * bands sat below it and were skipped outright: quiet, and unintelligible
+ * with it.
+ *
+ * The repair is not a new set of staging constants -- that was the first
+ * attempt and it was two guesses wearing a comment. Because BpN = Bp / Q_eff
+ * is an identity, putting a *constant* where Q_eff used to be reproduces the
+ * old arithmetic term for term:
+ *
+ *     wet = Q * SUM(BpN_car * (Q*b.env - gate)),  then sibilance, then level
+ *
+ * with Q pinned here instead of derived per rebuild. fx.voc.gate and
+ * fx.voc.level therefore keep the meanings, defaults and ranges they had
+ * before S43 -- a stored patch is unaffected -- and the output no longer
+ * tracks fx.voc.q, fx.voc.bands or the low/high span, which was the entire
+ * point of the change.
+ *
+ * The value is Q_eff at the registered defaults: 16 bands over 150-7000 Hz at
+ * q = 0.5. A 10-band build (no PSRAM) ran at 2.79 before and now runs here
+ * too, so it is ~4.5 dB louder than it used to be. That is the dependence
+ * being removed rather than a regression: the same patch now sounds the same
+ * on both parts, which it never did. */
+constexpr float kVocQRef = 4.671f;
+
+/* Normalization (fx.voc.norm). kVocNormRef is the broadband follower value
+ * the modulator is pinned to, so a speaker sitting at it gets nrm = 1 and
+ * behaves exactly as the unit does with normalization off -- that is the
+ * calibration point, and it is why turning the switch on is not also a level
+ * change -- 0.04 is where env_bb actually sits for an ordinary mic signal,
+ * measured, and getting that wrong is what made this switch a +10 dB button
+ * instead of a normaliser. kVocNormFloor caps the boost at ref/floor, which
+ * is 2x: enough to bring a quiet talker up, nowhere near enough to lift a
+ * room between phrases into the patch. It was 20x, and it reached it.
+ *
+ * The gate is subtracted before this, in the modulator's own domain, because
+ * it describes the room rather than the voice. The trade-off is real and
+ * worth knowing: a very quiet source has band envelopes near the gate, so it
+ * is gated before it can be normalized up. fx.voc.gate is the control for
+ * that, and lowering it is the answer to "the vocoder ignores me". */
+constexpr float kVocNormRef = 0.04f;
+constexpr float kVocNormFloor = 0.02f;
+
+/* How fast the normaliser is allowed to turn UP, in ms. Down is instantaneous
+ * (the look-ahead below sees the block before it is used), which is what stops
+ * a syllable opening with a burst; up has to be slow, and originally was not
+ * slow at all -- nrm simply tracked 1/env_bb, so it rose as fast as env_bb
+ * decayed. That is an AGC with no release: when a word ends env_bb collapses
+ * while the high-Q band envelopes are still ringing, and the ring-out gets
+ * multiplied by the rising gain. A swell after every word, which is what
+ * "fx.voc.norm clips" turned out to be. 300 ms is slower than any band
+ * envelope's release (fx.voc.release tops out at 500 ms, but the useful range
+ * is tens of ms), so the gain can no longer outrun the decay it is dividing. */
+constexpr float kVocNormRiseMs = 300.0f;
+
+/* fx.voc.clarity (S43): the consonant path, and what is wrong with it off.
+ *
+ * The sibilance tap is gated by a presence test, `open`, which asks whether
+ * the modulator is saying anything and whether there is a carrier to say it
+ * on. Two things about the first half are wrong, and both only became visible
+ * once anyone tried to be understood through the unit:
+ *
+ *   - it saturates at env_bb = 0.125 (`bb * 8.0f`), and an ordinary mic signal
+ *     puts env_bb at 0.02-0.04. So it never came close to opening: measured
+ *     over a speech-like modulator its mean value is 0.07, which is -23 dB on
+ *     the consonants;
+ *   - it reads RAW env_bb, so it is the one quantity in this unit that
+ *     fx.voc.norm does not reach. A quiet speaker got the bank normalised up
+ *     to reference while their consonants stayed exactly as buried.
+ *
+ * With clarity on the test is taken in the normalised domain and scaled to
+ * saturate at the reference loudness rather than three times above it, and
+ * the tap is lifted by kVocClarityGain. Off is the pre-S43 behaviour exactly,
+ * so the two can be A/B'd, which is the point: this is a taste fork. More
+ * consonant is more intelligible and also more raw microphone -- at some
+ * point you stop hearing a vocoder and start hearing a voice with a synth
+ * behind it, and where that point sits is not something a default can know.
+ *
+ * kVocClarityGain is sized so consonants land 6-10 dB under the vowels during
+ * a burst, measured; it is not a taste value and moving it wants voc_sim. */
+constexpr float kVocClarityGain = 0.35f;
+
+/* ---- the microphone chain is not IRAM-resident (S43) ----
+ *
+ * vocoder_process() and limiter_process() below carry NOINLINE_ATTR and no
+ * SYNTH_RENDER_IRAM, joining mnr_process()/mnr_frame() out in flash. Those
+ * three are the units whose input is the microphone rather than the
+ * instrument, and drawing the line there is what makes this a rule rather
+ * than a series of individual retreats:
+ *
+ *   the instrument path - engines, drums, looper, and every effect that
+ *                         colours them - keeps its flash-cache immunity;
+ *   the microphone path - mic NR, vocoder, limiter - trades it for the IRAM
+ *                         the instrument path needs.
+ *
+ * The measurements behind it. `sram_low` is 175 KB and holds all IRAM code
+ * plus all *initialised* data - .bss lives in sram_high, and none of this is
+ * guessable from the linker's errors; tools/iram_budget.py has the layout. A
+ * linked image with none of this session's work leaves 5 408 bytes of it
+ * free, and the mic NR alone is at or over that line, so this is not one unit
+ * being slightly too big. These two free about 4.2 KB against a shortfall of
+ * at most 960 bytes, which is the margin this should have had from the start.
+ *
+ * NOINLINE_ATTR is load-bearing, not decoration. Both are anonymous-namespace
+ * functions with one call site, so GCC inlines them into fx_process() - which
+ * *is* SYNTH_RENDER_IRAM - and the callee's own placement then means nothing.
+ * Dropping SYNTH_RENDER_IRAM without noinline moves zero bytes and reports
+ * the identical linker error, which is a mistake worth making only once.
+ *
+ * What it costs: with the vocoder or the limiter on, BLE or LittleFS traffic
+ * can put a flash-cache miss inside the block. The budget is 1.33 ms and a
+ * miss is microseconds - the same arithmetic the mic NR's note works through
+ * to reach "should be inaudible" - but it is a real difference from the rest
+ * of the bus, and these are the first units to suspect if something crackles
+ * only while the app is talking. */
+
+/* The capture buffer (S43). Mono int16 at the render rate, PSRAM-preferred
+ * through line_alloc() like every other buffer on this bus.
+ *
+ * Sized in seconds rather than samples because what it holds is a spoken
+ * phrase, and gated on the same PSRAM proxy the band count uses: 2.5 s is
+ * 240 KB, which is nothing next to the looper on a P4 or S3 and impossible on
+ * a classic ESP32, where 0.75 s still holds a word or two.
+ *
+ * Recording is linear from the press, not circular: a circular buffer would
+ * always hold the last N seconds, which sounds like the same thing but makes
+ * the release edge decide where the phrase *starts*, and that is exactly the
+ * timing nobody can hit — the mistake the spectral freeze made twice. Here
+ * the press starts the recording and the release only ends it, so both edges
+ * are ones a person can place. */
+#if CONFIG_SPIRAM
+constexpr float kVocSampS = 2.5f;
+#else
+constexpr float kVocSampS = 0.75f;
+#endif
+constexpr uint32_t kVocSampLen = (uint32_t)(kVocSampS * (float)kSr);
 
 struct VocBand {
     osynth::dsp::Svf mod; /* analysis bandpass, on the modulator */
     osynth::dsp::Svf car; /* synthesis bandpass, on the carrier */
-    float env = 0.0f;     /* follower output, held while frozen */
+    float env = 0.0f;     /* follower output */
 };
 
 struct VocoderFx {
@@ -1630,6 +2378,16 @@ struct VocoderFx {
     osynth::dsp::Noise rng;
     float env_bb = 0.0f;  /* broadband modulator follower, opens sibilance */
     float env_car = 0.0f; /* carrier follower — see the sibilance block */
+    float nrm = 1.0f;     /* fx.voc.norm scale, block rate */
+    /* Capture (S43). `rec` is linear: `rec_w` is the write cursor while
+     * recording and `rec_len` freezes it on release. `play` runs past
+     * `rec_len` and stays there, which is what makes the tail silent. */
+    osynth::dsp::Line rec;
+    uint32_t rec_w = 0;
+    uint32_t rec_len = 0;
+    uint32_t play = 0;
+    bool rec_ok = false;
+    bool was_sampling = false; /* fx.voc.freeze edge, both directions */
     int n = 0;           /* bands actually built */
     /* Coefficient cache. Rebuilding is 2N tanf, which is affordable per block
      * but pointless: these five change when a knob moves and not otherwise. */
@@ -1683,8 +2441,8 @@ void voc_rebuild(VocoderFx& v, int bands, float low, float high, float q01,
     v.n = bands;
 }
 
-void SYNTH_RENDER_IRAM vocoder_process(float* __restrict__ bl,
-                                       float* __restrict__ br, size_t frames) {
+NOINLINE_ATTR void vocoder_process(float* __restrict__ bl,
+                                   float* __restrict__ br, size_t frames) {
     VocoderFx& v = s_voc;
     const float m =
         unit_gate(v.u, gated(pv(VOC_ON), pvm(VOC_MIX)), nullptr, 0);
@@ -1694,6 +2452,11 @@ void SYNTH_RENDER_IRAM vocoder_process(float* __restrict__ bl,
         for (int i = 0; i < kVocBandsMax; ++i) v.b[i].env = 0.0f;
         v.env_bb = 0.0f;
         v.env_car = 0.0f;
+        v.nrm = 1.0f;
+        /* The recording survives a bypass, and so must was_sampling: the edges
+         * belong to the parameter, not to the switch. Clearing either would
+         * throw a phrase away, or re-arm a recording over it, because someone
+         * toggled the unit off and on. */
         return;
     }
 
@@ -1713,16 +2476,77 @@ void SYNTH_RENDER_IRAM vocoder_process(float* __restrict__ bl,
     }
     const int n = v.n;
 
-    /* Frozen: the envelopes hold, so there is nothing to analyse and the
-     * modulator is not even read. */
-    const bool frozen = pv(VOC_FREEZE) >= 0.5f;
-    /* The frames <= guard is the scratch buffer's contract, not defensiveness
+    /* Where the modulator comes from this block: the microphone, or the
+     * recorded phrase. Either way the analysis below is identical, which is
+     * the whole point of storing audio rather than a spectral frame.
+     *
+     * The frames <= guard is the scratch buffer's contract, not defensiveness
      * about a value that varies: the render callback always passes exactly
      * SYNTH_BLOCK_SIZE. It is here so that if that ever stops being true the
      * unit goes quiet instead of reading past s_voc_mod. */
-    const bool live = !frozen && frames <= SYNTH_BLOCK_SIZE &&
-                      audio_io_in_mono(s_voc_mod, frames);
-    if (!live && !frozen && !v.warned) {
+    const bool sampling = pv(VOC_FREEZE) >= 0.5f && v.rec_ok;
+    const bool fits = frames <= SYNTH_BLOCK_SIZE;
+    bool live = false;
+
+    if (sampling != v.was_sampling) {
+        if (sampling) {
+            /* Release: the phrase ends wherever the recording got to, and the
+             * playhead is left at that end so nothing sounds until a note
+             * asks for it. */
+            v.rec_len = v.rec_w;
+            v.play = v.rec_len;
+        } else {
+            /* Press: a new phrase starts here. */
+            v.rec_w = 0;
+            v.rec_len = 0;
+        }
+        v.was_sampling = sampling;
+    }
+
+    if (sampling && fits) {
+        /* A note that started this block restarts the phrase. Read once per
+         * block: the tap reports the loudest note-on of the block, so a chord
+         * retriggers once rather than once per key. */
+        if (voice_manager_block_note() != 0) v.play = 0;
+        /* Past the end: silence, or back to the start. The rec_len test is
+         * what keeps an empty recording from wrapping onto itself and reading
+         * a buffer nothing was ever written into.
+         *
+         * The splice is not crossfaded, and does not need to be: the
+         * modulator is a control signal rather than something anyone hears,
+         * so a discontinuity here costs a fast step in the band followers --
+         * which have attack and release smoothing of their own -- instead of
+         * the click it would cost in an audio loop. */
+        const bool loop = pv(VOC_LOOP) >= 0.5f && v.rec_len > 0;
+        for (size_t i = 0; i < frames; ++i) {
+            if (v.play >= v.rec_len) {
+                if (!loop) {
+                    s_voc_mod[i] = 0.0f;
+                    continue;
+                }
+                v.play = 0;
+            }
+            s_voc_mod[i] = (float)v.rec.buf[v.play++] * (1.0f / 32768.0f);
+        }
+        /* Live even past the end of the phrase: the analysis has to keep
+         * running on the silence so the band envelopes decay through their
+         * release instead of stopping wherever the last sample left them. */
+        live = true;
+    } else if (!sampling && fits && audio_io_in_mono(s_voc_mod, frames)) {
+        live = true;
+        /* Record while the button is down, linearly, until the buffer is
+         * full. Full is not an error: it is the longest phrase this build can
+         * hold, and the release still ends it wherever it got to. */
+        if (v.rec_ok) {
+            for (size_t i = 0; i < frames && v.rec_w < v.rec.len; ++i) {
+                int32_t s = (int32_t)(s_voc_mod[i] * 32767.0f);
+                if (s > 32767) s = 32767;
+                if (s < -32768) s = -32768;
+                v.rec.buf[v.rec_w++] = (int16_t)s;
+            }
+        }
+    }
+    if (!live && !v.warned) {
         v.warned = true;
         /* Queued, not printed: this runs on the audio task, where the console
          * write would itself be a dropout (synth_warn.h). */
@@ -1747,22 +2571,67 @@ void SYNTH_RENDER_IRAM vocoder_process(float* __restrict__ bl,
      * pedestal of room noise out of the envelope along with the noise. */
     const float gate = osynth::dsp::smooth_lin(v.s_gate, pvm(VOC_GATE)) * 0.2f;
 
+    const bool clarity = pv(VOC_CLARITY) >= 0.5f;
     const int carrier = (int)pv(VOC_CARRIER);
     const bool use_bus = (carrier != 1);   /* bus, or bus+noise */
     const bool use_noise = (carrier != 0); /* noise, or bus+noise */
 
+    /* Modulator normalization, block rate. One number for the whole bank, so
+     * the *relative* shape of the spectrum — which is all a vocoder is —
+     * survives untouched and only its overall size is pinned. Once per block
+     * rather than per sample because a divide is the most expensive thing
+     * that could go in the sample loop and the quantity it computes moves at
+     * the follower's rate, which is far slower than 1.33 ms.
+     *
+     * The divisor is the larger of the broadband follower and *this* block's
+     * mean-rectified level, which is the whole reason the second term is
+     * there: env_bb carries the previous block, so at the first block of a
+     * word it is still sitting near the floor and the reciprocal is at its
+     * ceiling — every syllable would open with a 1.33 ms burst 26 dB over the
+     * rest of it. The block is already in s_voc_mod before the loop runs, so
+     * taking its level first is a look-ahead that costs one pass of adds and
+     * makes an under-estimate impossible. Falling back to env_bb on the way
+     * down is what keeps the release slow instead of snapping the gain up
+     * between words.
+     *
+     * Frozen blocks hold the last value along with the envelopes it belongs
+     * to; a build with no audio input has nothing to normalize. */
+    const bool norm = pv(VOC_NORM) >= 0.5f;
+    if (live && norm && frames > 0) {
+        float sum = 0.0f;
+        for (size_t i = 0; i < frames; ++i) sum += fabsf(s_voc_mod[i]);
+        const float blk = sum / (float)frames;
+        const float ref = (blk > v.env_bb) ? blk : v.env_bb;
+        const float target = kVocNormRef / fmaxf(ref, kVocNormFloor);
+        /* Instant down, slow up -- the limiter idiom, and here for the same
+         * reason: a gain that is allowed to rise as fast as its divisor falls
+         * will amplify every decay it is supposed to be levelling. */
+        if (target < v.nrm) {
+            v.nrm = target;
+        } else {
+            const float k = 1.0f - expf(-((float)frames / kSr) /
+                                        (kVocNormRiseMs * 0.001f));
+            v.nrm += k * (target - v.nrm);
+        }
+    } else {
+        /* Switched off, or nothing arriving to measure. */
+        v.nrm = 1.0f;
+    }
+    const float nrm = v.nrm;
+
     for (size_t i = 0; i < frames; ++i) {
-        /* Analysis. Skipped entirely while frozen — the held envelopes are
-         * the whole point, and not reading the input is what makes a freeze
-         * cheaper than a live block rather than the same price. */
+        /* Analysis. `live` is false only when there is no modulator at all —
+         * no audio input on this build — in which case the followers decay
+         * and the unit falls silent, which is the correct thing for a vocoder
+         * with nothing said into it. */
         if (live) {
             const float x = s_voc_mod[i];
             const float a = fabsf(x);
             v.env_bb += (a > v.env_bb ? ka : kr) * (a - v.env_bb);
             for (int k = 0; k < n; ++k) {
                 VocBand& b = v.b[k];
-                const float y = fabsf(
-                    osynth::dsp::svf_next(b.mod, v.mc[k], osynth::dsp::SvfMode::Bp, x));
+                const float y = fabsf(osynth::dsp::svf_next(
+                    b.mod, v.mc[k], osynth::dsp::SvfMode::BpN, x));
                 b.env += (y > b.env ? ka : kr) * (y - b.env);
             }
         }
@@ -1772,7 +2641,7 @@ void SYNTH_RENDER_IRAM vocoder_process(float* __restrict__ bl,
          * synth has nothing for the vowels to land on, and the noise source
          * is what makes whispers and unpitched consonants work. */
         float c = use_bus ? 0.5f * (bl[i] + br[i]) : 0.0f;
-        if (use_noise) c += 0.5f * osynth::dsp::noise_next(v.rng);
+        if (use_noise) c += kVocNoiseGain * osynth::dsp::noise_next(v.rng);
 
         /* How much carrier there is to shape. The band products carry this
          * for free — a band multiplied by a silent carrier is silent — but
@@ -1787,22 +2656,30 @@ void SYNTH_RENDER_IRAM vocoder_process(float* __restrict__ bl,
         float wet = 0.0f;
         for (int k = 0; k < n; ++k) {
             VocBand& b = v.b[k];
-            const float e = b.env - gate;
+            /* Gate first, in the modulator's own domain: it is a description
+             * of the room's noise floor, so normalizing before subtracting it
+             * would make the same room read as a different floor at every
+             * distance from the mic. */
+            const float e = (b.env * kVocQRef - gate) * nrm;
             if (e <= 0.0f) {
                 /* Still run the filter: its state has to stay current or the
                  * band rings when the gate reopens. */
                 (void)osynth::dsp::svf_next(b.car, v.cc[k],
-                                            osynth::dsp::SvfMode::Bp, c);
+                                            osynth::dsp::SvfMode::BpN, c);
                 continue;
             }
             wet += osynth::dsp::svf_next(b.car, v.cc[k],
-                                         osynth::dsp::SvfMode::Bp, c) * e;
+                                         osynth::dsp::SvfMode::BpN, c) * e;
         }
+        /* The synthesis bank's half of the frozen Q. Applied to the sum
+         * rather than per band: identical result, one multiply. */
+        wet *= kVocQRef;
 
         /* Sibilance rides over the bank, gated by the broadband envelope so
-         * room hiss does not sit on top of the patch between phrases. Dead
-         * while frozen: it is live high-frequency content by definition and
-         * there is nothing to hold. */
+         * room hiss does not sit on top of the patch between phrases. It is
+         * live HF from whatever the modulator currently is, so unlike the old
+         * spectral freeze it survives a capture: the consonants come back
+         * with the replayed phrase. */
         if (live) {
             /* Filtered unconditionally, gain applied after: skipping the call
              * while shut leaves the filter's state stale, and it then rings on
@@ -1817,13 +2694,29 @@ void SYNTH_RENDER_IRAM vocoder_process(float* __restrict__ bl,
                  * reaches full — a carrier at any ordinary playing level
                  * saturates its term, so this is a presence test, not a
                  * loudness one. */
-                const float open = fminf(bb * 8.0f, 1.0f) *
-                                   fminf(v.env_car * 20.0f, 1.0f);
-                wet += hp * sib * open;
+                /* Normalised and scaled to saturate at the reference
+                 * loudness when clarity is on; the raw, far-too-high original
+                 * when it is off. See the kVocClarityGain note. */
+                const float open =
+                    (clarity ? fminf(bb * nrm * (1.0f / kVocNormRef), 1.0f)
+                             : fminf(bb * 8.0f, 1.0f)) *
+                    fminf(v.env_car * 20.0f, 1.0f);
+                /* Normalized with the bank, for the same reason and by the
+                 * same number: a consonant that grew louder as you leant in
+                 * while the vowels did not would be worse than either. No
+                 * staging gain of its own -- it rides `level` with the bank,
+                 * exactly as it did before S43, and the bank's frozen Q has
+                 * already been applied above so the balance is preserved. */
+                wet += hp * sib * open * nrm *
+                       (clarity ? kVocClarityGain : 1.0f);
             }
         }
 
-        wet *= level;
+        /* Backstop, not a sound — see the staging note in the header. It is
+         * the identity below 0.8, so a properly staged patch never reaches
+         * it, and an improperly staged one saturates here instead of writing
+         * a spike into the delay and reverb lines downstream. */
+        wet = osynth::dsp::soft_clip(wet * level);
         bl[i] += m * (wet - bl[i]);
         br[i] += m * (wet - br[i]);
     }
@@ -3338,6 +4231,105 @@ void SYNTH_RENDER_IRAM stereo_process(float* __restrict__ bl,
     }
 }
 
+/* ---- master limiter (S43) ----
+ *
+ * Last on the bus, after the stereo stage, so it is the only unit that sees
+ * the mix exactly as audio_io will. That position is the point: `width` and
+ * `pan` are the last things that can push one channel past the other, and a
+ * ceiling applied before them is a ceiling on a signal that no longer exists.
+ *
+ * Why it is not the compressor two stages up. That one is a *glue* unit — a
+ * ratio, a soft knee, and a gain computed once per block from the block's
+ * peak and ramped across it, which is the right shape for something whose job
+ * is to move by a few dB over tens of milliseconds. A ceiling cannot be
+ * approximate: the sample that matters is the one that would have clipped,
+ * and a gain that arrives up to a block late is a gain that missed it. So
+ * this one computes its reduction per sample with *zero* attack, which makes
+ * |out| <= ceil exact rather than a target, and spends its entire tuning
+ * budget on the release.
+ *
+ * Why it is not the sink's soft_clip() either. That is a saturator: past its
+ * knee it bends the waveform, which is the right failure mode for a last-
+ * resort output stage and the wrong one for a ceiling anything is relying on.
+ * It stays where it is, behind this — and note that its knee sits at -1.94
+ * dBFS, so a `ceil` set above that is still handing it something to shape.
+ * The default is just under the knee for exactly that reason; above it the
+ * two stages are working on the same peaks and only the softer one is
+ * audible.
+ *
+ * Zero attack has one cost and it is worth naming: a gain that steps within a
+ * sample of a transient puts a small amount of intermodulation on the
+ * transient itself, which on a bass-heavy mix reads as a click at the very
+ * top of the reduction range. There is no lookahead buffer to trade for it —
+ * one would cost latency on every path through the instrument, including the
+ * keyboard — and at the depths this is meant for (a few dB, catching a
+ * vocoder phrase or a drum-plus-reverb pile-up) it is inaudible. Reach for
+ * the compressor if you want the mix squeezed rather than capped.
+ *
+ * `gain` sits in front of the ceiling, which is what makes it a loudness
+ * control instead of a volume one: turn it up and the quiet parts rise while
+ * the peaks stay where they are. Two knobs rather than one because those are
+ * genuinely two decisions — how loud, and how hard.
+ */
+
+struct LimiterFx {
+    float gain = 1.0f; /* current reduction, 1 = none */
+    osynth::dsp::Smooth s_ceil, s_gain;
+    UnitState u;
+};
+
+LimiterFx s_lim;
+
+NOINLINE_ATTR void limiter_process(float* __restrict__ bl,
+                                   float* __restrict__ br, size_t frames) {
+    LimiterFx& l = s_lim;
+    const float m = unit_gate(l.u, pv(LIM_ON), nullptr, 0);
+    if (m < 0.0f) {
+        l.gain = 1.0f;
+        return;
+    }
+
+    /* Smoothed in dB, then converted: a ceiling dragged across its range in
+     * the linear domain would move in jumps at the top and crawl at the
+     * bottom. Two powf per block, outside the sample loop. */
+    const float ceil_db = osynth::dsp::smooth_lin(l.s_ceil, pvm(LIM_CEIL));
+    const float pre_db = osynth::dsp::smooth_lin(l.s_gain, pvm(LIM_GAIN));
+    const float ceil_lin = powf(10.0f, ceil_db * (1.0f / 20.0f));
+    const float pre = powf(10.0f, pre_db * (1.0f / 20.0f));
+    const float kr =
+        1.0f - expf(-1.0f / fmaxf(pvm(LIM_RELEASE) * 0.001f * kSr, 1.0f));
+
+    for (size_t i = 0; i < frames; ++i) {
+        const float xl = bl[i] * pre;
+        const float xr = br[i] * pre;
+        /* Linked, not per channel: reducing one side of a stereo image and
+         * not the other is a pan move, and a limiter that pans on transients
+         * is a limiter nobody can mix through. */
+        const float al = fabsf(xl), ar = fabsf(xr);
+        const float peak = (al > ar) ? al : ar;
+
+        const float need = (peak > ceil_lin) ? (ceil_lin / peak) : 1.0f;
+        /* Zero attack down, one-pole up. The branch is the whole limiter:
+         * a reduction is taken on the sample that needs it, and given back
+         * over `release`. */
+        if (need < l.gain) {
+            l.gain = need;
+        } else {
+            l.gain += kr * (need - l.gain);
+        }
+
+        /* `m` covers the *whole* unit, input gain included, so switching it
+         * on ramps in over the same ~90 ms every other unit here does rather
+         * than stepping the mix up by whatever `gain` is set to. The ceiling
+         * is only exact once that has settled — during the crossfade the unit
+         * is deliberately doing a fraction of its job, and soft_clip() at the
+         * sink is still behind it. */
+        const float g = 1.0f + m * (pre * l.gain - 1.0f);
+        bl[i] *= g;
+        br[i] *= g;
+    }
+}
+
 /* ---- FX LFOs (S34) ----
  *
  * Two block-rate LFOs, one destination each, writing normalized offsets into
@@ -3497,6 +4489,12 @@ esp_err_t fx_init(void) {
         s_p[i] = ps.valuePtr(kParams[i].id);
     }
 
+    /* Twiddles and the analysis window, both once (S42). Neither can fail and
+     * neither allocates — the buffers behind them are static — so this needs
+     * none of the `ok` flags the delay lines below carry. */
+    osynth::fx::fft_init();
+    mnr_build();
+
     s_cho.ok = line_alloc(s_cho.l, kChoLen) && line_alloc(s_cho.r, kChoLen);
     if (!s_cho.ok) ESP_LOGW(TAG, "chorus disabled: line alloc failed");
 
@@ -3542,6 +4540,12 @@ esp_err_t fx_init(void) {
     if (!s_rev_dusk_ok) ESP_LOGW(TAG, "reverb: duskverb unavailable (alloc)");
 #endif
 
+    s_voc.rec_ok = line_alloc(s_voc.rec, kVocSampLen);
+    if (!s_voc.rec_ok) {
+        ESP_LOGW(TAG, "vocoder: capture buffer alloc failed — fx.voc.freeze "
+                      "stays live instead of replaying a sample");
+    }
+
     s_flg.ok = line_alloc(s_flg.l, kFlgLen) && line_alloc(s_flg.r, kFlgLen);
     if (!s_flg.ok) ESP_LOGW(TAG, "flanger disabled: line alloc failed");
 
@@ -3549,7 +4553,7 @@ esp_err_t fx_init(void) {
     ESP_LOGI(TAG,
              "fx bus up: anr -> nr -> vocoder -> drive -> chorus -> flanger -> "
              "phaser -> delay -> granular -> reverb -> crush -> filter -> eq "
-             "-> comp -> stereo, "
+             "-> comp -> stereo -> limiter, "
              "%u params, "
              "delay max %.2f s, %d grains / %.2f s window, buffers %u KB "
              "PSRAM + %u KB internal",
@@ -3597,6 +4601,12 @@ void SYNTH_RENDER_IRAM fx_process(float* l, float* r, size_t frames) {
      * consumes what this writes. */
     lfo_update(frames);
 
+    /* Mic NR first: it is the one that exists to hand the rest of the bus a
+     * clean input. Note that running more than one of the three with
+     * `src` = input does not cascade — each computes its correction against
+     * the *same* untouched input block and adds it, so two of them remove the
+     * input's contribution twice. One at a time is the intended use. */
+    mnr_process(l, r, frames);
     anr_process(l, r, frames);
     nr_process(l, r, frames);
     vocoder_process(l, r, frames);
@@ -3612,4 +4622,8 @@ void SYNTH_RENDER_IRAM fx_process(float* l, float* r, size_t frames) {
     eq_process(l, r, frames);
     comp_process(l, r, frames);
     stereo_process(l, r, frames);
+    /* After the stereo stage and last of all: `width` and `pan` are the final
+     * things that can put one channel past the other, so this is the only
+     * point at which a ceiling is a ceiling on what the sink receives. */
+    limiter_process(l, r, frames);
 }

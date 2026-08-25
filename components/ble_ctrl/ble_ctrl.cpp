@@ -311,10 +311,27 @@ size_t avail_payload() {
  * one parses standalone. ble_cmd task only. */
 class Chunker {
 public:
-    /* `paced` waits for an mbuf instead of failing (send_frame_paced), for a
-     * response whose partial loss the *client* cannot detect. It blocks, so it
-     * is only legal from ble_cmd — which is where every command handler runs.
-     * Default off: an event must never park the flush task. */
+    /* `paced` waits for an mbuf instead of failing (send_frame_paced). It
+     * blocks, so it is only legal from ble_cmd — which is where every command
+     * handler runs. Every command response passes it; the parameter keeps its
+     * `false` default for the one caller that must not have it, flush_events(),
+     * because an event must never park the flush task (it re-arms its dirty
+     * bits instead).
+     *
+     * It started as "for a response whose partial loss the *client* cannot
+     * detect", i.e. the PARAM_INFO id list alone. That was too narrow. The
+     * unpaced responses did not merely lose their own frames: a connect burst
+     * is several multi-frame listings back to back — GET_PARAM alone answers
+     * 120 ids in ~10 full-MTU frames, and the app asks that four times — and
+     * emitting them as fast as the loop runs drained the host's msys pool that
+     * the *receive* path also allocates from. NimBLE then could not build the
+     * response to an incoming ATT request, nor even the error response
+     * ("ble_att_svr_pkt rc=6", BLE_HS_ENOMEM), so the request went unanswered.
+     * ATT permits one outstanding request per bearer, so the central sent
+     * nothing further and closed the link on the 30 s transaction timeout —
+     * measured at 30078 and 30079 ms from the rc=6 to the disconnect, which is
+     * what identified this. Waiting for a buffer costs a few ms per frame and
+     * leaves the pool something to answer with. */
     void begin(uint8_t first_byte, uint8_t seq, const uint8_t* prefix,
                size_t prefix_len, bool suppress_empty, bool paced = false) {
         first_ = first_byte;
@@ -402,7 +419,8 @@ void handle_get_param(uint8_t seq, const uint8_t* p, uint16_t plen) {
         return;
     }
     ParamStore& ps = ParamStore::instance();
-    s_chunker.begin(OP_GET_PARAM | 0x80, seq, nullptr, 0, false);
+    s_chunker.begin(OP_GET_PARAM | 0x80, seq, nullptr, 0, false,
+                    /*paced=*/true);
     for (uint16_t i = 0; i < plen; i += 2) {
         const uint16_t id = rd16(p + i);
         if (ps.describe(id) == nullptr) continue; /* omitted from response */
@@ -556,7 +574,7 @@ void handle_list_presets(uint8_t seq, const uint8_t* p, uint16_t plen) {
     }
     const uint8_t prefix[1] = {(uint8_t)engine};
     s_chunker.begin(OP_LIST_PRESETS | 0x80, seq, prefix, sizeof(prefix),
-                    false);
+                    false, /*paced=*/true);
     for (int slot = 0; slot < PRESETS_PER_ENGINE; ++slot) {
         char name[PRESETS_NAME_MAX];
         bool factory = false;
@@ -746,7 +764,8 @@ void handle_seq_steps(uint8_t seq, const uint8_t* p, uint16_t plen) {
         prefix[0] = (uint8_t)pattern;
         prefix[1] = (uint8_t)track;
         wr16(prefix + 2, (uint16_t)first);
-        s_chunker.begin(OP_SEQ_STEPS | 0x80, seq, prefix, sizeof(prefix), false);
+        s_chunker.begin(OP_SEQ_STEPS | 0x80, seq, prefix, sizeof(prefix), false,
+                        /*paced=*/true);
         for (int i = 0; i < n; ++i) {
             seq_step_t st;
             seq_step_get(pattern, track, first + i, &st);
@@ -941,7 +960,7 @@ void handle_seq_plock(uint8_t seq, const uint8_t* p, uint16_t plen) {
             prefix[2] = (uint8_t)track;
             wr16(prefix + 3, (uint16_t)step);
             s_chunker.begin(OP_SEQ_PLOCK | 0x80, seq, prefix, sizeof(prefix),
-                            false);
+                            false, /*paced=*/true);
             for (int i = 0; i < n; ++i) {
                 uint8_t rec[6];
                 wr16(rec, locks[i].pid);
@@ -999,7 +1018,7 @@ void handle_seq_plock(uint8_t seq, const uint8_t* p, uint16_t plen) {
             }
             const uint8_t prefix[2] = {4, (uint8_t)pattern};
             s_chunker.begin(OP_SEQ_PLOCK | 0x80, seq, prefix, sizeof(prefix),
-                            false);
+                            false, /*paced=*/true);
             const int total = seq_plock_count();
             for (int i = 0; i < total; ++i) {
                 seq_plock_t l;
@@ -1100,7 +1119,8 @@ void handle_seq_song(uint8_t seq, const uint8_t* p, uint16_t plen) {
         return;
     }
     const uint8_t prefix[1] = {(uint8_t)seq_song_length()};
-    s_chunker.begin(OP_SEQ_SONG | 0x80, seq, prefix, sizeof(prefix), false);
+    s_chunker.begin(OP_SEQ_SONG | 0x80, seq, prefix, sizeof(prefix), false,
+                    /*paced=*/true);
     for (int i = 0; i < seq_song_length(); ++i) {
         seq_song_entry_t e;
         seq_song_get(i, &e);
@@ -1116,7 +1136,8 @@ void handle_kit_info(uint8_t seq, const uint8_t* p, uint16_t plen) {
         const uint8_t prefix[3] = {0, (uint8_t)ParamStore::instance().get(
                                           DRUM_PID_KIT),
                                    (uint8_t)drums_kit_count()};
-        s_chunker.begin(OP_KIT_INFO | 0x80, seq, prefix, sizeof(prefix), false);
+        s_chunker.begin(OP_KIT_INFO | 0x80, seq, prefix, sizeof(prefix), false,
+                        /*paced=*/true);
         for (int i = 0; i < drums_kit_count(); ++i) {
             uint8_t rec[1 + DRUM_KIT_NAME_MAX] = {};
             rec[0] = (uint8_t)i;
@@ -1132,7 +1153,8 @@ void handle_kit_info(uint8_t seq, const uint8_t* p, uint16_t plen) {
      * mixer strips with, since the parameters themselves are named
      * generically (drum1.level …) and outlive any one kit */
     const uint8_t prefix[3] = {1, (uint8_t)drums_slot_count(), 0};
-    s_chunker.begin(OP_KIT_INFO | 0x80, seq, prefix, sizeof(prefix), false);
+    s_chunker.begin(OP_KIT_INFO | 0x80, seq, prefix, sizeof(prefix), false,
+                    /*paced=*/true);
     for (int i = 0; i < drums_slot_count() && i < DRUM_SLOTS; ++i) {
         uint8_t rec[2 + DRUM_SLOT_NAME_MAX] = {};
         rec[0] = (uint8_t)i;
@@ -1831,10 +1853,12 @@ void start_advertising();
  * A peripheral is allowed to ask for better, so it does — 7.5-15 ms, the
  * fastest range every central must support, with no slave latency (a note must
  * never wait for a skipped event). Apple's rules are stricter (interval min
- * >= 15 ms), so a refusal retries once at 15-30 ms, still well under the
- * default. A second refusal is left alone: the link works, it is just lazier
- * than we would like, and nagging a central that has said no costs airtime on
- * the very path we are trying to keep clear.
+ * >= 15 ms), so a refusal retries once at 15-30 ms — but only for as much of
+ * that range as is actually an improvement on what the link already has; see
+ * request_fast_conn, which will send nothing rather than offer a central
+ * permission to slow down. A second refusal is left alone: the link works, it
+ * is just lazier than we would like, and nagging a central that has said no
+ * costs airtime on the very path we are trying to keep clear.
  *
  * Sent when the app subscribes to EVT rather than on connect: discovery is
  * over by then, so the request is not competing with the burst it would
@@ -1844,30 +1868,85 @@ constexpr uint16_t kFastItvlMin = 6;   /* x1.25 ms = 7.5 ms */
 constexpr uint16_t kFastItvlMax = 12;  /* 15 ms                */
 constexpr uint16_t kSafeItvlMin = 12;  /* 15 ms — Apple's floor */
 constexpr uint16_t kSafeItvlMax = 24;  /* 30 ms                 */
-constexpr uint16_t kConnTimeout = 400; /* x10 ms = 4 s supervision timeout */
+/* Floor, not target, for the supervision timeout — see request_fast_conn. */
+constexpr uint16_t kConnTimeout = 400; /* x10 ms = 4 s */
 
 /* Host task only (every touch is inside a GAP callback). */
 uint8_t s_upd_tries = 0;
 
-void request_fast_conn(uint16_t conn_handle, bool apple_safe) {
+/* A parameter update is a request for the *whole* set, and the central then
+ * picks anywhere inside what it is offered — so a careless request can make
+ * the link worse than leaving it alone, and did. Windows opens at 15 ms with a
+ * 9.6 s supervision timeout, refused the 7.5-15 ms ask outright (HCI 0x3b,
+ * unacceptable connection parameters), and then took the 15-30 ms retry at its
+ * *slow* end while adopting our 4 s timeout. Net effect of asking: the interval
+ * halved in speed and the link lost 5.6 s of tolerance, on the one path meant
+ * to make it quicker.
+ *
+ * Both halves of that are fixed by reading what the link already has and never
+ * offering worse:
+ *
+ *   itvl_max is capped to the current interval, so the answer can only be the
+ *   same or faster; if that leaves nothing to gain, no request goes out at all.
+ *
+ *   supervision_timeout keeps whatever the central chose unless it is below
+ *   kConnTimeout, which is therefore a floor rather than a target. The trade is
+ *   real and deliberate: a longer timeout means a genuine walk-out-of-range
+ *   takes longer to reach BLE_GAP_EVENT_DISCONNECT and its
+ *   voice_manager_all_notes_off(). Tolerance is worth more — the central picked
+ *   that number knowing its own scheduling, and cutting it is how a link that
+ *   merely stalled became a link that dropped.
+ *
+ * latency stays 0 either way: a skipped connection event is a delayed note, and
+ * forcing it down is an improvement whatever the central had. */
+/* Returns whether a request actually went out. The caller arms s_upd_tries off
+ * that: a CONN_UPDATE is only "our result" if we asked, and marking a request
+ * outstanding when none is would hand the next central-driven update to the
+ * refusal path, spending the one retry on an answer to nobody's question. */
+bool request_fast_conn(uint16_t conn_handle, bool apple_safe) {
+    struct ble_gap_conn_desc desc;
+    if (ble_gap_conn_find(conn_handle, &desc) != 0) {
+        ESP_LOGW(TAG, "conn param request not sent (no such connection)");
+        return false;
+    }
+
     struct ble_gap_upd_params p = {};
     p.itvl_min = apple_safe ? kSafeItvlMin : kFastItvlMin;
     p.itvl_max = apple_safe ? kSafeItvlMax : kFastItvlMax;
+    if (p.itvl_max > desc.conn_itvl) p.itvl_max = desc.conn_itvl;
+    if (p.itvl_min > p.itvl_max) p.itvl_min = p.itvl_max;
+    if (p.itvl_min >= desc.conn_itvl) {
+        /* Nothing below the current interval left to ask for. This is the
+         * Apple-safe retry against a central already sitting at 15 ms: its
+         * floor and ours are the same number, so the old code's only possible
+         * outcome was to be allowed to slow down. */
+        ESP_LOGI(TAG, "connection interval already %u.%02u ms; not asking",
+                 (unsigned)(desc.conn_itvl * 125u) / 100u,
+                 (unsigned)(desc.conn_itvl * 125u) % 100u);
+        return false;
+    }
     p.latency = 0;
-    p.supervision_timeout = kConnTimeout;
+    p.supervision_timeout = desc.supervision_timeout > kConnTimeout
+                                ? desc.supervision_timeout
+                                : kConnTimeout;
+
     const int rc = ble_gap_update_params(conn_handle, &p);
     if (rc != 0) {
         /* Local refusal (no such connection, one already in flight): nothing
          * to retry against — the result path below only sees requests that
          * actually went out. */
         ESP_LOGW(TAG, "conn param request not sent (rc %d)", rc);
-        return;
+        return false;
     }
-    ESP_LOGI(TAG, "asking for a %u.%02u-%u.%02u ms connection interval",
+    ESP_LOGI(TAG,
+             "asking for a %u.%02u-%u.%02u ms connection interval "
+             "(timeout %u ms)",
              (unsigned)(p.itvl_min * 125u) / 100u,
              (unsigned)(p.itvl_min * 125u) % 100u,
              (unsigned)(p.itvl_max * 125u) / 100u,
-             (unsigned)(p.itvl_max * 125u) % 100u);
+             (unsigned)(p.itvl_max * 125u) % 100u,
+             (unsigned)p.supervision_timeout * 10u);
+    return true;
 }
 
 int gap_event(struct ble_gap_event* ev, void*) {
@@ -1900,8 +1979,7 @@ int gap_event(struct ble_gap_event* ev, void*) {
                 if (ev->conn_update.status != 0) {
                     /* Refused. One retry inside Apple's window, then we live
                      * with whatever the central chose. */
-                    ESP_LOGI(TAG,
-                             "conn params refused (status 0x%02x), retrying",
+                    ESP_LOGI(TAG, "conn params refused (status 0x%02x)",
                              (unsigned)ev->conn_update.status);
                     request_fast_conn(ev->conn_update.conn_handle, true);
                     return 0;
@@ -1955,8 +2033,9 @@ int gap_event(struct ble_gap_event* ev, void*) {
                  * Once per subscription — a re-subscribe on the same link is
                  * the app re-reading, not a new central. */
                 if (ev->subscribe.cur_notify && s_upd_tries == 0) {
-                    s_upd_tries = 1;
-                    request_fast_conn(ev->subscribe.conn_handle, false);
+                    if (request_fast_conn(ev->subscribe.conn_handle, false)) {
+                        s_upd_tries = 1;
+                    }
                 }
             }
             return 0;

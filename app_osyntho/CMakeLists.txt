@@ -245,6 +245,7 @@ qt_add_qml_module(
     QML_FILES qml/ParamControl.qml
     QML_FILES qml/ParamGroup.qml
     QML_FILES qml/HoldSampleCard.qml
+    QML_FILES qml/VocoderPresets.qml
     QML_FILES qml/PanelFlow.qml
     QML_FILES qml/ModMatrixSlot.qml
     QML_FILES qml/Keyboard.qml

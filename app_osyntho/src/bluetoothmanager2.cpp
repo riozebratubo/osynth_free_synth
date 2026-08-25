@@ -23,6 +23,11 @@ constexpr int rescanRetryInterval = 2000;
 // worth keeping.
 constexpr int kMaxQueuedWrites = 256;
 
+// Consecutive failed CTRL writes before the link is declared lost without
+// waiting for Windows to agree. See writeBlocking() for why one is not enough
+// and why waiting for a third is expensive.
+constexpr int kWriteFailuresBeforeDrop = 2;
+
 // osynth GATT service + characteristics (see docs/BLE_PROTOCOL.md).
 static const std::string serviceUuidStr = SynthProto::kServiceUuid;
 static const std::string ctrlUuidStr = SynthProto::kCtrlUuid;   // Write / Write-no-response
@@ -82,23 +87,40 @@ void BluetoothManager::scanAndConnect() {
     qDebug() << "Bt | Scan | Bluetooth is disabled in settings.";
     return;
   }
+  // Everything below this point that talks to SimpleBLE does so from the GUI
+  // thread, and on Windows *every* SimpleBLE entry point — including the two
+  // that look like plain getters, bluetooth_enabled() and is_connected() — is
+  // a blocking hop onto one process-wide MTA thread (see MtaManager). That one
+  // thread also carries the BLE worker's 2 s scan_for(), the whole connect +
+  // service-discovery sequence, and every CTRL write, and it runs them
+  // strictly one at a time. A GUI-thread call therefore does not cost a WinRT
+  // round trip; it costs whatever the worker happens to be in the middle of —
+  // which is seconds on a reconnect, and up to ten on a write into a link that
+  // has stopped answering (async_get's timeout). The rescan timer fires this
+  // function every 2 s for the whole session, so that was a guaranteed
+  // multi-second UI freeze on every reconnect: the app "hangs after
+  // discovery".
+  //
+  // So: the cheap cached tests first, and they are enough. A worker is alive
+  // for its whole lifetime — scanning, connecting AND while connected (the
+  // connectAndSubscribe keep-alive loop) — so while one is running there is
+  // nothing here to do anyway, and the GUI thread makes no SimpleBLE call at
+  // all. scanAndConnect() is only ever called on the main thread, so this also
+  // makes spawning a second concurrent worker structurally impossible.
+  if (m_bluetoothThread.isRunning()) return;
+  if (m_adapterIsConnecting) return;
+  // Replaces a peripheral.is_connected() probe that used to sit here. Same
+  // answer from the cache the worker publishes, without the hop — and by this
+  // line there is no worker running, so a live connection cannot exist.
+  if (m_connectedCache.load()) return;
+
   if (not SimpleBLE::Adapter::bluetooth_enabled()) {
     qDebug() << "Bt | Scan | Will not scan and connect, bluetooth is not enabled!";
     return;
   }
 
-  // A single worker is alive for its whole lifetime — scanning, connecting AND
-  // while connected (the connectAndSubscribe keep-alive loop). scanAndConnect()
-  // is only ever called on the main thread, so this makes spawning a second
-  // concurrent worker structurally impossible.
-  if (m_bluetoothThread.isRunning()) return;
-
   auto adapter = adapterHandle();
   if (adapter.initialized() and adapter.scan_is_active()) return;
-  if (m_adapterIsConnecting) return;
-
-  auto connectedPeripheral = peripheralHandle();
-  if (connectedPeripheral.initialized() and connectedPeripheral.is_connected()) return;
 
   // While the selector is open we accumulate devices across rescans so newer
   // ones appear without the list emptying between cycles (deduped below).
@@ -342,6 +364,18 @@ bool BluetoothManager::connectAndSubscribe(SimpleBLE::Peripheral& peripheral) {
     if (attPayload > 0) negotiatedMtu = attPayload + 3;
   } catch (...) {
   }
+  // Link-loss detection, armed before the connection is announced: both flags
+  // still carry the *previous* session's verdict, and drainWriteQueue() reads
+  // them against the cached state publishConnectionState() is about to set. The
+  // callback goes in ahead of the announcement too, so a disconnect between the
+  // two is not swallowed.
+  m_peripheralDropped.store(false);
+  m_writeFailures.store(0);
+  peripheral.set_callback_on_disconnected([this]() {
+    qDebug() << "Bt | Peripheral disconnected (callback)";
+    m_peripheralDropped.store(true);
+  });
+
   publishConnectionState(true, name, address, negotiatedMtu);
 
   emit updateConnectedBluetoothDevice(name, address);
@@ -351,47 +385,59 @@ bool BluetoothManager::connectAndSubscribe(SimpleBLE::Peripheral& peripheral) {
     emit connectedChanged(true);
   });
 
-  peripheral.set_callback_on_disconnected(
-      []() { qDebug() << "Bt | Peripheral disconnected (callback)"; });
-
-  // PARKED — the desktop counterpart of the Android link-loss fix
-  // (bluetoothmanager.cpp: handleLinkLost). Only Android was reproduced and
-  // retested, so this backend is left as it was rather than changed blind.
-  //
-  // The concern it addresses is real here too: the callback above only logs, so
-  // the keep-alive loop below relies on peripheral.is_connected() alone — and
-  // switching the adapter off mid-session can leave the Windows backend
-  // answering a cached `true`. The worker then parks forever, the app never
-  // publishes connectedChanged(false), and SynthController::setConnected(true)
-  // on the way back early-returns on the unchanged value, skipping every reset
-  // and reusing stale discovery state for the session.
-  //
-  // To enable: un-comment m_peripheralDropped in the header, arm it here
-  // *before* installing the callback (so a disconnect in the gap is not
-  // swallowed), set it from the callback, and un-comment the check in the loop.
-  //
-  // m_peripheralDropped.store(false);
-  // peripheral.set_callback_on_disconnected([this]() {
-  //   qDebug() << "Bt | Peripheral disconnected (callback)";
-  //   m_peripheralDropped.store(true);
-  // });
-
   // Keep-alive: the worker parks here while connected, polling for a disconnect
   // or a stop request (startDeviceScan/finish block on this poll).
   while (true) {
     bool stillConnected = false;
-    try {
-      stillConnected = peripheral.is_connected();
-    } catch (...) {
-      stillConnected = false;
-    }
 
-    // PARKED with the callback above — see that note to enable.
-    // if (m_peripheralDropped.load()) stillConnected = false;
+    // The flag first, and if it is set the poll is skipped entirely. Two
+    // reasons, and the ordering matters for both.
+    //
+    // Correctness: peripheral.is_connected() is not reliable on every backend —
+    // with the adapter switched off mid-session the Windows one can keep
+    // reporting a cached `true`, so the loop would park forever, the app would
+    // never publish connectedChanged(false), and SynthController::setConnected(true)
+    // on the way back would early-return on the unchanged value, skipping every
+    // reset and reusing stale discovery state for the session. This is the
+    // desktop counterpart of the Android link-loss fix (bluetoothmanager.cpp:
+    // handleLinkLost); the callback fires in that case, so it is authoritative.
+    //
+    // Cost: is_connected() is a blocking hop onto the one MTA thread, which is
+    // also where writeBlocking() sits. A write into a link that has stopped
+    // answering takes ten seconds to time out there (async_get), so a poll
+    // queued behind one is a poll that learns nothing for ten seconds — on
+    // exactly the link that has already been declared dead. Reading the flag
+    // costs nothing and is not queued behind anything.
+    if (m_peripheralDropped.load()) {
+      stillConnected = false;
+    } else {
+      try {
+        stillConnected = peripheral.is_connected();
+      } catch (...) {
+        stillConnected = false;
+      }
+    }
 
     if (not stillConnected or m_shouldStopBluetoothThread) {
       qDebug() << "Bt | Thread will quit";
       setPeripheralHandle(SimpleBLE::Peripheral{});
+
+      // Published *before* the SimpleBLE teardown, not after. unsubscribe() and
+      // disconnect() are two more MTA calls, and on a link that has stopped
+      // answering they queue behind whatever writes are still draining — each
+      // of which costs its own ten-second timeout. Announcing the disconnect
+      // first makes drainWriteQueue() throw the queued frames away on its next
+      // step (it bails on the cached state) and stops SynthController handing
+      // it new ones, so the teardown below is not paid for one stale frame at a
+      // time. The app's view of the link is already correct at this point: it
+      // is gone, whether or not Windows has finished agreeing.
+      publishConnectionState(false, QString(), QString(), 0);
+      emitOnGuiThread([this]() {
+        emit connectedChanged(false);
+        emit deviceNameChanged();
+        emit deviceAddressChanged();
+      });
+
       try {
         peripheral.unsubscribe(serviceUuidStr, evtUuidStr);
       } catch (...) {
@@ -401,13 +447,6 @@ bool BluetoothManager::connectAndSubscribe(SimpleBLE::Peripheral& peripheral) {
       } catch (...) {
       }
       setAdapterHandle(SimpleBLE::Adapter{});
-
-      publishConnectionState(false, QString(), QString(), 0);
-      emitOnGuiThread([this]() {
-        emit connectedChanged(false);
-        emit deviceNameChanged();
-        emit deviceAddressChanged();
-      });
       return true;
     }
 
@@ -424,13 +463,15 @@ void BluetoothManager::connectToSelectedDevice() {
   // Explicit connect intent: leave list-only (selector) mode.
   m_selectorOpen = false;
 
+  // Cached state only, like scanAndConnect(): this runs on the GUI thread, and
+  // a peripheral.is_connected() here would block the UI for however long the
+  // MTA thread is busy — which, on the Connect button of a synth that has just
+  // stopped answering, is the worst possible moment for it.
   auto adapter = adapterHandle();
-  auto peripheral = peripheralHandle();
   if (adapter.initialized() and adapter.scan_is_active()) {
     qDebug() << "Bt | connectToSelectedDevice | Stopping scan, will connect on the next one.";
     m_skipScanGoConnect = true;
-  } else if (not m_adapterIsConnecting and
-             not(peripheral.initialized() and peripheral.is_connected())) {
+  } else if (not m_adapterIsConnecting and not m_connectedCache.load()) {
     scanAndConnect();
   }
 }
@@ -446,8 +487,12 @@ void BluetoothManager::startDeviceScan() {
   // the whole disconnect (~1-2s), which is the "app hangs then the screen comes"
   // when opening the selector while connected. Instead ask the worker to stop
   // and resume scanning once it has finished, via a QFutureWatcher.
-  auto peripheral = peripheralHandle();
-  if (peripheral.initialized() and peripheral.is_connected()) {
+  //
+  // The test is the cached flag for the same reason: peripheral.is_connected()
+  // is a blocking hop onto the shared MTA thread, so asking it here reintroduced
+  // exactly the freeze this function was rewritten to remove — worst on a link
+  // that has stopped answering, which is when the user reaches for the selector.
+  if (m_connectedCache.load()) {
     m_shouldStopBluetoothThread = true;
     if (m_bluetoothThread.isRunning()) {
       // Re-point the watcher at the running worker; when it finishes, clear the
@@ -542,7 +587,12 @@ void BluetoothManager::drainWriteQueue() {
     // Nothing queued for a link that is down: the firmware runs
     // voice_manager_all_notes_off() on disconnect, and the listings would be
     // answered into a closed connection.
-    if (!m_connectedCache.load()) {
+    //
+    // m_peripheralDropped as well as the cached flag, because it is set first:
+    // the keep-alive loop needs up to its 100 ms poll period to notice and
+    // publish, and every frame written into that window costs its own
+    // ten-second timeout on the MTA thread the teardown itself has to queue on.
+    if (!m_connectedCache.load() || m_peripheralDropped.load()) {
       m_writeHigh.clear();
       m_writeLow.clear();
       return;
@@ -574,9 +624,30 @@ void BluetoothManager::writeBlocking(const QByteArray& data, bool withResponse) 
       } else {
         peripheral.write_command(serviceUuidStr, ctrlUuidStr, ba);
       }
+      m_writeFailures.store(0);
     }
   } catch (...) {
-    qDebug() << "Bt | Write error: peripheral disconnected during write";
+    // Windows does not fail a write into a peer that has gone quiet; it accepts
+    // it and lets SimpleBLE's async_get give up ten seconds later, so each of
+    // these cost ten seconds of the one MTA thread the keep-alive poll, the
+    // teardown and every other write also have to queue on. ConnectionStatusChanged
+    // has been seen half a minute behind that, which is a queue of stale frames
+    // metered out at ten seconds each while the app still believes it is
+    // connected — and the UI freezing on every GUI-thread SimpleBLE call in the
+    // meantime.
+    //
+    // Two in a row is the app's own answer to a question Windows is still
+    // thinking about. One is not enough to act on — a single frame can fail on
+    // a link that is fine — but a second consecutive failure means nothing has
+    // reached the synth for at least ten seconds, on a link whose supervision
+    // timeout is four. Hand it to the keep-alive loop, which owns the teardown.
+    const int failures = m_writeFailures.fetch_add(1) + 1;
+    qDebug() << "Bt | Write error: peripheral disconnected during write;"
+             << failures << "in a row";
+    if (failures >= kWriteFailuresBeforeDrop && !m_peripheralDropped.exchange(true)) {
+      qDebug() << "Bt | Link presumed lost after" << failures
+               << "consecutive write failures; tearing down.";
+    }
   }
 }
 

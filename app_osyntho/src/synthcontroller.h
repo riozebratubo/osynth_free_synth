@@ -666,7 +666,6 @@ class SynthController final : public QObject, public DatabaseClient {
   void requestInfoTopUp(const QList<quint16>& ids);
   void requestAllParamValues();   // GET_PARAM for every registered id
   void requestParamValues(const QList<quint16>& ids);  // GET_PARAM, batched
-  QList<quint16> engineParamIds() const;  // the registered 0x02xx ids
   void flushPendingSets();        // coalesced SET_PARAM batch
   void scheduleParamsDiscovered(); // coalesce the paramsDiscovered signal
 

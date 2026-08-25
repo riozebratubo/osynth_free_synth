@@ -1,9 +1,10 @@
 /*
- * osynth — master FX bus: adaptive NR -> NR -> vocoder -> drive -> chorus ->
- * flanger -> phaser -> delay -> granular delay -> reverb -> bitcrush ->
- * filter -> EQ -> compressor -> stereo/output (Sessions 10 + 11; bitcrush
- * S17; filter S33; drive, flanger, phaser, EQ, compressor, stereo and the FX
- * LFOs S34; vocoder S38; the two noise-reduction units S39).
+ * osynth — master FX bus: mic NR -> adaptive NR -> NR -> vocoder -> drive ->
+ * chorus -> flanger -> phaser -> delay -> granular delay -> reverb ->
+ * bitcrush -> filter -> EQ -> compressor -> stereo/output -> limiter
+ * (Sessions 10 + 11; bitcrush S17; filter S33; drive, flanger, phaser, EQ,
+ * compressor, stereo and the FX LFOs S34; vocoder S38; the two noise-
+ * reduction units S39; mic NR S42; the limiter S43).
  *
  * The bus is stereo and global (not per voice) and runs on the audio task:
  * main.cpp chains fx_process() after voice_manager_render() in the render
@@ -211,6 +212,35 @@ extern "C" {
 #define FX_PID_ST_AMP   0x03B3
 #define FX_PID_ST_PAN   0x03B4
 
+/* Master limiter (S43) — after the stereo stage, so it is the last thing on
+ * the bus and the only unit that sees the mix exactly as the sink will.
+ *
+ * The sink has always had soft_clip(), and that is a *saturator*: past its
+ * knee it distorts, which is the right failure mode for an output stage and
+ * the wrong one for a ceiling you are relying on. This turns the mix down
+ * instead. Zero attack — the gain is computed per sample against the current
+ * peak, so |out| <= `ceil` is exact rather than a target — and a one-pole
+ * release, which is the whole of the tuning: too fast pumps, too slow ducks a
+ * whole phrase after one transient.
+ *
+ * `gain` is in front of the ceiling, so it is a loudness control and not a
+ * volume one: turn it up and the mix gets denser rather than louder. That is
+ * the only reason a limiter belongs on an instrument rather than in a
+ * mastering chain, and it is why the two knobs are separate.
+ *
+ * The ids are borrowed from the stereo block's tail rather than given a block
+ * of their own, for the reason the mic NR's are borrowed from bitcrush's: the
+ * 0x03xx namespace has no free block of 16 left, and fx_init() unregisters
+ * this component with removeRange(PID_FX_BASE, PID_SEQARP_BASE), so an id
+ * outside 0x03xx would register and never be cleaned up. The stereo stage is
+ * the honest neighbour to borrow from — a limiter *is* part of the output
+ * stage, and it runs immediately after it. */
+#define FX_PID_LIM_ON      0x03B5
+#define FX_PID_LIM_CEIL    0x03B6
+#define FX_PID_LIM_GAIN    0x03B7
+#define FX_PID_LIM_RELEASE 0x03B8
+/* 0x03B9..0x03BF stay free for this unit, and only this unit. */
+
 /* FX LFOs (S34) — two block-rate LFOs, each free-running or locked to a note
  * division of the master clock, modulating one FX parameter apiece.
  *
@@ -225,6 +255,14 @@ extern "C" {
  * names, independent of `in.route`. fx.voc.freeze holds the band envelopes,
  * which is what the app's Hold-to-sample button drives (inverted: recording
  * while held, frozen on release). */
+/* Capture playback (S43): 0 plays the recorded phrase once per note, 1 loops
+ * it until the note ends. Borrowed from the LFO2 block's tail, and 0x03CF
+ * rather than 0x03CE because it sits immediately below FX_PID_VOC_ON: the
+ * vocoder's run extends downward by one and stays contiguous. The LFO blocks
+ * cannot grow into it -- there are exactly two LFOs of six parameters each --
+ * so this is dead space, not someone else's headroom. */
+#define FX_PID_VOC_LOOP    0x03CF
+
 #define FX_PID_VOC_ON      0x03D0
 #define FX_PID_VOC_MIX     0x03D1
 #define FX_PID_VOC_BANDS   0x03D2
@@ -239,6 +277,19 @@ extern "C" {
 #define FX_PID_VOC_LEVEL   0x03DB
 #define FX_PID_VOC_CARRIER 0x03DC
 #define FX_PID_VOC_FREEZE  0x03DD
+/* Modulator normalization (S43): the band envelopes are scaled so that the
+ * unit hears a *reference* speaking loudness whatever is actually arriving,
+ * which is what makes one setting work for two people and one mic gain. Off
+ * is the pre-S43 behaviour — output proportional to how loudly you speak. */
+#define FX_PID_VOC_NORM    0x03DE
+/* Consonant clarity (S43). The sibilance path's presence test saturates well
+ * above any level a voice reaches, and is the one quantity in the unit that
+ * is not loudness-normalised; this switches both, and lifts the tap. It is a
+ * switch rather than a knob because it is a taste fork -- more intelligible
+ * against more "unmistakably a vocoder" -- and those are worth A/B-ing. */
+#define FX_PID_VOC_CLARITY 0x03DF
+/* This block is full; FX_PID_VOC_LOOP above is the overflow, and 0x03CE is
+ * the last id adjacent to it. */
 
 /* Noise reduction (S39) — two units at the head of the chain, and the reason
  * they exist is a use for this instrument that is not musical at all: a P4
@@ -324,6 +375,51 @@ extern "C" {
 #define FX_PID_ANR_RELEASE 0x03E8
 #define FX_PID_ANR_LEARN   0x03E9
 #define FX_PID_ANR_SRC     0x03EA
+
+/* Mic noise reduction (S42): per-bin suppression in the STFT domain — the
+ * family a USB headset chip, WebRTC's NS and the Ephraim-Malah literature all
+ * belong to, and the only one of the three units here that removes anything
+ * *while you are talking*.
+ *
+ * The other two cannot, and the reason is structural rather than a matter of
+ * tuning. `fx.nr` computes one gain for the whole spectrum from one level
+ * detector, so the instant a voice crosses its threshold the gain goes to 1
+ * and the hiss comes back with it at full level: measured on a real recording
+ * it improves signal-to-noise by 0.0 dB, and only ever cleans the gaps
+ * *between* words. `fx.anr` is the right family but coarse — a dozen heavily
+ * overlapping bands, so a voice in one region opens the gain across a wide
+ * swathe. This unit runs 129 bins, and the whole trick is that speech is
+ * sparse in frequency: at any instant it occupies a fraction of them, and
+ * every bin it is not in can still be pushed down.
+ *
+ * `fx.mnr.learn` is momentary and works exactly as the adaptive unit's does —
+ * held, the noise profile is taken straight from what is arriving instead of
+ * from a minimum over `fx.mnr.adapt`, so a second of a quiet room is a
+ * complete profile. Not stored in presets, for the reason fx.anr.learn is not.
+ *
+ * MONO. It folds its source down, cleans that, and writes the result to both
+ * channels — the same choice the vocoder makes, for the same reason: it exists
+ * to clean a microphone and osynth's is mono. In `input` mode that is exact.
+ * In `bus` mode it will fold a stereo patch, which is why `input` is the
+ * default and the other setting is for mono material.
+ *
+ * It costs 5.3 ms of latency (one 256-sample frame) on whatever it is
+ * cleaning. In `input` mode that delays the input against the synth beside it
+ * and nothing else.
+ *
+ * The ids are borrowed from the bitcrush block's unused tail rather than given
+ * a block of their own, because there is no block left: every 0x03x0 in the FX
+ * namespace is assigned, and fx_init() unregisters this component with
+ * removeRange(PID_FX_BASE, PID_SEQARP_BASE), so an id outside 0x03xx would
+ * register and then never be cleaned up. Bitcrush has four parameters and has
+ * had four since it was written. */
+#define FX_PID_MNR_ON     0x0344
+#define FX_PID_MNR_SRC    0x0345
+#define FX_PID_MNR_AMOUNT 0x0346
+#define FX_PID_MNR_FLOOR  0x0347
+#define FX_PID_MNR_ADAPT  0x0348
+#define FX_PID_MNR_LEARN  0x0349
+/* 0x034A..0x034F stay free for this unit, and only this unit. */
 
 /* Fixed: high-pass, hum notch, downward expander. `fx.nr.floor` is the most
  * important control here and the one a gate usually does not have — it caps

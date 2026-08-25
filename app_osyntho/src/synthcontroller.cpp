@@ -1009,17 +1009,22 @@ void SynthController::finishDiscovery() {
   m_pendingInfoIds.clear();
   scheduleParamsDiscovered();
 
-  // A second value sweep. onParamListComplete() already fetched them so the UI
-  // was never showing defaults; this catches anything the synth changed during
-  // the metadata walk (a MIDI CC, a preset load, the sequencer's telemetry),
-  // which at ~200 params is a few seconds of opportunity. An engine-switch pass
-  // only walks the ~36 ids of the new engine, so its window is a fraction of
-  // that and one frame covering that range is enough.
-  if (m_discoveryScope == DiscoveryScope::EngineParams) {
-    requestParamValues(engineParamIds());
-  } else {
-    requestAllParamValues();
-  }
+  // There is deliberately no second value sweep here. onParamListComplete()
+  // already fetched every id the moment the list landed, and anything the synth
+  // changes during the metadata walk — a MIDI CC, a preset load, the sequencer's
+  // telemetry — arrives on its own: ble_ctrl's param_listener marks every
+  // non-BLE-origin change dirty and flush_events() pushes it as EVT_PARAMS, and
+  // the app is subscribed to EVT before the connection is even announced. So a
+  // sweep here re-read 365 values to learn nothing.
+  //
+  // It was not free. GET_PARAM answers 120 ids in ~10 full-MTU frames, so this
+  // was ~40 notification frames added to a connect burst that already carries
+  // the preset list, the step walk, the p-lock list, the song, two kit reads,
+  // the graph and the chord set. That burst is what exhausted the firmware's
+  // msys pool, and an mbuf the receive path could not get is what left an ATT
+  // request unanswered and had the central close the link on the 30 s
+  // transaction timeout. Halving the burst is the point of removing this.
+  //
   // Presets are stored per engine, so this one *is* engine-scoped.
   listPresets(m_engine);
 
@@ -1069,14 +1074,6 @@ void SynthController::requestParamValues(const QList<quint16>& ids) {
     }
   }
   if (!chunk.isEmpty()) send(OP_GET_PARAM, payloadGetParam(chunk), false);
-}
-
-QList<quint16> SynthController::engineParamIds() const {
-  QList<quint16> out;
-  for (quint16 id : m_paramOrder) {
-    if (id >= ID_ENGINE_FIRST && id <= ID_ENGINE_LAST) out.append(id);
-  }
-  return out;
 }
 
 /* ------------------------------------------------- paced SET_PARAM output */

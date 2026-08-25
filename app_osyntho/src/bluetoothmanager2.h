@@ -109,23 +109,24 @@ class BluetoothManager : public IBluetoothManager {
   SimpleBLE::Adapter m_adapter;
   SimpleBLE::Peripheral m_foundPeripheral;
 
+  // "The link is gone" — the keep-alive loop's authoritative signal, read
+  // before its own peripheral.is_connected() poll (see the loop for why that
+  // poll is neither reliable nor free). Cleared before each loop; set by
+  // SimpleBLE's on_disconnected callback, which fires on a SimpleBLE thread and
+  // so cannot do the teardown itself, and by writeBlocking() once consecutive
+  // write failures say the peer has stopped answering. Desktop counterpart of
+  // the Android link-loss fix in bluetoothmanager.cpp (handleLinkLost).
+  std::atomic<bool> m_peripheralDropped{false};
+
+  // Consecutive writeBlocking() failures on the current connection, reset by
+  // any write that goes through. Windows keeps accepting writes into a link the
+  // peer has already stopped answering and only fails them on async_get's
+  // ten-second timeout, so this is the app's own evidence that the link is
+  // dead — usually well before ConnectionStatusChanged says so.
+  std::atomic<int> m_writeFailures{0};
+
   // Cached connection state, so the QML accessors never call into SimpleBLE.
   // The strings ride m_handleMutex with the handles they describe.
-  // PARKED — desktop/SimpleBLE counterpart of the Android link-loss fix in
-  // bluetoothmanager.cpp (handleLinkLost). Not enabled because the bug was
-  // only reproduced on Android and this backend was not retested; keep it
-  // together with the two commented blocks in bluetoothmanager2.cpp if the
-  // desktop build ever shows the same "still connected after the adapter is
-  // switched off" symptom.
-  //
-  // Set by SimpleBLE's on_disconnected callback, cleared before each keep-alive
-  // loop. The loop's own peripheral.is_connected() poll is not reliable on every
-  // backend — with the adapter switched off mid-session the Windows one can keep
-  // reporting a cached `true`, so the loop parks forever and the app never
-  // publishes connectedChanged(false). The callback does fire in that case, so
-  // it is the authoritative signal; it just cannot do the teardown itself
-  // (wrong thread), hence a flag the loop reads.
-  // std::atomic<bool> m_peripheralDropped{false};
   std::atomic<bool> m_connectedCache{false};
   std::atomic<int> m_mtu{0};
   QString m_deviceNameCache;

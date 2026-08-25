@@ -1,0 +1,17 @@
+import sys, numpy as np; sys.path.insert(0,'tools/noise_analysis')
+from sim_fx import *
+a=np.load('tools/noise_analysis/data.npy'); x=a[:,0]
+print("input rms %.1f dBFS  peak %.1f dBFS"%(rms_db(x),20*np.log10(np.max(np.abs(x)))))
+y,db,grs=nr_run_fast(x,trace=True)
+print("\n== NR at factory defaults (hpf 80, thresh -45, ratio 4, floor -24, hold 150) ==")
+print("  detector block-peak dB: min %.1f  p5 %.1f  median %.1f  max %.1f"%(db.min(),np.percentile(db,5),np.median(db),db.max()))
+print("  blocks below thresh: %d / %d"%(np.sum(db< -45.0),len(db)))
+print("  gain reduction dB: min %.1f  median %.1f  (0 = doing nothing)"%(grs.min(),np.median(grs)))
+print("  output rms %.1f dBFS   -> reduction %.1f dB"%(rms_db(y),rms_db(x)-rms_db(y)))
+z,gt,MAG=anr_run_fast(x,trace=True)
+print("\n== ANR at factory defaults (12 bands, 120..9000, amount .6, floor -20, adapt 8s) ==")
+gd=20*np.log10(np.maximum(gt,1e-6))
+print("  per-band final gain dB:", np.round(gd[:,-1],1))
+print("  per-band median gain dB:", np.round(np.median(gd,axis=1),1))
+print("  output rms %.1f dBFS   -> reduction %.1f dB"%(rms_db(z),rms_db(x)-rms_db(z)))
+np.save('tools/noise_analysis/out_nr.npy',y); np.save('tools/noise_analysis/out_anr.npy',z)

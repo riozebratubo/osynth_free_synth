@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "fx.cpp" "fx_reverb_wet.cpp"
+    SRCS "fx.cpp" "fx_reverb_wet.cpp" "fx_fft.cpp"
     INCLUDE_DIRS "include"
     # fx_gpl always registers but contributes no object files unless
     # CONFIG_OSYNTH_FX_GPL is set, so naming it here is free on an MIT

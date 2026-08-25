@@ -218,7 +218,43 @@ Translator::Translator() {
   pt["Brightness env"] = "Env. de brilho";
   pt["Vocoder"] = "Vocoder";  // listed only because the panel title is looked up
   pt["Vocoder capture"] = "Captura do vocoder";
+  pt["Hold to record"] = "Segure para gravar";
+  pt["Hold and speak a phrase; each note then says it back."] =
+      "Segure e fale uma frase; cada nota a repete.";
   pt["Buffer capture"] = "Captura do buffer";
+  // Vocoder starting points (VocoderPresets.qml, S43). The button captions are
+  // the character each one is going for, so they are translated; the names of
+  // the effects themselves are not, per the note at the top of this file.
+  pt["Vocoder starting points"] = "Pontos de partida do vocoder";
+  pt["Robot"] = "Robô";
+  pt["Talkbox"] = "Talkbox";
+  pt["Choir"] = "Coral";
+  pt["Whisper"] = "Sussurro";
+  pt["Giant"] = "Gigante";
+  pt["Alien"] = "Alienígena";
+  pt["Speak"] = "Fala";
+  pt["The classic. Hold a saw chord and speak evenly."] =
+      "O clássico. Segure um acorde de serra e fale de forma constante.";
+  pt["Narrower and more forward. Sawtooth or square."] =
+      "Mais estreito e mais presente. Dente de serra ou quadrada.";
+  pt["Slow and smeared. Hold a pad and sing vowels."] =
+      "Lento e difuso. Segure um pad e cante vogais.";
+  pt["Noise carrier — this one works with no note held."] =
+      "Portadora de ruído — este funciona sem nenhuma nota presa.";
+  pt["Formants down seven semitones. Play low."] =
+      "Formantes sete semitons abaixo. Toque grave.";
+  pt["Formants up, with noise mixed into the synth."] =
+      "Formantes acima, com ruído misturado ao sintetizador.";
+  pt["Tuned for words rather than character."] =
+      "Ajustado para as palavras, não para o timbre.";
+  pt["Sets the Vocoder knobs above and switches it on. Pick the mic under "
+     "Input, and hold a note — a vocoder with no synth under it is silent."] =
+      "Ajusta os controles do vocoder acima e o liga. Escolha o microfone em "
+      "Input e segure uma nota — um vocoder sem sintetizador embaixo fica "
+      "mudo.";
+  pt["Limiter"] = "Limitador";
+  pt["Mic NR"] = "Redução de ruído do mic";
+  pt["Mic noise profile"] = "Perfil de ruído do mic";
   pt["Adaptive NR"] = "Redução adaptativa";
   pt["Noise reduction"] = "Redução de ruído";
   pt["Noise profile"] = "Perfil de ruído";

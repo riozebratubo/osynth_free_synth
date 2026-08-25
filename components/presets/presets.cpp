@@ -506,6 +506,8 @@ bool skip_id(uint16_t id) {
          * — but a preset saved with a finger on the button would come back
          * permanently sampling, which is a unit that never settles. */
         case FX_PID_ANR_LEARN:
+        /* And the mic NR's (S42), which is the same control again. */
+        case FX_PID_MNR_LEARN:
         case PRESET_PID_LOAD:
         case PRESET_PID_SAVE:
         case PRESET_PID_SEQ_LOAD:

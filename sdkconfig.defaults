@@ -36,6 +36,25 @@ CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
 # has to find an mbuf for the next notification, so the chatter costs
 # reliability, not just readability. It also buries the firmware's own logs.
 CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y
+# Host buffer pool (msys). IDF's defaults are 12x256 B and 24x320 B, which were
+# sized for small ATT payloads — but BT_NIMBLE_ATT_PREFERRED_MTU defaults to
+# 256, and a 253-byte ATT payload plus the os_mbuf and packet headers does not
+# fit a 256-byte block, so every full-size frame this protocol sends comes out
+# of the 24 msys-2 blocks. A connect burst is several multi-frame listings back
+# to back and drained that pool, at which point NimBLE could not allocate for
+# the *receive* path either: "E NimBLE: ble_att_svr_pkt rc=6" (BLE_HS_ENOMEM),
+# an incoming ATT request left unanswered because even the error response
+# needs a buffer, and — ATT allowing one outstanding request per bearer — the
+# central closing the link on the 30 s transaction timeout (reason 0x213,
+# measured at 30078 ms from the rc=6, twice).
+#
+# The pacing in ble_ctrl's Chunker is the actual fix for that; this is the
+# headroom underneath it, so a burst waits a few milliseconds rather than
+# spending its whole budget in send_frame_paced. ~11 kB of internal RAM: free
+# on the P4/S3, and the one place to trim first if the classic ESP32 gets
+# tight.
+CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=24
+CONFIG_BT_NIMBLE_MSYS_2_BLOCK_COUNT=48
 
 # Room for the param-registry dump and init logging in app_main
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
