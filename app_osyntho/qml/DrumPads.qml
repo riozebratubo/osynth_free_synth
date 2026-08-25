@@ -3,8 +3,21 @@ import QtQuick.Controls.Material
 
 import org.osynth.osyntho
 
-// 4x4 velocity-sensitive drum pads, sitting to the left of the on-screen
+// 4x4 velocity-sensitive sample pads, sitting to the left of the on-screen
 // keyboard so a beat and a part can be played without changing pages.
+//
+// Since S44 there is a row of actions above them: Record, Erase and Undo. They
+// are here and not only on the Sample kits page because sampling is something
+// you do *while playing* -- the whole point of the pre-roll ring in the
+// firmware is that you can catch something the moment you hear it, and having
+// to change pages first would defeat that as thoroughly as a slow button.
+//
+// Record and Erase arm rather than act: press one, then press the pad it
+// applies to. That second press is the confirmation for an operation that
+// overwrites a sample, and for Record it is also the take itself -- the pad is
+// held for as long as you want to capture. The armed state lives in the UI
+// singleton, so pressing Record here lights the button on the Sample kits page
+// too.
 //
 // Layout is MPC order — **slot 0 is bottom-left**, rows filling upward. That
 // is not decoration: the factory kit is ordered kick, kick.tight, snare,
@@ -61,6 +74,22 @@ Rectangle {
         return ""
     }
 
+    // Whether the pad has audio in it. Since S44 the firmware says so directly
+    // (`filled`), which matters because a *recorded* pad can be named and a
+    // named one can be empty -- the two stopped being the same question the
+    // moment pads became destinations you erase. Falls back to the name on a
+    // firmware that does not report it.
+    function slotFilled(slot: int): bool {
+        const slots = Synth.kitSlots
+        for (let i = 0; i < slots.length; ++i) {
+            if (slots[i].slot === slot) {
+                return slots[i].filled !== undefined ? slots[i].filled
+                                                     : slots[i].name !== ""
+            }
+        }
+        return false
+    }
+
     // Vertical position within a pad -> velocity. Top edge = 127, bottom edge
     // scales down to a quarter of the base, centre = the base velocity.
     function velocityAt(yFraction: real): int {
@@ -74,6 +103,18 @@ Rectangle {
     // rather than mutated so the delegates' bindings re-evaluate.
     property var litPads: ({})
 
+    // Whether the bound kit can be recorded into. Drives how an empty pad is
+    // drawn: a hole on the read-only factory kit, a numbered outline on one
+    // you can sample into.
+    readonly property bool kitRecordable: {
+        if (!UI.samplerAvailable) return false
+        const list = Synth.kits
+        for (let i = 0; i < list.length; ++i) {
+            if (list[i].index === Synth.currentKit) return list[i].user === true
+        }
+        return false
+    }
+
     function setLit(slot: int, on: bool): void {
         var m = {}
         for (var k in root.litPads) m[k] = root.litPads[k]
@@ -82,9 +123,119 @@ Rectangle {
         root.litPads = m
     }
 
+    // The action row. Hidden entirely on a firmware with no recorder, so the
+    // pads keep their full height on a build that cannot sample.
+    Row {
+        id: actions
+        visible: UI.samplerAvailable
+        height: visible ? Math.max(22, root.height * 0.13) : 0
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.margins: 3
+        spacing: 3
+
+        readonly property real cellW: (width - spacing * 2) / 3
+
+        // Record. Lights amber while armed and waiting for a pad, red while a
+        // take is actually running -- two different states that a single
+        // colour would have conflated, and the difference matters because the
+        // firmware may still be waiting on smp.thresh.
+        Rectangle {
+            width: actions.cellW
+            height: actions.height
+            radius: 4
+            color: UI.samplerRecording
+                   ? "#c62828"
+                   : (UI.padAction === "record"
+                      ? "#ef6c00"
+                      : Qt.rgba(Material.foreground.r, Material.foreground.g,
+                                Material.foreground.b, 0.13))
+            border.width: 1
+            border.color: Qt.rgba(Material.foreground.r, Material.foreground.g,
+                                  Material.foreground.b, 0.18)
+            Text {
+                anchors.centerIn: parent
+                text: "\uf111"  // circle
+                font.family: App.fontAwesomeName
+                font.weight: Font.Black
+                font.pointSize: Math.max(6, UI.fontSize * 0.62)
+                color: (UI.samplerRecording || UI.padAction === "record")
+                       ? "#ffffff" : Material.foreground
+                opacity: 0.9
+            }
+            MouseArea {
+                anchors.fill: parent
+                onClicked: {
+                    if (UI.samplerRecording) { UI.stopRecord(); return }
+                    UI.padAction = UI.padAction === "record" ? "" : "record"
+                }
+            }
+        }
+
+        // Erase, same arming gesture.
+        Rectangle {
+            width: actions.cellW
+            height: actions.height
+            radius: 4
+            color: UI.padAction === "erase"
+                   ? "#ef6c00"
+                   : Qt.rgba(Material.foreground.r, Material.foreground.g,
+                             Material.foreground.b, 0.13)
+            border.width: 1
+            border.color: Qt.rgba(Material.foreground.r, Material.foreground.g,
+                                  Material.foreground.b, 0.18)
+            Text {
+                anchors.centerIn: parent
+                text: "\uf55a"  // eraser
+                font.family: App.fontAwesomeName
+                font.weight: Font.Black
+                font.pointSize: Math.max(6, UI.fontSize * 0.62)
+                color: UI.padAction === "erase" ? "#ffffff" : Material.foreground
+                opacity: 0.9
+            }
+            MouseArea {
+                anchors.fill: parent
+                onClicked: UI.padAction = UI.padAction === "erase" ? "" : "erase"
+            }
+        }
+
+        // Undo needs no pad: it puts back whatever the last record, erase or
+        // copy displaced, wherever that was.
+        Rectangle {
+            width: actions.cellW
+            height: actions.height
+            radius: 4
+            color: Qt.rgba(Material.foreground.r, Material.foreground.g,
+                           Material.foreground.b, 0.13)
+            border.width: 1
+            border.color: Qt.rgba(Material.foreground.r, Material.foreground.g,
+                                  Material.foreground.b, 0.18)
+            Text {
+                anchors.centerIn: parent
+                text: "\uf0e2"  // arrow-rotate-left
+                font.family: App.fontAwesomeName
+                font.weight: Font.Black
+                font.pointSize: Math.max(6, UI.fontSize * 0.62)
+                color: Material.foreground
+                opacity: 0.9
+            }
+            MouseArea {
+                anchors.fill: parent
+                onClicked: {
+                    UI.setSmp("smp.undo", 1)
+                    UI.padAction = ""
+                }
+            }
+        }
+    }
+
     Grid {
         id: grid
-        anchors.fill: parent
+        anchors.top: actions.visible ? actions.bottom : parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
         anchors.margins: 3
         columns: root.columns
         rows: root.rows
@@ -104,21 +255,27 @@ Rectangle {
                 readonly property int slot: root.slotFor(row, col)
                 readonly property string label: root.slotName(slot)
                 readonly property bool lit: root.litPads[slot] === true
-                // A kit can declare fewer slots than there are pads.
-                readonly property bool populated: label !== ""
+                // A kit can declare fewer slots than there are pads. On a
+                // recordable kit an empty pad is still a destination, so it is
+                // drawn as one rather than as a hole.
+                readonly property bool populated: root.slotFilled(slot)
+                readonly property bool armed: UI.armedPad === slot && UI.samplerAvailable
 
                 width: grid.cellW
                 height: grid.cellH
                 radius: 4
                 color: !populated
                        ? Qt.rgba(Material.foreground.r, Material.foreground.g,
-                                 Material.foreground.b, 0.04)
+                                 Material.foreground.b,
+                                 root.kitRecordable ? 0.07 : 0.04)
                        : lit ? Material.accent
                              : Qt.rgba(Material.foreground.r, Material.foreground.g,
                                        Material.foreground.b, 0.13)
-                border.width: lit ? 0 : 1
-                border.color: Qt.rgba(Material.foreground.r, Material.foreground.g,
-                                      Material.foreground.b, 0.18)
+                border.width: pad.armed ? 2 : (lit ? 0 : 1)
+                border.color: pad.armed
+                              ? (UI.samplerRecording ? "#c62828" : "#ef6c00")
+                              : Qt.rgba(Material.foreground.r, Material.foreground.g,
+                                        Material.foreground.b, 0.18)
 
                 Behavior on color {
                     ColorAnimation { duration: pad.lit ? 0 : 140 }
@@ -128,7 +285,9 @@ Rectangle {
                     anchors.centerIn: parent
                     width: parent.width - 6
                     horizontalAlignment: Text.AlignHCenter
-                    text: pad.label
+                    text: pad.populated
+                          ? pad.label
+                          : (root.kitRecordable ? String(pad.slot + 1) : "")
                     elide: Text.ElideRight
                     font.pointSize: Math.max(6, UI.fontSize * 0.6)
                     font.bold: pad.lit
@@ -216,18 +375,70 @@ Rectangle {
             return Math.max(0, Math.min(1, (y - row * pitch) / grid.cellH))
         }
 
+        // Which point, if any, is holding a take open. Only one can: the
+        // firmware has one recorder, and a second finger landing mid-take must
+        // not silently re-aim it.
+        property int recPoint: -1
+
         // A drum is a one-shot: it fires on touch-down and there is nothing to
         // release, so only *new* points trigger. Dragging onto another pad
         // fires that one too (a roll), which is the useful behaviour.
+        //
+        // Unless an action is armed, in which case the first press is consumed
+        // by it instead of sounding: you are aiming at a destination, and
+        // hearing the sample you are about to replace is not helpful.
         onPressed: (points) => {
             var m = mpta.pointSlots
             for (var i = 0; i < points.length; ++i) {
                 const slot = mpta.padAt(points[i].x, points[i].y)
                 if (slot < 0) continue
+                if (UI.padAction === "record" && mpta.recPoint < 0) {
+                    mpta.recPoint = points[i].pointId
+                    UI.startRecordInto(slot)
+                    continue
+                }
+                if (UI.padAction === "erase") {
+                    UI.erasePad(slot)
+                    continue
+                }
                 m[points[i].pointId] = slot
                 root.hit(slot, root.velocityAt(mpta.fractionInPad(points[i].y)))
             }
             mpta.pointSlots = m
+        }
+
+        // Touch-up. Two jobs, and neither existed before S44: close a take
+        // that a held pad opened, and let go of a gate or loop pad. The second
+        // is a no-op on a one-shot, which is every pad of every kit that
+        // predates the play modes, so it can be sent unconditionally.
+        onReleased: (points) => {
+            for (var i = 0; i < points.length; ++i) {
+                const id = points[i].pointId
+                if (id === mpta.recPoint) {
+                    mpta.recPoint = -1
+                    UI.stopRecord()
+                    continue
+                }
+                const held = mpta.pointSlots[id]
+                if (held !== undefined) {
+                    Synth.releaseDrum(held)
+                    delete mpta.pointSlots[id]
+                }
+            }
+            mpta.holdSlot = -1
+            holdTimer.stop()
+        }
+
+        // A canceled gesture (the OS taking the touch, a call arriving) has to
+        // close an open take as well -- otherwise the recorder runs to its
+        // ceiling and commits whatever it caught.
+        onCanceled: (points) => {
+            if (mpta.recPoint >= 0) {
+                mpta.recPoint = -1
+                UI.stopRecord()
+            }
+            for (var k in mpta.pointSlots) Synth.releaseDrum(mpta.pointSlots[k])
+            mpta.pointSlots = ({})
         }
 
         onTouchUpdated: (points) => {
@@ -235,6 +446,9 @@ Rectangle {
             var m = {}
             for (var i = 0; i < points.length; ++i) {
                 const p = points[i]
+                // The finger holding a take open may wander off its pad; the
+                // recording follows the button, not the position.
+                if (p.pointId === mpta.recPoint) continue
                 const slot = mpta.padAt(p.x, p.y)
                 if (slot < 0) continue
                 m[p.pointId] = slot
@@ -273,7 +487,7 @@ Rectangle {
         // flash. But an *unknown* kit — the slot list has not arrived yet —
         // must still play: silence with no explanation is worse than a hit on
         // a slot that turns out to be empty.
-        if (Synth.kitSlots.length > 0 && root.slotName(slot) === "") return
+        if (Synth.kitSlots.length > 0 && !root.slotFilled(slot)) return
         Synth.triggerDrum(slot, velocity)
         root.setLit(slot, true)
         unlight.restart()

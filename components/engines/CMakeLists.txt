@@ -5,6 +5,7 @@ file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/gen")
 idf_component_register(
     SRCS "engines.cpp" "engine_subtractive.cpp" "engine_additive.cpp"
          "engine_fm.cpp" "engine_wavetable.cpp" "engine_granular.cpp"
+         "engine_sampler.cpp"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "${CMAKE_CURRENT_BINARY_DIR}/gen"
     REQUIRES synth_core graph
@@ -12,7 +13,12 @@ idf_component_register(
     # block (S38), the same dependency and for the same reason as the modular
     # graph's LineIn node. Private — it appears in engine_granular.cpp only,
     # never in a public header.
-    PRIV_REQUIRES audio_io
+    #
+    # drums: the S44 sampler engine plays the sample kits that component owns —
+    # its pads, its mu-law table and its kit generation counter. Private for the
+    # same reason: engine_sampler.cpp is the only file that names it, and no
+    # engines header does.
+    PRIV_REQUIRES audio_io drums
 )
 
 # factory_wavetables.h is generated at build time by the host-side script

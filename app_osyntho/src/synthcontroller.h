@@ -106,6 +106,11 @@ class SynthController final : public QObject, public DatabaseClient {
   Q_PROPERTY(QVariantList kitSlots READ kitSlots NOTIFY kitChanged FINAL)
   Q_PROPERTY(QVariantList kits READ kits NOTIFY kitChanged FINAL)
   Q_PROPERTY(int currentKit READ currentKit NOTIFY kitChanged FINAL)
+  // Where the firmware is persisting recordable kits: "sd", "lfs" or "none"
+  // (S44). The page shows it, and it is what decides whether a Save control is
+  // offered at all -- a button that provably cannot work is worse than one
+  // that is not there.
+  Q_PROPERTY(QString kitStorage READ kitStorage NOTIFY kitChanged FINAL)
   // Note of the kit's first populated slot — the kick in the factory kit.
   // The sensible starting pick for drum placement, since the melodic
   // default (60) answers to no slot at all. -1 before a kit arrives.
@@ -372,6 +377,7 @@ class SynthController final : public QObject, public DatabaseClient {
   QVariantList kitSlots() const { return m_kitSlots; }
   QVariantList kits() const { return m_kits; }
   int currentKit() const { return m_currentKit; }
+  QString kitStorage() const { return m_kitStorage; }
   int defaultDrumNote() const;
   Q_INVOKABLE void refreshKit();
   Q_INVOKABLE void selectKit(int index);
@@ -379,6 +385,21 @@ class SynthController final : public QObject, public DatabaseClient {
   // on-screen pads. Velocity needs a dedicated opcode: `drums.trig` is a
   // parameter and can only carry the slot number.
   Q_INVOKABLE void triggerDrum(int slot, int velocity = 100);
+  // Let go of a pad. Only gate and loop pads (S44) hold anything, so this is a
+  // no-op on every other kind and the pad surfaces can send it on every
+  // touch-up without first asking what the pad is.
+  Q_INVOKABLE void releaseDrum(int slot);
+
+  // ---- sample-kit editing (S44) ----
+  //
+  // These write kit data rather than parameters, so they do not go through
+  // setParam's coalescing batch and they do not appear in a preset. `field`
+  // is KitPadField in synthprotocol.h. Each is followed by a kit re-read,
+  // because the firmware is the authority on what a pad ended up as -- it
+  // clamps, and it refuses outright on the factory kit.
+  Q_INVOKABLE void setPadField(int slot, int field, double value);
+  Q_INVOKABLE void renameKit(int kit, const QString& name);
+  Q_INVOKABLE void renamePad(int slot, const QString& name);
 
   // --- modular patch graph (S28) -----------------------------------------
   bool graphAvailable() const { return m_graphAvailable; }
@@ -979,6 +1000,7 @@ class SynthController final : public QObject, public DatabaseClient {
   QVariantList m_kits;
   QVariantList m_kitsAccum;
   int m_currentKit = 0;
+  QString m_kitStorage = QStringLiteral("none");
 
   // --- modular patch graph (S28) ---
   bool m_graphAvailable = false;

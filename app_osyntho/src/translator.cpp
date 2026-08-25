@@ -127,7 +127,44 @@ Translator::Translator() {
   pt["Modulation"] = "Modulação";
   pt["Input"] = "Entrada";
   pt["Effects"] = "Efeitos";
-  pt["Drums"] = "Bateria";
+  pt["Sample kits"] = "Kits de sample";
+
+  // ---- Kits de sample (S44) ----
+  // The recorder and the per-pad editor. "Kit", "pad", "gate", "loop" and
+  // "one-shot" are listed with identical values on purpose rather than left
+  // to fall back: they are the words a Portuguese-speaking musician uses
+  // too, and having them in the table is what stops the next person from
+  // "fixing" them into something nobody says.
+  pt["Record"] = "Gravar";
+  pt["Recording"] = "Gravando";
+  pt["Armed"] = "Armado";
+  pt["Pick a pad"] = "Escolha um pad";
+  pt["Stop"] = "Parar";
+  pt["Undo"] = "Desfazer";
+  pt["Erase"] = "Apagar";
+  pt["Waiting for sound…"] = "Aguardando som…";
+  pt["Saving…"] = "Salvando…";
+  pt["Save kit"] = "Salvar kit";
+  pt["Rename kit"] = "Renomear kit";
+  pt["Rename this kit"] = "Renomear este kit";
+  pt["Kit name"] = "Nome do kit";
+  pt["Copy to…"] = "Copiar para…";
+  pt["Copy pad to"] = "Copiar pad para";
+  pt["Play"] = "Toque";
+  pt["Play this pad backwards"] = "Tocar este pad ao contrário";
+  pt["Start"] = "Início";
+  pt["Choke"] = "Choke";
+  pt["empty"] = "vazio";
+  pt["pad"] = "pad";
+  pt["free"] = "livres";
+  pt["one-shot"] = "one-shot";
+  pt["gate"] = "gate";
+  pt["loop"] = "loop";
+  pt["Saving to SD card"] = "Salvando no cartão SD";
+  pt["Saving to internal flash (small)"] = "Salvando na flash interna (pouco espaço)";
+  pt["No storage — kits are lost at power off"] = "Sem armazenamento — os kits se perdem ao desligar";
+  pt["Put back whatever the last record, erase or copy replaced"] = "Desfaz o que a última gravação, exclusão ou cópia substituiu";
+
   pt["App language (restart to apply)"] = "Idioma (reinicie o app para aplicar)";
   pt["English"] = "Inglês";
   pt["Portuguese"] = "Português";

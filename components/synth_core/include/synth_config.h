@@ -288,6 +288,26 @@
 #define SYNTH_LOOP_STORE_SD 0 /* flash-region backend when persist is on */
 #endif
 
+/* Sample kits (S44): recordable kits alongside the factory one, and the PSRAM
+ * budget every pad in every kit shares.
+ *
+ * SYNTH_SAMPLE_KITS is 0 without PSRAM, which is the whole gate — the kits are
+ * resident and the takes land in PSRAM, so there is nothing to fall back to on
+ * a board without it. The three constants exist unconditionally so that
+ * `if (SYNTH_SAMPLE_KITS > 0)` is a compile-time-foldable test rather than a
+ * preprocessor fence around every caller; the sampler registers its parameters
+ * either way and refuses takes with a reason, so the app's controls are
+ * present and explain themselves instead of silently missing. */
+#if defined(CONFIG_OSYNTH_SAMPLE_KITS) && CONFIG_OSYNTH_SAMPLE_KITS > 0
+#define SYNTH_SAMPLE_KITS     CONFIG_OSYNTH_SAMPLE_KITS
+#define SYNTH_SAMPLE_POOL_KB  CONFIG_OSYNTH_SAMPLE_POOL_KB
+#define SYNTH_SAMPLE_MAX_SEC  CONFIG_OSYNTH_SAMPLE_MAX_SEC
+#else
+#define SYNTH_SAMPLE_KITS     0
+#define SYNTH_SAMPLE_POOL_KB  0
+#define SYNTH_SAMPLE_MAX_SEC  1
+#endif
+
 /* ---- Audio engine constants ---- */
 #define SYNTH_SAMPLE_RATE CONFIG_OSYNTH_SAMPLE_RATE
 #define SYNTH_BLOCK_SIZE  CONFIG_OSYNTH_BLOCK_SIZE

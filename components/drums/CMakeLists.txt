@@ -1,11 +1,16 @@
 idf_component_register(
-    SRCS "drums.cpp" "drum_kit.cpp"
+    SRCS "drums.cpp" "drum_kit.cpp" "sampler.cpp"
     INCLUDE_DIRS "include"
     REQUIRES synth_core
     # esp_rom for the CRC used to validate kit images; the SD stack only for
     # the optional OSYNTH_DRUM_SD_KITS path (gated in code, links away when
     # the option is off).
-    PRIV_REQUIRES fatfs sdmmc esp_driver_sdspi esp_driver_spi
+    #
+    # audio_io: the S44 recorder reads the captured input block through
+    # audio_io_in_mono(), the same dependency the granular engine takes for its
+    # capture ring and for the same reason. Private — it appears in
+    # sampler.cpp only, never in a public header.
+    PRIV_REQUIRES fatfs sdmmc esp_driver_sdspi esp_driver_spi audio_io
 )
 
 # ---------------------------------------------------------------------------

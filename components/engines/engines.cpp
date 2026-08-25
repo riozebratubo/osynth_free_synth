@@ -29,6 +29,7 @@
 #include "engine_additive.h"
 #include "engine_fm.h"
 #include "engine_granular.h"
+#include "engine_sampler.h"
 #include "engine_subtractive.h"
 #include "engine_wavetable.h"
 #include "synth_config.h"
@@ -62,6 +63,7 @@ const synth_engine_t* const s_engines[SYNTH_ENGINE_COUNT] = {
     nullptr,               /* SYNTH_ENGINE_MODULAR, not built */
 #endif
     &g_engine_granular,    /* SYNTH_ENGINE_GRANULAR (S38) */
+    &g_engine_sampler,     /* SYNTH_ENGINE_SAMPLER (S44) */
 };
 
 std::atomic<int> s_active_type{-1};

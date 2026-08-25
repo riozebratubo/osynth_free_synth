@@ -748,11 +748,64 @@ menu "osynth Synthesizer"
             backend when both are enabled — whichever gets there first
             mounts the card.
 
+    config OSYNTH_SAMPLE_KITS
+        int "Recordable sample kits"
+        depends on SPIRAM
+        range 0 8
+        default 8
+        help
+            How many recordable kits sit alongside the factory kit (S44).
+            Each has DRUM_SLOTS pads that can be sampled from the audio
+            input or from the synth's own output, and all of them are
+            resident at once so a pad can be recorded without first
+            selecting the kit it belongs to.
+
+            An empty kit costs nothing but its slot table (~3 KB of PSRAM),
+            so this is a limit on how many kits the app offers, not a
+            reservation of audio memory — that is OSYNTH_SAMPLE_POOL_KB
+            below, and it is shared across every kit.
+
+            0 disables recording entirely and leaves the factory kit as the
+            only kit, which is what a build with no input hardware wants.
+
+    config OSYNTH_SAMPLE_POOL_KB
+        int "Sample pool (KB of PSRAM, shared by every kit)"
+        depends on OSYNTH_SAMPLE_KITS > 0
+        range 256 32768
+        default 4096
+        help
+            Ceiling on the audio held by every recorded pad across every
+            kit, plus whatever is loaded from storage at boot. Recorded
+            samples are mono 16-bit at the render rate, so 4096 KB is about
+            43 seconds in total — plenty for one-shots across 128 pads,
+            and deliberately not enough to be treated as a looper.
+
+            This is taken out of the same PSRAM pool the looper sizes itself
+            from, and drums_init() runs before looper_init(), so raising it
+            shortens the advertised loop time rather than causing a failure
+            later. That is the intended trade and the log line at boot
+            reports both.
+
+    config OSYNTH_SAMPLE_MAX_SEC
+        int "Longest single take (seconds)"
+        depends on OSYNTH_SAMPLE_KITS > 0
+        range 1 30
+        default 8
+        help
+            Length of the staging buffer one take is captured into, and so
+            the hard ceiling on a single pad. Allocated once, on the first
+            time anything is armed, and then kept — a build whose owner
+            never samples pays nothing for this.
+
+            8 seconds is a little over four bars at 120 BPM, which is what
+            makes the slicer useful; it costs 768 KB while it exists.
+
     # The SD bus is shared: either feature turning it on makes the pins
     # relevant, so the pin options hang off this rather than off one of them.
+    # Sample kits persist to the same card, so they join the list.
     config OSYNTH_SD_BUS
         bool
-        default y if OSYNTH_LOOP_STORE_SD || OSYNTH_DRUM_SD_KITS
+        default y if OSYNTH_LOOP_STORE_SD || OSYNTH_DRUM_SD_KITS || OSYNTH_SAMPLE_KITS > 0
 
     config OSYNTH_SD_CS_GPIO
         int "SD card CS GPIO"

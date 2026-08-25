@@ -101,6 +101,10 @@ enum Op : quint8 {
   // synth. Firmware without chord mode answers UNSUPPORTED, which is how the
   // page decides whether to offer user mode.
   OP_CHORD_SET     = 0x3E,
+  // Sample-kit editing (S44). The recorder itself rides on ordinary
+  // parameters (smp.*); this carries the per-pad data that has to follow a
+  // kit switch and therefore cannot be one.
+  OP_KIT_EDIT      = 0x3F,
   OP_PING          = 0x7F,
 };
 
@@ -885,6 +889,52 @@ inline QByteArray payloadDrumTrig(int slot, int velocity) {
   QByteArray p;
   appendU8(p, quint8(slot));
   appendU8(p, quint8(velocity));
+  return p;
+}
+// Release form (S44), for pads whose play mode is gate or loop. The third byte
+// rather than a velocity of 0, because that value is already the capability
+// probe this app fires at discovery.
+inline QByteArray payloadDrumRelease(int slot) {
+  QByteArray p;
+  appendU8(p, quint8(slot));
+  appendU8(p, 0);
+  appendU8(p, 1);
+  return p;
+}
+// Pad fields, matching drums_pad_field_t in components/drums/include/drums.h.
+enum KitPadField {
+  KitPadMode = 0,
+  KitPadReverse = 1,
+  KitPadStart = 2,
+  KitPadChoke = 3,
+  KitPadNote = 4,
+  KitPadGain = 5,
+};
+// kit < 0 means "the one that is bound", which is what every control in the
+// app means: it edits the kit on screen, and the firmware is the authority on
+// which that is.
+inline QByteArray payloadKitPadField(int kit, int slot, int field, float v) {
+  QByteArray p;
+  appendU8(p, 0);
+  appendU8(p, kit < 0 ? 0xFF : quint8(kit));
+  appendU8(p, quint8(slot));
+  appendU8(p, quint8(field));
+  appendF32(p, v);
+  return p;
+}
+inline QByteArray payloadKitRename(int kit, const QString& name) {
+  QByteArray p;
+  appendU8(p, 1);
+  appendU8(p, quint8(kit));
+  p.append(name.toUtf8().left(23));
+  return p;
+}
+inline QByteArray payloadKitPadRename(int kit, int slot, const QString& name) {
+  QByteArray p;
+  appendU8(p, 2);
+  appendU8(p, kit < 0 ? 0xFF : quint8(kit));
+  appendU8(p, quint8(slot));
+  p.append(name.toUtf8().left(11));
   return p;
 }
 

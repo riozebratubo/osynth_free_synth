@@ -42,6 +42,16 @@ extern "C" {
 #define DRUM_KIT_NAME_MAX  24
 #define DRUM_SLOT_NAME_MAX 12
 
+/* How a pad plays back (S44). Append only — the value is stored in a user
+ * kit's sidecar on the card, so a renumbering would change what saved kits
+ * mean. Public rather than private to the drums component because the sampler
+ * engine plays the same pads and has to agree about what each value does. */
+enum {
+    DRUM_PLAY_ONESHOT = 0, /* fire and forget; the historical behaviour */
+    DRUM_PLAY_GATE = 1,    /* sounds while the pad or key is held       */
+    DRUM_PLAY_LOOP = 2     /* loops until released (gate) or choked     */
+};
+
 /* Sample storage formats. */
 enum {
     DRUM_FMT_ULAW = 0, /* 8-bit G.711 mu-law, 1 byte per frame */

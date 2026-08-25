@@ -38,6 +38,7 @@
 #include "engine_additive.h"
 #include "engine_fm.h"
 #include "engine_granular.h"
+#include "engine_sampler.h"
 #include "engine_subtractive.h"
 #include "engine_wavetable.h"
 #include "fx.h"
@@ -3422,6 +3423,45 @@ static const preset_pair_t kGranInScrub[] = {
     P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.4f),
 };
 
+/* ---- sampler (S44) ---------------------------------------------------
+ *
+ * A short bank on purpose. Every other engine's presets describe a *sound*;
+ * a sampler's sound is whichever kit the player recorded, so what a preset
+ * here can honestly offer is a way of *playing* it. These are the handful of
+ * distinct playing arrangements, not a survey of timbres that do not exist
+ * until someone records one. */
+static const preset_pair_t kSmpPitchedKeys[] = {
+    P(SMPE_PID_MODE, 1), P(SMPE_PID_PAD, 0), P(SMPE_PID_ROOT, 60),
+    P(SMPE_PID_ENV1_ATTACK, 0.002f), P(SMPE_PID_ENV1_SUSTAIN, 1.0f),
+    P(SMPE_PID_ENV1_RELEASE, 0.12f),
+};
+static const preset_pair_t kSmpPitchedPad[] = {
+    P(SMPE_PID_MODE, 1), P(SMPE_PID_PAD, 0), P(SMPE_PID_ROOT, 60),
+    P(SMPE_PID_ENV1_ATTACK, 0.6f), P(SMPE_PID_ENV1_SUSTAIN, 1.0f),
+    P(SMPE_PID_ENV1_RELEASE, 1.4f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.45f),
+};
+static const preset_pair_t kSmpPluck[] = {
+    P(SMPE_PID_MODE, 1), P(SMPE_PID_ROOT, 60), P(SMPE_PID_VELDEPTH, 1.0f),
+    P(SMPE_PID_ENV1_ATTACK, 0.001f), P(SMPE_PID_ENV1_DECAY, 0.35f),
+    P(SMPE_PID_ENV1_SUSTAIN, 0.0f), P(SMPE_PID_ENV1_RELEASE, 0.2f),
+};
+static const preset_pair_t kSmpChopped[] = {
+    /* Into the body of the sample rather than its attack — the setting that
+     * turns a sliced loop into something you can play a line with. */
+    P(SMPE_PID_MODE, 1), P(SMPE_PID_ROOT, 48), P(SMPE_PID_START, 0.12f),
+    P(SMPE_PID_ENV1_ATTACK, 0.001f), P(SMPE_PID_ENV1_SUSTAIN, 1.0f),
+    P(SMPE_PID_ENV1_RELEASE, 0.05f),
+};
+static const preset_pair_t kSmpPadsTight[] = {
+    P(SMPE_PID_MODE, 0), P(SMPE_PID_SPREAD, 0.4f),
+    P(SMPE_PID_ENV1_RELEASE, 0.03f),
+};
+static const preset_pair_t kSmpPadsWide[] = {
+    P(SMPE_PID_MODE, 0), P(SMPE_PID_SPREAD, 1.0f),
+    P(FX_PID_REV_ON, 1), P(FX_PID_REV_MIX, 0.3f),
+};
+
 /* ---- the banks ------------------------------------------------------ */
 
 #define F(nm, t) {nm, t, N(t)}
@@ -3734,5 +3774,15 @@ const factory_preset_t
             F("in: shadow", kGranInShadow),
             F("in: shards", kGranInShards),
             F("in: scrub", kGranInScrub),
+        },
+        /* sampler (S44) */
+        {
+            {"init", nullptr, 0},
+            F("pads: tight", kSmpPadsTight),
+            F("pads: wide", kSmpPadsWide),
+            F("keys", kSmpPitchedKeys),
+            F("pluck", kSmpPluck),
+            F("pad wash", kSmpPitchedPad),
+            F("chopped", kSmpChopped),
         },
 };

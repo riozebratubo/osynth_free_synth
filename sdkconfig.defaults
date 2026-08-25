@@ -134,6 +134,38 @@ CONFIG_OSYNTH_HEARTBEAT_MS=5000
 # bus does not reliably fit one. Uncommenting here applies to both targets.
 # CONFIG_OSYNTH_ENABLE_MODULAR=y
 
+# --- Sample kits (S44) ------------------------------------------------------
+
+# Recordable kits alongside the factory one. Each has 16 pads that can be
+# sampled from the audio input or from the synth's own output; all of them are
+# resident, so a pad can be recorded without first selecting its kit. Default 8
+# on any PSRAM board, 0 without (there is nowhere for the audio to live).
+# An empty kit costs only its ~3 KB slot table.
+# CONFIG_OSYNTH_SAMPLE_KITS=8
+
+# The PSRAM every recorded pad across every kit shares, plus whatever is read
+# back from storage at boot. Mono 16-bit at the render rate, so 4 MB is about
+# 43 seconds in total across 128 pads.
+#
+# This comes out of the same pool the looper sizes itself from, and drums_init()
+# runs first, so raising it shortens the advertised loop time rather than
+# failing later — on the 32 MB P4 board, 4 MB costs the looper roughly ten
+# seconds of its 160 s base cap. The boot log prints both.
+# CONFIG_OSYNTH_SAMPLE_POOL_KB=4096
+
+# Longest single take, and so the staging buffer's size: 768 KB at 8 s, claimed
+# on the first time a pad is armed and never given back. 8 s is a little over
+# four bars at 120 BPM, which is what makes the slicer worth having.
+# CONFIG_OSYNTH_SAMPLE_MAX_SEC=8
+
+# Kits recorded on the synth persist to /sd/osynth/kits/kitN as plain WAVs plus
+# a small sidecar, falling back to the LittleFS `storage` partition when there
+# is no card (about ten seconds in total, shared with the presets). This
+# separate option adds the *other* direction — loading `<name>.okit` images and
+# hand-made WAV folders that tools/gen_drumkit.py or a desktop produced.
+# Default n.
+# CONFIG_OSYNTH_DRUM_SD_KITS=n
+
 # --- Render path ------------------------------------------------------------
 
 # Marks the per-block render path (engines, voice manager, FX bus, looper,

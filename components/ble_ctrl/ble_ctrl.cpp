@@ -165,6 +165,16 @@ enum : uint8_t {
      * one opcode that carries the whole set in a single frame either way.
      * Direction byte first, like every other read-and-write op here. */
     OP_CHORD_SET = 0x3E,
+    /* Sample-kit editing (S44). Everything the *recorder* does rides on
+     * ordinary parameters (smp.arm, smp.rec, smp.erase, smp.undo), because a
+     * float is all any of it needs and the app already has plumbing for those.
+     * What could not go there is the per-pad performance data - play mode,
+     * reverse, start offset, choke group, note, name - which is kit data
+     * rather than patch data: it has to follow a kit switch, and a parameter
+     * does not. There is also no room for it, with 448 parameter slots and
+     * ~418 in use. So it travels here, the same reasoning the sequencer's
+     * pattern data and the graph's structure both took. */
+    OP_KIT_EDIT = 0x3F,
     OP_PING = 0x7F,
     EVT_PARAMS = 0xC0,
     EVT_ENGINE = 0xC1,
@@ -1130,40 +1140,145 @@ void handle_seq_song(uint8_t seq, const uint8_t* p, uint16_t plen) {
     s_chunker.finish();
 }
 
+/* Wire width of one `what = 1` slot record. Sent in the prefix rather than
+ * assumed by the app, which is the lesson S44 taught this opcode: the record
+ * grew from 14 bytes to 22, and an app with the old width hard-coded would
+ * have read the whole listing shifted rather than noticing. A reader that
+ * takes the width from the prefix survives the next addition too. */
+constexpr uint8_t kKitSlotRecBytes = 6 + 4 + DRUM_SLOT_NAME_MAX;
+
 void handle_kit_info(uint8_t seq, const uint8_t* p, uint16_t plen) {
     const uint8_t what = plen >= 1 ? p[0] : 1;
     if (what == 0) { /* the selectable kits */
-        const uint8_t prefix[3] = {0, (uint8_t)ParamStore::instance().get(
+        /* The fourth byte is where user kits persist: 0 nowhere, 1 SD card,
+         * 2 the LittleFS partition. The app needs it to decide whether to
+         * offer a Save control at all, and "nowhere" is a real answer on a
+         * board with no card - one worth showing rather than discovering when
+         * a kit does not come back after a power cycle. */
+        const char* store = drums_storage_name();
+        const uint8_t backend = (store[0] == 's') ? 1u
+                                                  : (store[0] == 'l' ? 2u : 0u);
+        const uint8_t prefix[4] = {0, (uint8_t)ParamStore::instance().get(
                                           DRUM_PID_KIT),
-                                   (uint8_t)drums_kit_count()};
+                                   (uint8_t)drums_kit_count(), backend};
         s_chunker.begin(OP_KIT_INFO | 0x80, seq, prefix, sizeof(prefix), false,
                         /*paced=*/true);
         for (int i = 0; i < drums_kit_count(); ++i) {
-            uint8_t rec[1 + DRUM_KIT_NAME_MAX] = {};
+            uint8_t rec[2 + DRUM_KIT_NAME_MAX] = {};
             rec[0] = (uint8_t)i;
+            /* Bit 0 says the kit can be recorded into and saved; the app draws
+             * a very different page for one that cannot. */
+            rec[1] = (uint8_t)(drums_kit_is_user(i) ? 0x01u : 0x00u);
             /* rec is zero-initialised, so the name stays NUL-padded to its
              * fixed wire width; strlcpy always terminates. */
-            strlcpy((char*)rec + 1, drums_kit_name_at(i), DRUM_KIT_NAME_MAX);
+            strlcpy((char*)rec + 2, drums_kit_name_at(i), DRUM_KIT_NAME_MAX);
             s_chunker.append(rec, sizeof(rec));
         }
         s_chunker.finish();
         return;
     }
-    /* the current kit's slots: what the app labels the drum lanes and the
+    /* The current kit's slots: what the app labels the drum lanes and the
      * mixer strips with, since the parameters themselves are named
-     * generically (drum1.level …) and outlive any one kit */
-    const uint8_t prefix[3] = {1, (uint8_t)drums_slot_count(), 0};
+     * generically (drum1.level and friends) and outlive any one kit.
+     *
+     * Since S44 it also carries what a *pad editor* needs - whether the pad
+     * has anything in it, how long that is, and the four performance settings
+     * that live in the kit rather than in parameter space. All of it in the
+     * listing the app already fetches on every kit change, rather than a
+     * per-pad round trip sixteen times over. */
+    const uint8_t prefix[3] = {1, (uint8_t)drums_slot_count(),
+                               kKitSlotRecBytes};
     s_chunker.begin(OP_KIT_INFO | 0x80, seq, prefix, sizeof(prefix), false,
                     /*paced=*/true);
     for (int i = 0; i < drums_slot_count() && i < DRUM_SLOTS; ++i) {
-        uint8_t rec[2 + DRUM_SLOT_NAME_MAX] = {};
+        uint8_t rec[kKitSlotRecBytes] = {};
+        drums_pad_t pad;
+        const bool filled = drums_pad_get(i, &pad);
         rec[0] = (uint8_t)i;
         const int note = drums_slot_note(i);
-        rec[1] = (uint8_t)(note >= 0 ? note : 0);
-        strlcpy((char*)rec + 2, drums_slot_name(i), DRUM_SLOT_NAME_MAX);
+        rec[1] = (uint8_t)(note >= 0 ? note : (36 + i));
+        rec[2] = (uint8_t)((filled ? 0x01u : 0x00u) |
+                           (filled && pad.reverse ? 0x02u : 0x00u));
+        rec[3] = filled ? pad.play_mode : (uint8_t)DRUM_PLAY_ONESHOT;
+        rec[4] = filled ? pad.choke_group : 0u;
+        /* start_ofs as a byte: the app draws it on a slider a couple of
+         * hundred pixels long, so 1/255 is already finer than anyone can aim
+         * at, and it keeps the record byte-aligned. */
+        rec[5] = filled ? (uint8_t)(pad.start_ofs * 255.0f + 0.5f) : 0u;
+        const uint32_t frames = filled ? pad.frames : 0u;
+        memcpy(rec + 6, &frames, 4);
+        strlcpy((char*)rec + 10, drums_slot_name(i), DRUM_SLOT_NAME_MAX);
         s_chunker.append(rec, sizeof(rec));
     }
     s_chunker.finish();
+}
+
+/* ---- sample-kit editing (S44) ------------------------------------------
+ *
+ * One opcode, a sub-op byte, and a status reply. Deliberately not chunked:
+ * each of these is a single small write, and the app re-reads KIT_INFO
+ * afterwards to see the result rather than being told it twice.
+ *
+ *   0 PAD FIELD  [u8 kit][u8 slot][u8 field][f32 value]
+ *       `kit` 0xFF means the bound one; `field` is drums_pad_field_t.
+ *   1 RENAME KIT [u8 kit][char name[DRUM_KIT_NAME_MAX]]
+ *   2 RENAME PAD [u8 kit][u8 slot][char name[DRUM_SLOT_NAME_MAX]]
+ */
+void handle_kit_edit(uint8_t seq, const uint8_t* p, uint16_t plen) {
+    if (plen < 1) {
+        send_status(OP_KIT_EDIT, seq, ST_MALFORMED);
+        return;
+    }
+    const uint8_t sub = p[0];
+    if (sub == 0) {
+        if (plen < 8) {
+            send_status(OP_KIT_EDIT, seq, ST_MALFORMED);
+            return;
+        }
+        const int kit = (p[1] == 0xFF) ? -1 : (int)p[1];
+        float value;
+        memcpy(&value, p + 4, 4);
+        const esp_err_t err = drums_pad_set_field(
+            kit, (int)p[2], (drums_pad_field_t)p[3], value);
+        send_status(OP_KIT_EDIT, seq,
+                    err == ESP_OK
+                        ? ST_OK
+                        : (err == ESP_ERR_NOT_SUPPORTED ? ST_UNSUPPORTED
+                                                        : ST_BAD_ARG));
+        return;
+    }
+    if (sub == 1) {
+        if (plen < 3) {
+            send_status(OP_KIT_EDIT, seq, ST_MALFORMED);
+            return;
+        }
+        char name[DRUM_KIT_NAME_MAX];
+        const uint16_t avail = (uint16_t)(plen - 2);
+        const uint16_t n =
+            avail < DRUM_KIT_NAME_MAX - 1 ? avail : DRUM_KIT_NAME_MAX - 1;
+        memcpy(name, p + 2, n);
+        name[n] = '\0';
+        const esp_err_t err = drums_kit_rename((int)p[1], name);
+        send_status(OP_KIT_EDIT, seq, err == ESP_OK ? ST_OK : ST_UNSUPPORTED);
+        return;
+    }
+    if (sub == 2) {
+        if (plen < 4) {
+            send_status(OP_KIT_EDIT, seq, ST_MALFORMED);
+            return;
+        }
+        char name[DRUM_SLOT_NAME_MAX];
+        const uint16_t avail = (uint16_t)(plen - 3);
+        const uint16_t n =
+            avail < DRUM_SLOT_NAME_MAX - 1 ? avail : DRUM_SLOT_NAME_MAX - 1;
+        memcpy(name, p + 3, n);
+        name[n] = '\0';
+        const esp_err_t err =
+            drums_pad_rename((p[1] == 0xFF) ? -1 : (int)p[1], (int)p[2], name);
+        send_status(OP_KIT_EDIT, seq, err == ESP_OK ? ST_OK : ST_BAD_ARG);
+        return;
+    }
+    send_status(OP_KIT_EDIT, seq, ST_BAD_ARG);
 }
 
 /* ---- loop track download (S33) ----------------------------------------
@@ -1607,6 +1722,9 @@ void handle_frame(const uint8_t* d, size_t n) {
         case OP_SEQ_SONG:
             handle_seq_song(seq, p, plen);
             break;
+        case OP_KIT_EDIT:
+            handle_kit_edit(seq, p, plen);
+            break;
         case OP_KIT_INFO:
             handle_kit_info(seq, p, plen);
             break;
@@ -1644,9 +1762,21 @@ void handle_frame(const uint8_t* d, size_t n) {
         case OP_CHORD_SET:
             handle_chord_set(seq, p, plen);
             break;
-        case OP_DRUM_TRIG: /* pads: {slot, velocity}, no response on success */
-            if (plen != 2) {
+        /* pads: {slot, velocity} or, since S44, {slot, velocity, release}.
+         *
+         * The third byte rather than an overloaded velocity of 0: that value
+         * is already the capability probe the app fires at discovery, and
+         * making it mean "let go of this pad" would have had the probe
+         * silencing a held gate pad on slot 0. A longer payload is free here
+         * and an old app keeps working unchanged. */
+        case OP_DRUM_TRIG:
+            if (plen != 2 && plen != 3) {
                 send_status(op, seq, ST_MALFORMED);
+            } else if (plen == 3 && p[2] != 0) {
+                /* Release: only gate and loop pads hold anything, so this is a
+                 * no-op on every kit that predates them and the app can send
+                 * it on every touch-up without asking what the pad is. */
+                drums_release(p[0]);
             } else {
                 drums_trigger(p[0], p[1], 0);
                 /* ...and into the sequencer if it is armed. A pad addresses a

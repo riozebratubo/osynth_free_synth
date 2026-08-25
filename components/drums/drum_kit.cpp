@@ -11,6 +11,7 @@
 #include "esp_rom_crc.h"
 #include "esp_heap_caps.h"
 
+#include "sampler.h"
 #include "synth_config.h"
 
 static const char* TAG = "drumkit";
@@ -147,16 +148,42 @@ esp_err_t drum_kit_load_rom(drum_kit_t* out) {
 
 void drum_kit_free(drum_kit_t* kit) {
     if (kit == nullptr) return;
+    /* Two ownership shapes, and the kit says which one applies — see
+     * per_slot_owned in drum_kit.h. Getting this wrong in either direction is
+     * a leak or a double free, which is exactly why it is a field on the kit
+     * and not something inferred from where the kit came from. */
+    if (kit->per_slot_owned) {
+        drum_kit_free_user(kit);
+        return;
+    }
     if (kit->owned != nullptr) heap_caps_free(kit->owned);
     memset(kit, 0, sizeof(*kit));
 }
 
-/* ===================== SD-card kits ==================================== */
+void drum_kit_free_user(drum_kit_t* kit) {
+    if (kit == nullptr) return;
+    for (int i = 0; i < DRUM_KIT_MAX_SLOTS; ++i) {
+        drum_sample_t& s = kit->slots[i];
+        if (s.owned != nullptr) sampler_pool_free(s.owned, s.owned_bytes);
+        s.owned = nullptr;
+        s.owned_bytes = 0;
+        s.data = nullptr;
+        s.frames = 0;
+    }
+}
 
-#if CONFIG_OSYNTH_DRUM_SD_KITS
+/* ===================== SD-card and user kits =========================== */
+
+/* The mount machinery below is shared by two features that arrived four
+ * sessions apart: loading a prepared kit off a card (S22) and persisting the
+ * recordable kits (S44). Either one being enabled is enough to need it, which
+ * is why the guard is wider than the option it used to carry. */
+#if CONFIG_OSYNTH_DRUM_SD_KITS || SYNTH_SAMPLE_KITS > 0
 
 #include <dirent.h>
+#include <errno.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "driver/sdspi_host.h"
 #include "driver/spi_common.h"
@@ -602,12 +629,426 @@ esp_err_t drum_kit_load_sd(const char* name, drum_kit_t* out) {
     return ESP_OK;
 }
 
-#else /* !CONFIG_OSYNTH_DRUM_SD_KITS */
+/* ===================== user kits (S44) ================================= *
+ *
+ * On disk a user kit is a folder of ordinary WAVs plus one small binary
+ * sidecar, and that shape was chosen over a single `.okit` image for one
+ * reason: a person with a card reader can open the folder, hear what is in it,
+ * drop a file in and take one out. An image would have made the firmware the
+ * only thing that could read a kit the player recorded, which is the wrong
+ * trade for the one feature whose whole point is that the content is theirs.
+ *
+ * The sidecar carries what a WAV cannot: play mode, reverse, start offset,
+ * choke group, note assignment and the kit's stored mixer. Its absence is not
+ * an error — a folder somebody filled by hand still loads, with everything
+ * defaulted, which is exactly what "drop your own samples in" has to mean.
+ */
+
+namespace {
+
+constexpr char kSidecarMagic[4] = {'O', 'S', 'K', 'S'};
+constexpr uint16_t kSidecarVersion = 1;
+constexpr char kSidecarName[] = "kit.oks";
+
+/* Per-pad ceiling when reading from storage. Matches the recorder's own take
+ * ceiling so that what can be recorded and what can be loaded are the same
+ * length — a card file longer than this is truncated with a warning rather
+ * than refused, because half a loop in the right pad beats an empty pad. */
+constexpr uint32_t kMaxPadFrames =
+    (uint32_t)SYNTH_SAMPLE_MAX_SEC * SYNTH_SAMPLE_RATE;
+
+/* Which backend user kits live on. Decided once by drum_kit_storage_init(). */
+enum : int { STORE_NONE = 0, STORE_SD = 1, STORE_LFS = 2 };
+int s_store = STORE_NONE;
+
+constexpr const char* kLfsKitDir = "/lfs/kits";
+
+#pragma pack(push, 1)
+typedef struct {
+    char magic[4];
+    uint16_t version;
+    uint16_t slot_count;
+    char name[DRUM_KIT_NAME_MAX];
+    uint32_t reserved[2];
+} kit_sidecar_hdr_t;
+
+typedef struct {
+    uint8_t play_mode;
+    uint8_t reverse;
+    uint8_t choke_group;
+    uint8_t note;
+    float start_ofs;
+    float gain;
+    float pan;
+    uint32_t loop_start;
+    uint32_t loop_end;
+    /* The kit's copy of the drumN.* mixer — see drum_slot_mix_t. */
+    float mix_level;
+    float mix_pan;
+    float mix_tune;
+    float mix_decay;
+    char name[DRUM_SLOT_NAME_MAX];
+} kit_sidecar_slot_t;
+#pragma pack(pop)
+
+void kit_dir(int index, char* out, size_t n) {
+    snprintf(out, n, "%s/kit%d",
+             s_store == STORE_SD ? kKitDir : kLfsKitDir, index);
+}
+
+/* Turns a slot name into something a FAT volume will accept. */
+void safe_name(const char* in, char* out, size_t n) {
+    size_t w = 0;
+    for (size_t i = 0; in[i] != '\0' && w + 1 < n; ++i) {
+        const char c = in[i];
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                        (c >= '0' && c <= '9') || c == '-';
+        out[w++] = ok ? c : '_';
+    }
+    if (w == 0) out[w++] = 'p';
+    out[w] = '\0';
+}
+
+bool write_wav(const char* path, const int16_t* data, uint32_t frames) {
+    FILE* f = fopen(path, "wb");
+    if (f == nullptr) return false;
+    const uint32_t data_bytes = frames * 2u;
+    const uint32_t rate = SYNTH_SAMPLE_RATE;
+    uint8_t h[44];
+    memcpy(h + 0, "RIFF", 4);
+    const uint32_t riff = 36u + data_bytes;
+    memcpy(h + 4, &riff, 4);
+    memcpy(h + 8, "WAVEfmt ", 8);
+    const uint32_t fmt_len = 16;
+    memcpy(h + 16, &fmt_len, 4);
+    const uint16_t tag = 1, ch = 1, bits = 16, align = 2;
+    memcpy(h + 20, &tag, 2);
+    memcpy(h + 22, &ch, 2);
+    memcpy(h + 24, &rate, 4);
+    const uint32_t byte_rate = rate * 2u;
+    memcpy(h + 28, &byte_rate, 4);
+    memcpy(h + 32, &align, 2);
+    memcpy(h + 34, &bits, 2);
+    memcpy(h + 36, "data", 4);
+    memcpy(h + 40, &data_bytes, 4);
+    bool ok = fwrite(h, 1, sizeof(h), f) == sizeof(h);
+    /* Chunked so a long pad does not need a second copy of itself anywhere,
+     * and so a card that stalls fails on a boundary rather than mid-header. */
+    const uint32_t kChunk = 4096;
+    for (uint32_t done = 0; ok && done < frames;) {
+        const uint32_t n = (frames - done > kChunk) ? kChunk : frames - done;
+        ok = fwrite(data + done, 2, n, f) == n;
+        done += n;
+    }
+    fclose(f);
+    return ok;
+}
+
+bool read_sidecar(int index, drum_kit_t* kit) {
+    char dir[128];
+    char path[160];
+    kit_dir(index, dir, sizeof(dir));
+    snprintf(path, sizeof(path), "%.120s/%.16s", dir, kSidecarName);
+    FILE* f = fopen(path, "rb");
+    if (f == nullptr) return false;
+    kit_sidecar_hdr_t h;
+    bool ok = fread(&h, 1, sizeof(h), f) == sizeof(h) &&
+              memcmp(h.magic, kSidecarMagic, 4) == 0 &&
+              h.version == kSidecarVersion && h.slot_count <= DRUM_SLOTS;
+    if (ok) {
+        char nm[DRUM_KIT_NAME_MAX];
+        memcpy(nm, h.name, DRUM_KIT_NAME_MAX);
+        nm[DRUM_KIT_NAME_MAX - 1] = '\0';
+        if (nm[0] != '\0') strlcpy(kit->name, nm, DRUM_KIT_NAME_MAX);
+        for (int i = 0; i < h.slot_count; ++i) {
+            kit_sidecar_slot_t s;
+            if (fread(&s, 1, sizeof(s), f) != sizeof(s)) break;
+            drum_sample_t& d = kit->slots[i];
+            d.play_mode = s.play_mode <= DRUM_PLAY_LOOP ? s.play_mode
+                                                        : DRUM_PLAY_ONESHOT;
+            d.reverse = s.reverse ? 1u : 0u;
+            d.choke_group = s.choke_group <= 7 ? s.choke_group : 0u;
+            d.note = s.note & 0x7F;
+            d.start_ofs =
+                (s.start_ofs >= 0.0f && s.start_ofs < 1.0f) ? s.start_ofs : 0.0f;
+            d.gain = (s.gain > 0.0f && s.gain <= 8.0f) ? s.gain : 1.0f;
+            d.pan = (s.pan >= -1.0f && s.pan <= 1.0f) ? s.pan : 0.0f;
+            d.loop_start = s.loop_start;
+            d.loop_end = s.loop_end;
+            kit->mix[i].level = (s.mix_level >= 0.0f && s.mix_level <= 2.0f)
+                                    ? s.mix_level : 1.0f;
+            kit->mix[i].pan = (s.mix_pan >= -1.0f && s.mix_pan <= 1.0f)
+                                  ? s.mix_pan : 0.0f;
+            kit->mix[i].tune = (s.mix_tune >= -24.0f && s.mix_tune <= 24.0f)
+                                   ? s.mix_tune : 0.0f;
+            kit->mix[i].decay = (s.mix_decay >= 0.0f && s.mix_decay <= 1.0f)
+                                    ? s.mix_decay : 1.0f;
+        }
+    }
+    fclose(f);
+    return ok;
+}
+
+bool write_sidecar(int index, const drum_kit_t* kit) {
+    char dir[128];
+    char path[160];
+    kit_dir(index, dir, sizeof(dir));
+    snprintf(path, sizeof(path), "%.120s/%.16s", dir, kSidecarName);
+    FILE* f = fopen(path, "wb");
+    if (f == nullptr) return false;
+    kit_sidecar_hdr_t h = {};
+    memcpy(h.magic, kSidecarMagic, 4);
+    h.version = kSidecarVersion;
+    h.slot_count = (uint16_t)DRUM_SLOTS;
+    strlcpy(h.name, kit->name, DRUM_KIT_NAME_MAX);
+    bool ok = fwrite(&h, 1, sizeof(h), f) == sizeof(h);
+    for (int i = 0; ok && i < DRUM_SLOTS; ++i) {
+        const drum_sample_t& d = kit->slots[i];
+        kit_sidecar_slot_t s = {};
+        s.play_mode = d.play_mode;
+        s.reverse = d.reverse;
+        s.choke_group = d.choke_group;
+        s.note = d.note;
+        s.start_ofs = d.start_ofs;
+        s.gain = d.gain > 0.0f ? d.gain : 1.0f;
+        s.pan = d.pan;
+        s.loop_start = d.loop_start;
+        s.loop_end = d.loop_end;
+        s.mix_level = kit->mix[i].level;
+        s.mix_pan = kit->mix[i].pan;
+        s.mix_tune = kit->mix[i].tune;
+        s.mix_decay = kit->mix[i].decay;
+        memcpy(s.name, d.name, DRUM_SLOT_NAME_MAX);
+        ok = fwrite(&s, 1, sizeof(s), f) == sizeof(s);
+    }
+    fclose(f);
+    return ok;
+}
+
+} // namespace
+
+void drum_kit_storage_init(void) {
+    if (SYNTH_SAMPLE_KITS == 0) return;
+
+    /* SD first, always: it is bigger by three orders of magnitude, it is the
+     * only backend a person can load samples into from a computer, and writing
+     * to it does not stall the render chain the way a flash write does. */
+    if (ensure_mounted()) {
+        mkdir("/sd/osynth", 0777); /* may already exist; the mkdir below is
+                                    * what actually decides */
+        if (mkdir(kKitDir, 0777) == 0 || errno == EEXIST) {
+            s_store = STORE_SD;
+            ESP_LOGI(TAG, "user kits: %s", kKitDir);
+            return;
+        }
+    }
+
+    /* LittleFS. Not mounted here — presets owns that, and this runs after it
+     * for exactly that reason (see drums_kits_load() in drums.cpp). If /lfs is
+     * not there, the mount failed or the partition is being formatted, and the
+     * honest answer is that there is nowhere to save. */
+    struct stat st;
+    if (stat("/lfs", &st) == 0) {
+        if (mkdir(kLfsKitDir, 0777) == 0 || errno == EEXIST) {
+            s_store = STORE_LFS;
+            ESP_LOGW(TAG,
+                     "user kits: %s — no SD card, so all kits together get "
+                     "about ten seconds of audio and every save stalls the "
+                     "audio task until it can be taken while quiet",
+                     kLfsKitDir);
+            return;
+        }
+    }
+
+    s_store = STORE_NONE;
+    ESP_LOGW(TAG, "user kits: nowhere to save — recording works, but nothing "
+                  "survives a power cycle");
+}
+
+const char* drum_kit_storage_name(void) {
+    switch (s_store) {
+        case STORE_SD: return "sd";
+        case STORE_LFS: return "lfs";
+        default: return "none";
+    }
+}
+
+esp_err_t drum_kit_load_user(int index, drum_kit_t* out) {
+    if (out == nullptr) return ESP_ERR_INVALID_ARG;
+    if (s_store == STORE_NONE) return ESP_ERR_NOT_SUPPORTED;
+
+    char dir[128];
+    kit_dir(index, dir, sizeof(dir));
+    DIR* d = opendir(dir);
+    /* No folder yet is the normal state of a kit nobody has recorded into. The
+     * caller has already built a valid empty kit named "Kit N", so returning
+     * "not found" here is information, not a failure. */
+    if (d == nullptr) return ESP_ERR_NOT_FOUND;
+
+    /* The sidecar first: it may rename slots and set play modes for pads whose
+     * audio is about to be read in below. */
+    (void)read_sidecar(index, out);
+
+    int loaded = 0;
+    struct dirent* e;
+    while ((e = readdir(d)) != nullptr) {
+        if (!has_ext(e->d_name, ".wav")) continue;
+        const int slot = slot_prefix(e->d_name);
+        /* Unprefixed files are skipped rather than packed into free slots.
+         * The recorder always writes a prefix, so an unprefixed file is
+         * something a person dropped in, and silently deciding which pad it
+         * belongs on would move it every time the folder is re-read. */
+        if (slot < 0 || slot >= DRUM_SLOTS) continue;
+        if (out->slots[slot].data != nullptr) continue;
+
+        char path[192];
+        snprintf(path, sizeof(path), "%.120s/%.63s", dir, e->d_name);
+        FILE* f = fopen(path, "rb");
+        if (f == nullptr) continue;
+        WavInfo w = {};
+        if (!wav_open(f, &w)) {
+            ESP_LOGW(TAG, "kit %d: %s is not a readable WAV", index, e->d_name);
+            fclose(f);
+            continue;
+        }
+        const int ch = w.channels ? w.channels : 1;
+        const int bps = w.bits / 8;
+        uint32_t frames =
+            (bps > 0) ? w.data_bytes / (uint32_t)(bps * ch) : 0u;
+        if (frames == 0) {
+            fclose(f);
+            continue;
+        }
+        if (frames > kMaxPadFrames) {
+            ESP_LOGW(TAG, "kit %d pad %d: %s is longer than %u s, truncated",
+                     index, slot + 1, e->d_name,
+                     (unsigned)SYNTH_SAMPLE_MAX_SEC);
+            frames = kMaxPadFrames;
+        }
+        void* block = sampler_pool_alloc((size_t)frames * 2);
+        if (block == nullptr) {
+            ESP_LOGE(TAG, "kit %d pad %d: sample pool full, stopping here",
+                     index, slot + 1);
+            fclose(f);
+            break;
+        }
+        const uint32_t got = wav_read_mono(f, w, (int16_t*)block, frames);
+        fclose(f);
+        if (got == 0) {
+            sampler_pool_free(block, (size_t)frames * 2);
+            continue;
+        }
+
+        drum_sample_t& s = out->slots[slot];
+        s.data = (const uint8_t*)block;
+        s.owned = block;
+        s.owned_bytes = (size_t)frames * 2;
+        s.frames = got;
+        s.rate = w.rate ? w.rate : SYNTH_SAMPLE_RATE;
+        s.format = DRUM_FMT_PCM16;
+        if (s.gain <= 0.0f) s.gain = 1.0f;
+        if (s.note == 0) s.note = (uint8_t)(36 + slot);
+        /* A loop that outlives the audio it pointed at would index past the
+         * end; a hand-dropped file replacing a recorded one is exactly how
+         * that happens. */
+        if (s.loop_end > got) {
+            s.loop_start = 0;
+            s.loop_end = 0;
+        }
+        if (s.name[0] == '\0') base_name(e->d_name, s.name, sizeof(s.name));
+        ++loaded;
+    }
+    closedir(d);
+
+    out->slot_count = DRUM_SLOTS;
+    out->per_slot_owned = true;
+    out->dirty = false;
+    if (loaded > 0) {
+        ESP_LOGI(TAG, "kit %d '%s': %d pad(s) from %s", index, out->name,
+                 loaded, dir);
+    }
+    return loaded > 0 ? ESP_OK : ESP_ERR_NOT_FOUND;
+}
+
+esp_err_t drum_kit_save_user(int index, const drum_kit_t* kit) {
+    if (kit == nullptr) return ESP_ERR_INVALID_ARG;
+    if (s_store == STORE_NONE) return ESP_ERR_NOT_SUPPORTED;
+    if (!kit->dirty) return ESP_OK;
+
+    char dir[128];
+    kit_dir(index, dir, sizeof(dir));
+    if (mkdir(dir, 0777) != 0 && errno != EEXIST) {
+        ESP_LOGE(TAG, "kit %d: cannot create %s", index, dir);
+        return ESP_FAIL;
+    }
+
+    /* Write the new files before removing anything. A save interrupted by a
+     * pulled card then costs the *old* copy of one pad rather than the whole
+     * kit, which is the failure mode worth having. */
+    char written[DRUM_SLOTS][64];
+    for (int i = 0; i < DRUM_SLOTS; ++i) written[i][0] = '\0';
+
+    int saved = 0;
+    for (int i = 0; i < DRUM_SLOTS; ++i) {
+        const drum_sample_t& s = kit->slots[i];
+        if (s.data == nullptr || s.frames == 0) continue;
+        /* Only PCM16 pads are written: everything the recorder produces is
+         * PCM16, and a mu-law pad here would have come from a kit image that
+         * has its own file on the card already. */
+        if (s.format != DRUM_FMT_PCM16) continue;
+        char nm[32];
+        safe_name(s.name[0] ? s.name : "pad", nm, sizeof(nm));
+        snprintf(written[i], sizeof(written[i]), "%02d_%.24s.wav", i, nm);
+        char path[192];
+        snprintf(path, sizeof(path), "%.120s/%.63s", dir, written[i]);
+        if (!write_wav(path, (const int16_t*)s.data, s.frames)) {
+            ESP_LOGE(TAG, "kit %d pad %d: write failed (%s)", index, i + 1,
+                     path);
+            written[i][0] = '\0';
+            continue;
+        }
+        ++saved;
+    }
+
+    /* Now drop whatever the folder still holds for a pad that is empty or that
+     * has been renamed. */
+    DIR* d = opendir(dir);
+    if (d != nullptr) {
+        struct dirent* e;
+        while ((e = readdir(d)) != nullptr) {
+            if (!has_ext(e->d_name, ".wav")) continue;
+            const int slot = slot_prefix(e->d_name);
+            if (slot < 0 || slot >= DRUM_SLOTS) continue;
+            if (strcasecmp(e->d_name, written[slot]) == 0) continue;
+            char path[192];
+            snprintf(path, sizeof(path), "%.120s/%.63s", dir, e->d_name);
+            unlink(path);
+        }
+        closedir(d);
+    }
+
+    if (!write_sidecar(index, kit)) {
+        ESP_LOGW(TAG, "kit %d: sidecar not written — pads will load with "
+                      "default settings",
+                 index);
+    }
+    ESP_LOGI(TAG, "kit %d '%s' saved: %d pad(s) to %s", index, kit->name,
+             saved, dir);
+    return ESP_OK;
+}
+
+#else /* no SD kits and no sample kits */
 
 bool drum_kit_sd_supported(void) { return false; }
 int drum_kit_scan_sd(char (*)[DRUM_KIT_NAME_MAX], int) { return 0; }
 esp_err_t drum_kit_load_sd(const char*, drum_kit_t*) {
     return ESP_ERR_NOT_SUPPORTED;
 }
+void drum_kit_storage_init(void) {}
+const char* drum_kit_storage_name(void) { return "none"; }
+esp_err_t drum_kit_load_user(int, drum_kit_t*) { return ESP_ERR_NOT_SUPPORTED; }
+esp_err_t drum_kit_save_user(int, const drum_kit_t*) {
+    return ESP_ERR_NOT_SUPPORTED;
+}
 
-#endif /* CONFIG_OSYNTH_DRUM_SD_KITS */
+#endif /* CONFIG_OSYNTH_DRUM_SD_KITS || SYNTH_SAMPLE_KITS > 0 */

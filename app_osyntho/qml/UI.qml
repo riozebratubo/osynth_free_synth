@@ -9,6 +9,8 @@ import org.osynth.osyntho
 // are signals the shell (Main.qml, which owns the dialogs and pickers) connects
 // to.
 QtObject {
+    id: root
+
     // The root ApplicationWindow. Set by Main.qml on startup.
     property Window window
 
@@ -81,7 +83,11 @@ QtObject {
         { label: "In",   name: "Input",              icon: "\uf130" },  // microphone
         { label: "FX",   name: "Effects",            icon: "\uf72b" },  // wand-magic-sparkles
         { label: "Seq",  name: "Sequencer",          icon: "\uf00a" },  // table-cells
-        { label: "Drum", name: "Drums",              icon: "\uf569" },  // drum
+        // S44 turned the drum bus into a rack of recordable sample kits,
+        // so the page is "Sample kits" and the tab is "Kit". `name` is what
+        // the toolbar title and the screen picker show; the stored screen
+        // order is by *index*, so renaming in place costs no migration.
+        { label: "Kit",  name: "Sample kits",              icon: "\uf569" },  // drum
         { label: "Arp",  name: "Arpeggiator",        icon: "\uf550" },  // bars-staggered
         // Next to the arpeggiator because the two are the same kind of thing:
         // a transform between the key you press and the notes that sound. And
@@ -123,6 +129,114 @@ QtObject {
     // -1 = nothing picked yet, so fall back to the kit's first slot (the kick
     // in the factory kit). Resolved rather than stored, because the kit — and
     // therefore the right default — can change at runtime.
+    // ---- sample-kit recording (S44) ----------------------------------------
+    //
+    // Lives here rather than on either surface that uses it, because both do:
+    // the Sample kits page has Record / Erase buttons and so does the pad strip
+    // at the bottom of every other page, and arming on one has to light up the
+    // other. There is one recorder in the firmware, so there is one armed
+    // state here.
+    //
+    // The gesture is deliberately two-step -- press Record, *then* press the
+    // pad -- because a pad is a destination that gets overwritten, and a
+    // one-touch record would make an accidental brush against the strip
+    // destroy a sample. The second press is the confirmation, and it is also
+    // where the recording actually happens: the pad is held for as long as you
+    // want to capture.
+    //
+    // "" = nothing armed, "record" and "erase" = waiting for a pad.
+    property string padAction: ""
+
+    // Which pad the firmware last reported as armed, so both surfaces can
+    // outline it. -1 for none.
+    property int armedPad: -1
+
+    // smp.state, mirrored from the firmware: 0 idle, 1 armed, 2 waiting for the
+    // threshold, 3 recording, 4 committing. Taken from the firmware rather than
+    // inferred from what we last sent, because the firmware is what decides
+    // when a threshold-armed take actually starts and when the ceiling stops
+    // it -- a surface that trusted its own writes would show "recording"
+    // through a take that never triggered.
+    //
+    // A plain property fed by the signal below, not a binding onto
+    // Synth.paramValue(): that is an invokable, so a binding on it captures no
+    // property and evaluates exactly once. Same trap ParamValue.qml exists to
+    // avoid; this is the singleton-scoped version of it.
+    property int samplerState: 0
+    property real samplerPos: 0
+    property real samplerPeak: 0
+    property real samplerFreeKb: 0
+    readonly property bool samplerRecording: samplerState === 2 || samplerState === 3
+
+    // True when this firmware has the recorder at all. Everything sampler-ish
+    // in the UI hangs off this, so a build with OSYNTH_SAMPLE_KITS=0 -- or a
+    // firmware older than S44 -- simply does not draw it.
+    property bool samplerAvailable: false
+
+    property Connections _smpConn: Connections {
+        target: Synth
+        function onParamsDiscovered(): void {
+            root.samplerAvailable = Synth.paramIdForName("smp.arm") > 0
+            root.refreshSampler()
+        }
+        function onReadyChanged(): void {
+            if (!Synth.ready) {
+                root.samplerAvailable = false
+                root.padAction = ""
+                root.armedPad = -1
+                root.samplerState = 0
+            }
+        }
+        function onParamChanged(id: int, v: real): void {
+            if (!root.samplerAvailable) return
+            if (id === Synth.paramIdForName("smp.state")) root.samplerState = Math.round(v)
+            else if (id === Synth.paramIdForName("smp.pos")) root.samplerPos = v
+            else if (id === Synth.paramIdForName("smp.peak")) root.samplerPeak = v
+            else if (id === Synth.paramIdForName("smp.free")) root.samplerFreeKb = v
+            else if (id === Synth.paramIdForName("smp.arm")) root.armedPad = Math.round(v)
+        }
+    }
+
+    function refreshSampler(): void {
+        if (!samplerAvailable) return
+        samplerState = Math.round(smpValue("smp.state"))
+        samplerPos = smpValue("smp.pos")
+        samplerPeak = smpValue("smp.peak")
+        samplerFreeKb = smpValue("smp.free")
+        armedPad = Math.round(smpValue("smp.arm"))
+    }
+
+    function setSmp(name: string, value: real): void {
+        const pid = Synth.paramIdForName(name)
+        // setParamNow, not setParam: these are transport gestures, and the
+        // 40 ms coalescing batch would merge a press and a release that
+        // happened inside one window into nothing at all.
+        if (pid > 0) Synth.setParamNow(pid, value)
+    }
+
+    function smpValue(name: string): real {
+        const pid = Synth.paramIdForName(name)
+        return pid > 0 ? Synth.paramValue(pid) : 0
+    }
+
+    // Arm a pad and open the gate. Called by whichever surface the player
+    // pressed; the firmware's pre-roll ring is what covers the round trip.
+    function startRecordInto(slot: int): void {
+        setSmp("smp.arm", slot)
+        setSmp("smp.rec", 1)
+        armedPad = slot
+    }
+
+    function stopRecord(): void {
+        setSmp("smp.rec", 0)
+        padAction = ""
+    }
+
+    function erasePad(slot: int): void {
+        setSmp("smp.erase", slot)
+        padAction = ""
+    }
+
     property int paintDrumNote: -1
     readonly property int drumNote: paintDrumNote >= 0 ? paintDrumNote
                                                        : Synth.defaultDrumNote

@@ -5,12 +5,13 @@
  * -> banner -> NVS -> global params -> voice manager (S4; owns the
  * render callback, registers the 0x01xx params) -> mod matrix (S9; 0x05xx
  * slot params — all parameter registration must precede the audio task,
- * whose matrix plan reads the registry) -> engines (S5/S6; registers the
+ * whose matrix plan reads the registry) -> drum / sample bus (S22, S44;
+ * 0x07xx params, the factory kit and the recorder — ahead of the engines
+ * because the S44 sampler engine plays its pads, and ahead of seq/arp so its
+ * drum lanes can see the kit's slot count) -> engines (S5/S6; registers the
  * active engine's 0x02xx params, binds it, starts the engine-switch task)
  * -> FX bus (S10; 0x03xx params + delay-line allocation, before the audio
- * task for the same registration-race reason) -> drum bus (S22; 0x07xx
- * params + the factory kit, before seq/arp so its drum lanes can see the
- * kit's slot count) -> seq/arp (S12/S23; 0x04xx params + the pattern store
+ * task for the same registration-race reason) -> seq/arp (S12/S23; 0x04xx params + the pattern store
  * + the 96 PPQN clock task, before the audio task for the same
  * reason — it also hooks the MIDI router's note tap, which is safe before
  * midi_init: the taps are plain function pointers) -> presets (S13; the
@@ -59,6 +60,7 @@
 #include "midi.h"
 #include "persist.h"
 #include "presets.h"
+#include "sampler.h"
 #include "seqarp.h"
 #include "synth_config.h"
 #include "synth_mod.h"
@@ -80,7 +82,8 @@ static void register_global_params() {
      * an EVT_ENGINE saying the engine did not change; the app's own engine
      * list gates it on GRAPH_INFO and does not offer it at all. */
     static const char* kEngineNames[] = {"subtractive", "additive", "fm",
-                                         "wavetable", "modular", "granular"};
+                                         "wavetable", "modular", "granular",
+                                         "sampler"};
     static_assert(sizeof(kEngineNames) / sizeof(kEngineNames[0]) ==
                       SYNTH_ENGINE_COUNT,
                   "engine.type names must track synth_engine_type_t");
@@ -269,6 +272,12 @@ static void SYNTH_RENDER_IRAM render_chain(float* out_l, float* out_r,
     looper_process(out_l, out_r, frames);
     /* After the record tap: monitored, never printed into a take. */
     audio_io_line_in_mon(out_l, out_r, frames);
+    /* The sampler's capture point (S44), and its placement *is* the definition
+     * of `smp.src = bus`: after the looper, so resampling captures the loops
+     * that are playing, and before the metronome, so a count-in never ends up
+     * inside the sample it was counting in. Both are the same two reasons the
+     * looper's own record tap sits where it does. */
+    sampler_capture(out_l, out_r, frames);
     /* After the looper on purpose: the metronome is monitoring, not material,
      * and mixing it earlier printed count-in ticks into the take. */
     drums_render_click(out_l, out_r, frames);
@@ -317,9 +326,16 @@ extern "C" void app_main(void) {
 
     ESP_ERROR_CHECK(voice_manager_init()); /* + engine-common params (0x01xx) */
     ESP_ERROR_CHECK(synth_mod_init());     /* + mod-matrix params (0x05xx) */
+    /* Ahead of engines_init() since S44, where it used to sit two lines below.
+     * The sampler engine plays this component's pads, so binding it at boot —
+     * which happens whenever `engine.type` was left there — would otherwise
+     * run an engine init against a drum bus with no kit, no mu-law table and
+     * no parameters yet. Nothing in the drum bus needs an engine, so the
+     * dependency only ever ran one way and the old order was simply the order
+     * these two were written in. */
+    ESP_ERROR_CHECK(drums_init());         /* + drum/sampler params (0x07xx), factory kit */
     ESP_ERROR_CHECK(engines_init());       /* + engine params (0x02xx), binds engine */
     ESP_ERROR_CHECK(fx_init());            /* + FX-bus params (0x03xx), delay lines */
-    ESP_ERROR_CHECK(drums_init());         /* + drum params (0x07xx), factory kit */
     ESP_ERROR_CHECK(seqarp_init());        /* + seq/arp params (0x04xx), pattern store, clock task */
     /* After seqarp: chord.follow mirrors seq.scale/seq.root, and chord mode
      * resolves those two ids at init. Before midi_init(), like every other
@@ -327,6 +343,11 @@ extern "C" void app_main(void) {
      * is not yet delivering anything for it to answer. */
     ESP_ERROR_CHECK(chord_init());         /* + chord params (0x044x), strum task */
     ESP_ERROR_CHECK(presets_init());       /* + preset params (0x000x), littlefs, task */
+    /* Between these two on purpose (S44): the sample kits' no-card fallback
+     * lives on the LittleFS partition presets just mounted, and the PSRAM they
+     * claim has to be gone before the looper measures the free pool to size
+     * its loop cap. drums.cpp's drums_kits_load() carries the full reasoning. */
+    drums_kits_load();                     /* recordable kit contents (S44) */
     ESP_ERROR_CHECK(looper_init());        /* + looper params (0x06xx), loop_ctl task */
     /* Last of the registration phase: it applies stored values through
      * ParamStore::set(), so everything it can touch must already exist. */

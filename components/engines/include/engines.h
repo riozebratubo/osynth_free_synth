@@ -6,6 +6,8 @@
  * Session 8: additive engine — all four slots filled. Session 28: the
  * modular graph, Kconfig-gated. Session 38: granular — a per-voice grain
  * cloud, and the first fixed engine that can granulate the audio input.
+ * Session 44: sampler — plays the pads of the selected sample kit, so the
+ * keyboard becomes the pad grid (or one pad across the keys).
  */
 #pragma once
 
@@ -46,6 +48,10 @@ typedef enum {
     SYNTH_ENGINE_WAVETABLE = 3,
     SYNTH_ENGINE_MODULAR = 4, /* NULL unless SYNTH_ENABLE_MODULAR */
     SYNTH_ENGINE_GRANULAR = 5,
+    /* S44. Appended, like every entry before it: the index is in a preset's
+     * filename (p6_*.osp), in its header, in OP_SELECT_ENGINE and in program
+     * change, so it is fixed the moment a user saves anything to it. */
+    SYNTH_ENGINE_SAMPLER = 6,
     SYNTH_ENGINE_COUNT
 } synth_engine_type_t;
 
