@@ -330,6 +330,39 @@
 #define SYNTH_RENDER_IRAM
 #endif
 
+/* Two-core render pipeline (S45).
+ *
+ * The chain is cut in one place — after the voice manager — and the two halves
+ * run as pipeline stages on separate cores: a voice stage producing block N+1,
+ * and a bus stage finishing block N with everything after the voices (drum bus,
+ * FX bus, looper, sampler tap, metronome) plus the sink. The stages overlap, so
+ * the budget for one block period is roughly doubled. Which core each is pinned
+ * to is kVoiceCore in audio_io.cpp, and it is not arbitrary.
+ *
+ * That cut point is not a preference. Every other candidate has state crossing
+ * it inside a single block: drums_pre_fx() renders into a scratch that
+ * drums_post_fx() and the FX bus compressor's key tap both read back, and the
+ * three input mix positions have to agree with audio_io_in_fx_block() down to
+ * the last multiply. Cutting after the voices leaves all of that whole on core
+ * 1 and hands the other core a stage with one output and no readers.
+ *
+ * The capability gate is repeated here rather than left to Kconfig, the same
+ * way SYNTH_ENABLE_USB_TAP's is, and for a reason that is real hardware rather
+ * than defensiveness. The bus stage shares its core with everything this
+ * firmware pins — the BLE host, the sequencer clock, the preset loader — and it
+ * is the half holding the sink, and therefore the hard deadline. On the P4 that
+ * is affordable: the BLE controller lives on the companion radio chip
+ * (SYNTH_BLE_VIA_HOSTED below), so that core sees only the transport driver's
+ * interrupts. On the S3 the on-die controller runs high-priority interrupts
+ * pinned to core 0 that no task priority can preempt, landing them squarely on
+ * the stage that must not miss a block. There the single-core chain keeps the
+ * whole render on core 1, where it never meets them. */
+#if defined(CONFIG_OSYNTH_SPLIT_RENDER) && defined(CONFIG_IDF_TARGET_ESP32P4)
+#define SYNTH_ENABLE_SPLIT_RENDER 1
+#else
+#define SYNTH_ENABLE_SPLIT_RENDER 0
+#endif
+
 /* Branch-predictor hints for the render path: wrap conditions that are
  * almost never (or almost always) true inside per-sample loops. */
 #ifndef SYNTH_LIKELY

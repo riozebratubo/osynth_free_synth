@@ -36,6 +36,12 @@ const audio_sink_t* s_sink = nullptr;
  * blocks — see audio_sink.h. NULL on builds without one. */
 const audio_sink_t* s_tap = nullptr;
 char s_sink_name[24] = "none";
+#if SYNTH_ENABLE_SPLIT_RENDER
+/* The voice stage and the core it runs on (S45). Null on a build without the
+ * pipeline, where `s_render` above is the whole chain rather than its tail. */
+audio_render_fn s_render_a = nullptr;
+TaskHandle_t s_task_a = nullptr;
+#endif
 audio_io_stats_t s_stats = {};
 
 /* Guards the peak meters against a read-and-reset landing between the audio
@@ -59,8 +65,58 @@ constexpr float kQuietPeak = 1.0f / 8192.0f;
 constexpr uint32_t kQuietBlockCap =
     (uint32_t)(60.0f * SYNTH_SAMPLE_RATE / SYNTH_BLOCK_SIZE);
 
-float s_buf_l[SYNTH_BLOCK_SIZE];
-float s_buf_r[SYNTH_BLOCK_SIZE];
+/* Bus slots, and the one number the whole pipeline is expressed in.
+ *
+ * One slot without it: the same single buffer pair that has always been here,
+ * reached through an index that is a compile-time constant, so the generated
+ * code for a single-core build is what it was before this existed. Two with
+ * it: the voice stage fills one while the bus stage drains the other, and they
+ * swap every block.
+ *
+ * Two is also the maximum that is correct. A third slot would let the voice
+ * stage run two blocks ahead, which buys no throughput -- the sink still
+ * releases exactly one slot per block -- and costs a second block period of
+ * latency on every note. What the depth actually buys is jitter tolerance, and
+ * the sink's own DMA ring already provides that, several blocks of it, on the
+ * side of the hand-off where a stall is heard. */
+#if SYNTH_ENABLE_SPLIT_RENDER
+constexpr int kSlots = 2;
+#else
+constexpr int kSlots = 1;
+#endif
+
+#if SYNTH_ENABLE_SPLIT_RENDER
+/* Which core each stage runs on. Named once, and referred to by name
+ * everywhere else, because the two are not interchangeable and the reason is
+ * not visible from either task's own code.
+ *
+ * The voice stage gets the *empty* core. Every task this firmware pins is
+ * pinned to core 0 — the BLE command task, the sequencer clock, the preset
+ * loader, USB, app_main — because core 1 has always been kept clear for audio.
+ * The voice stage is also the heavier half by a wide margin, and a stage that
+ * goes over budget never blocks: its next credit is already waiting by the time
+ * it finishes, so it runs back to back at 100% for as long as the patch is too
+ * expensive for one core.
+ *
+ * Put that on core 0 and an over-budget patch does not merely glitch — it
+ * starves the BLE host, the sequencer clock and the idle task with it. That was
+ * not a theory: a granular patch reading the live input pushed the stage past
+ * 100%, and the board went on making sound while the app dropped, the heartbeat
+ * stopped and the task watchdog reported IDLE0 starved by `audio_voi`. On core
+ * 1 the same patch costs the idle task of a core that has nothing else to do,
+ * which is what going over budget ought to cost.
+ *
+ * The bus stage is the half that can afford core 0. It is the light one, and it
+ * blocks on the sink's DMA every single block, so the control tasks get the
+ * core back on a schedule rather than at the mercy of the patch. Its own
+ * deadline is covered by the DMA ring — four blocks deep, far more than an
+ * interrupt from anything else on that core costs it. */
+constexpr BaseType_t kVoiceCore = 1;
+constexpr BaseType_t kBusCore = 0;
+#endif
+
+float s_buf_l[kSlots][SYNTH_BLOCK_SIZE];
+float s_buf_r[kSlots][SYNTH_BLOCK_SIZE];
 int16_t s_out[SYNTH_BLOCK_SIZE * 2]; /* interleaved L/R for the sinks */
 
 #if SYNTH_ENABLE_AUDIO_IN
@@ -95,7 +151,42 @@ constexpr int kSlotMic = SYNTH_ENABLE_IN_SOURCE_SEL ? 1 : 0;
 constexpr int kSlotMic = -1;
 #endif
 
-int16_t s_cap[kDevCount][SYNTH_BLOCK_SIZE * 2];
+/* Per slot as well as per device (S45): the bus stage fills one slot while the
+ * voice stage's engines read the other through audio_io_in_mono() and
+ * audio_io_line_in_block(). Without the pipeline kSlots is 1 and this is the
+ * same 256 bytes per device it always was. */
+int16_t s_cap[kSlots][kDevCount][SYNTH_BLOCK_SIZE * 2];
+
+/* Which capture slot each core is allowed to read this block, indexed by core
+ * id. Published by the bus stage before it releases the voice stage, so the
+ * notification that starts that stage is also the barrier that makes this
+ * visible to it -- there is deliberately no atomic here, because there is no
+ * moment when the two cores are looking at it without one of those in between.
+ *
+ * The whole point is that a caller deep inside an engine does not have to know
+ * which core it is on. in_slot() answers that from where it is standing, and
+ * on a build without the pipeline it answers 0 and disappears. */
+#if SYNTH_ENABLE_SPLIT_RENDER
+volatile int s_in_slot[2];
+
+inline int SYNTH_RENDER_IRAM in_slot(void) {
+    return s_in_slot[xPortGetCoreID()];
+}
+
+/* `fresh` is the slot the bus stage is about to capture into; the voice stage
+ * therefore gets the other one, which is the block captured one period earlier
+ * and which nothing will write while it reads. Indexed by the stage constants
+ * rather than by literal 0 and 1, so swapping the assignment above cannot leave
+ * the two cores pointed at one buffer. */
+inline void SYNTH_RENDER_IRAM publish_in_slots(int fresh) {
+    s_in_slot[kBusCore] = fresh;
+    s_in_slot[kVoiceCore] = fresh ^ 1;
+}
+#else
+/* No pipeline, one slot, and no publication to make: the only caller of
+ * publish_in_slots() is the bus stage's loop, which does not exist here. */
+inline int SYNTH_RENDER_IRAM in_slot(void) { return 0; }
+#endif
 const std::atomic<float>* s_in_route = nullptr;
 const std::atomic<float>* s_in_gain = nullptr;
 #if SYNTH_ENABLE_IN_SOURCE_SEL
@@ -140,7 +231,15 @@ float s_in_g[kInPositions] = {0.0f, 0.0f, 0.0f};
  * whose gain has not reached zero yet. The old fence also had to blank the
  * shared buffer on swap, which per-device buffers make meaningless. */
 osynth::dsp::Smooth s_dev_sm[kDevCount];
-float s_dev_g[kDevCount] = {};
+/* Per slot, because audio_io_in_mono() applies these and is called from both
+ * stages. The smoothers beside them are not: they are advanced once per block
+ * by the capture, which only ever runs on the bus stage, and what travels with
+ * the block is the value they landed on rather than the state that produced it.
+ *
+ * s_in_g below is single for the same reason read the other way round -- every
+ * one of its readers (the three mix stages, audio_io_in_fx_block()) is on the
+ * bus stage with the capture, so there is no second view to keep consistent. */
+float s_dev_g[kSlots][kDevCount] = {};
 
 constexpr float kInSilent = 1e-3f;
 /* int16 -> [-1, 1), folded into the gain so the mix stays one multiply. */
@@ -163,8 +262,9 @@ constexpr float kInScale = 1.0f / 32768.0f;
  * never came up takes the same path — no frames, so the block zero-fills and
  * its starve counter climbs, which is exactly what "the RX side is not
  * clocking" already means. */
-void SYNTH_RENDER_IRAM capture_one(int slot, size_t got, bool invert_r) {
-    int16_t* buf = s_cap[slot];
+void SYNTH_RENDER_IRAM capture_one(int pipe, int slot, size_t got,
+                                  bool invert_r) {
+    int16_t* buf = s_cap[pipe][slot];
     const bool starved = (got < SYNTH_BLOCK_SIZE);
     if (starved) {
         memset(buf + got * 2, 0,
@@ -238,23 +338,25 @@ void SYNTH_RENDER_IRAM capture_one(int slot, size_t got, bool invert_r) {
  * OSYNTH_MIC_SHARE_CLOCKS, which is why that is the default; a mic mastering
  * its own pins sits at a fixed phase offset instead, which the DMA ring
  * absorbs the same way it absorbs everything else at the same nominal rate. */
-void SYNTH_RENDER_IRAM audio_in_capture(void) {
+void SYNTH_RENDER_IRAM audio_in_capture(int pipe) {
     if (!s_in_ok) return; /* gains stay at 0; the stages early-out */
 
     size_t got = 0;
 #if SYNTH_ENABLE_LINE_IN
     got = 0;
     if (s_line_ok) {
-        (void)audio_source_i2s_read(s_cap[kSlotLine], SYNTH_BLOCK_SIZE, &got);
+        (void)audio_source_i2s_read(s_cap[pipe][kSlotLine], SYNTH_BLOCK_SIZE,
+                                    &got);
     }
-    capture_one(kSlotLine, got, /*invert_r=*/true);
+    capture_one(pipe, kSlotLine, got, /*invert_r=*/true);
 #endif
 #if SYNTH_ENABLE_MIC_IN
     got = 0;
     if (s_mic_ok) {
-        (void)audio_source_mic_read(s_cap[kSlotMic], SYNTH_BLOCK_SIZE, &got);
+        (void)audio_source_mic_read(s_cap[pipe][kSlotMic], SYNTH_BLOCK_SIZE,
+                                    &got);
     }
-    capture_one(kSlotMic, got, /*invert_r=*/false);
+    capture_one(pipe, kSlotMic, got, /*invert_r=*/false);
 #endif
     (void)got;
 
@@ -279,14 +381,14 @@ void SYNTH_RENDER_IRAM audio_in_capture(void) {
     const float micg = s_in_micgain->load(std::memory_order_relaxed);
     const bool line_on = (sel == kSelLine || sel == kSelBoth);
     const bool mic_on = (sel == kSelMic || sel == kSelBoth);
-    s_dev_g[kSlotLine] =
+    s_dev_g[pipe][kSlotLine] =
         osynth::dsp::smooth_lin(s_dev_sm[kSlotLine], line_on ? 1.0f : 0.0f);
-    s_dev_g[kSlotMic] =
+    s_dev_g[pipe][kSlotMic] =
         osynth::dsp::smooth_lin(s_dev_sm[kSlotMic], mic_on ? micg : 0.0f);
 #else
     /* One device compiled in: it is the source, always, and its gain is a
      * constant the compiler folds into the mix below. */
-    s_dev_g[0] = 1.0f;
+    s_dev_g[pipe][0] = 1.0f;
 #endif
 
     /* Published for the heartbeat, from here rather than by reading the
@@ -299,7 +401,7 @@ void SYNTH_RENDER_IRAM audio_in_capture(void) {
     s_stats.in_route = (uint8_t)((route < 0) ? 0 : (route > 3) ? 0 : route);
     /* The device gains the audio task actually mixed with, which during a
      * crossfade are both non-zero and are the only thing that says so. */
-    for (int d = 0; d < kDevCount; ++d) s_stats.in_dev_g[d] = s_dev_g[d];
+    for (int d = 0; d < kDevCount; ++d) s_stats.in_dev_g[d] = s_dev_g[pipe][d];
     s_stats.in_g[kInMon] = s_in_g[kInMon];
     s_stats.in_g[kInFx] = s_in_g[kInFx];
     s_stats.in_g[kInDry] = s_in_g[kInDry];
@@ -334,125 +436,306 @@ inline int16_t to_i16_dith(float v) {
 }
 
 /* Cycles in one block period; also the divisor for the per-stage meters.
- * Set by the audio task before its first block. */
+ * Set by start_common() before either task exists (S45) -- the pipeline has two
+ * of them, and neither is a sensible owner of a number the other divides by. */
 uint32_t s_cycles_per_block = 0;
 
+#if SYNTH_ENABLE_SPLIT_RENDER
+/* The voice stage's load EMA, deliberately not s_stats.dsp_load_pct.
+ *
+ * The EMA update is a read-modify-write, so two cores sharing one float would
+ * lose part of every other sample of it, and taking a lock per block to
+ * protect a diagnostic would cost more than the diagnostic is worth. Each core
+ * owns its own; audio_io_get_stats() folds them together by taking the worse,
+ * which is the one of the two that predicts a dropout. */
+float s_load_a_pct = 0.0f;
+
+/* How long the bus stage waits for a block before calling the voice stage
+ * stalled.
+ *
+ * Generous on purpose. A legitimate wait is bounded by how far the voice stage
+ * is behind, and the sink's DMA ring absorbs several blocks of that before
+ * anything is heard, so a wait long enough to expire here is not a late
+ * pipeline but a broken one. Short enough, still, that the counter moves while
+ * someone is watching the heartbeat rather than long after. */
+constexpr TickType_t kStallTicks = pdMS_TO_TICKS(20);
+#endif
+
+/* One block's cost, charged to `ema`.
+ *
+ * DSP load = cycles to produce the block vs its real-time budget, smoothed
+ * with a ~130 ms EMA. A block over budget missed its deadline and counts as an
+ * underrun. Everything except the EMA is shared between the cores, which is
+ * why the mux is taken here rather than at either call site: which core is
+ * calling changes only which average moves.
+ *
+ * `count_block` is false for the voice stage. blocks_rendered counts what
+ * reached the sink, and that stage is one hand-off short of it -- counting
+ * both would double every figure derived from it. */
+void SYNTH_RENDER_IRAM account_load(uint32_t busy, float* ema,
+                                    bool count_block) {
+    const float inst_pct = 100.0f * (float)busy / (float)s_cycles_per_block;
+    portENTER_CRITICAL(&s_stats_mux);
+    *ema += 0.01f * (inst_pct - *ema);
+    if (inst_pct > s_stats.dsp_load_peak_pct) {
+        s_stats.dsp_load_peak_pct = inst_pct;
+    }
+    if (busy > s_cycles_per_block) s_stats.underruns++;
+    if (count_block) s_stats.blocks_rendered++;
+    portEXIT_CRITICAL(&s_stats_mux);
+}
+
+/* Master volume, the int16 conversion and the output meters: the tail every
+ * render path shares. Factored out when the pipeline gave it a second caller
+ * (S45), so the single-core and two-core paths cannot drift apart on the one
+ * piece of arithmetic that decides what actually leaves the box. */
+void SYNTH_RENDER_IRAM convert_block(const float* bl, const float* br) {
+    const float target = s_master_volume
+                             ? s_master_volume->load(std::memory_order_relaxed)
+                             : 1.0f;
+    if (s_gain < 0.0f) s_gain = target; /* first block: no boot fade */
+    float g1 = s_gain;
+    const float d = target - g1;
+    g1 += (d > kVolStep) ? kVolStep : (d < -kVolStep) ? -kVolStep : d;
+    const float dg = (g1 - s_gain) / (float)SYNTH_BLOCK_SIZE;
+    float gain = s_gain;
+    float peak = 0.0f;
+    uint32_t clips = 0;
+    for (size_t i = 0; i < SYNTH_BLOCK_SIZE; ++i) {
+        gain += dg;
+        const float l = bl[i] * gain;
+        const float r = br[i] * gain;
+        /* Metering happens post-volume, pre-saturation: what the meter
+         * reports is what would have hit the int16 hard clamp. */
+        const float al = fabsf(l), ar = fabsf(r);
+        if (al > peak) peak = al;
+        if (ar > peak) peak = ar;
+        if (al > osynth::dsp::kSoftKnee) ++clips;
+        if (ar > osynth::dsp::kSoftKnee) ++clips;
+        s_out[2 * i]     = to_i16_dith(osynth::dsp::soft_clip(l));
+        s_out[2 * i + 1] = to_i16_dith(osynth::dsp::soft_clip(r));
+    }
+    s_gain = g1;
+    portENTER_CRITICAL(&s_stats_mux);
+    if (peak > s_stats.out_peak) s_stats.out_peak = peak;
+    s_stats.soft_clips += clips;
+    portEXIT_CRITICAL(&s_stats_mux);
+
+    /* Silence run, for anything that needs a moment where a stall cannot
+     * be heard -- persist.c writes NVS in one. One compare per block, on a
+     * peak that was computed anyway. */
+    if (peak > kQuietPeak) {
+        s_quiet_blocks.store(0, std::memory_order_relaxed);
+    } else {
+        const uint32_t n = s_quiet_blocks.load(std::memory_order_relaxed);
+        if (n < kQuietBlockCap) {
+            s_quiet_blocks.store(n + 1, std::memory_order_relaxed);
+        }
+    }
+}
+
+/* Hand the converted block to the tap and then to the primary sink.
+ *
+ * Separate from convert_block() above because the DSP-load window closes
+ * between the two: blocking on the sink's DMA is how the audio task waits for
+ * real time to catch up, and charging that to the render would report a
+ * perfectly healthy synth at 100%.
+ *
+ * Tap first, primary second. The primary's write is what consumes the block
+ * period, so feeding the tap ahead of it keeps the tap's deposits at a fixed
+ * phase against the audio clock instead of trailing a DMA wait of varying
+ * length. Its result is deliberately ignored: a tap is best-effort, and
+ * letting it influence anything here would hand a USB host partial control of
+ * the DAC's timing. */
+void SYNTH_RENDER_IRAM emit_block(void) {
+    if (s_tap != nullptr) {
+        (void)s_tap->write(s_out, SYNTH_BLOCK_SIZE);
+    }
+
+    /* Blocking write: the sink's DMA (or timer) is the real clock. */
+    const esp_err_t err = s_sink->write(s_out, SYNTH_BLOCK_SIZE);
+    if (SYNTH_UNLIKELY(err != ESP_OK)) {
+        /* Counted, not logged -- see sink_errors in audio_io.h. The
+         * heartbeat prints it, with the name this err resolves to. */
+        portENTER_CRITICAL(&s_stats_mux);
+        s_stats.sink_errors++;
+        s_stats.sink_last_err = (int32_t)err;
+        portEXIT_CRITICAL(&s_stats_mux);
+    }
+}
+
+/* The single-core chain: capture, render the whole thing, convert, emit. */
 void SYNTH_RENDER_IRAM audio_task(void*) {
     ESP_LOGI(TAG, "audio task up: core %d, %d Hz, block %d (%.2f ms), sink %s",
              xPortGetCoreID(), SYNTH_SAMPLE_RATE, SYNTH_BLOCK_SIZE,
              1000.0f * SYNTH_BLOCK_SIZE / SYNTH_SAMPLE_RATE, s_sink->name);
-
-    /* DSP load in CPU cycles (esp_cpu_get_cycle_count: one register read,
-     * finer and cheaper than esp_timer). Budget = cycles per block period. */
-    const uint32_t cycles_per_block =
-        (uint32_t)((uint64_t)esp_rom_get_cpu_ticks_per_us() * 1000000u *
-                   SYNTH_BLOCK_SIZE / SYNTH_SAMPLE_RATE);
-    s_cycles_per_block = cycles_per_block;
 
     for (;;) {
         const uint32_t c0 = esp_cpu_get_cycle_count();
 
 #if SYNTH_ENABLE_AUDIO_IN
         /* Inside the c0 window on purpose: the input is not free and the DSP
-         * meter should say so. As early in the block as possible, too — it
+         * meter should say so. As early in the block as possible, too -- it
          * gives the RX DMA the longest run at refilling before the next
          * read. */
-        audio_in_capture();
+        audio_in_capture(0);
 #endif
 
-        memset(s_buf_l, 0, sizeof(s_buf_l));
-        memset(s_buf_r, 0, sizeof(s_buf_r));
+        memset(s_buf_l[0], 0, sizeof(s_buf_l[0]));
+        memset(s_buf_r[0], 0, sizeof(s_buf_r[0]));
 
         if (s_render != nullptr) {
-            s_render(s_buf_l, s_buf_r, SYNTH_BLOCK_SIZE, s_render_ctx);
+            s_render(s_buf_l[0], s_buf_r[0], SYNTH_BLOCK_SIZE, s_render_ctx);
         }
 
-        const float target = s_master_volume
-                                 ? s_master_volume->load(std::memory_order_relaxed)
-                                 : 1.0f;
-        if (s_gain < 0.0f) s_gain = target; /* first block: no boot fade */
-        float g1 = s_gain;
-        const float d = target - g1;
-        g1 += (d > kVolStep) ? kVolStep : (d < -kVolStep) ? -kVolStep : d;
-        const float dg = (g1 - s_gain) / (float)SYNTH_BLOCK_SIZE;
-        float gain = s_gain;
-        float peak = 0.0f;
-        uint32_t clips = 0;
-        for (size_t i = 0; i < SYNTH_BLOCK_SIZE; ++i) {
-            gain += dg;
-            const float l = s_buf_l[i] * gain;
-            const float r = s_buf_r[i] * gain;
-            /* Metering happens post-volume, pre-saturation: what the meter
-             * reports is what would have hit the int16 hard clamp. */
-            const float al = fabsf(l), ar = fabsf(r);
-            if (al > peak) peak = al;
-            if (ar > peak) peak = ar;
-            if (al > osynth::dsp::kSoftKnee) ++clips;
-            if (ar > osynth::dsp::kSoftKnee) ++clips;
-            s_out[2 * i]     = to_i16_dith(osynth::dsp::soft_clip(l));
-            s_out[2 * i + 1] = to_i16_dith(osynth::dsp::soft_clip(r));
-        }
-        s_gain = g1;
-        portENTER_CRITICAL(&s_stats_mux);
-        if (peak > s_stats.out_peak) s_stats.out_peak = peak;
-        s_stats.soft_clips += clips;
-        portEXIT_CRITICAL(&s_stats_mux);
-
-        /* Silence run, for anything that needs a moment where a stall cannot
-         * be heard — persist.c writes NVS in one. One compare per block, on a
-         * peak that was computed anyway. */
-        if (peak > kQuietPeak) {
-            s_quiet_blocks.store(0, std::memory_order_relaxed);
-        } else {
-            const uint32_t n = s_quiet_blocks.load(std::memory_order_relaxed);
-            if (n < kQuietBlockCap) {
-                s_quiet_blocks.store(n + 1, std::memory_order_relaxed);
-            }
-        }
-
-        /* DSP load = cycles to produce the block vs its real-time budget,
-         * smoothed with a ~130 ms EMA. A block over budget missed its
-         * deadline and counts as an underrun. */
-        const uint32_t busy = esp_cpu_get_cycle_count() - c0;
-        const float inst_pct = 100.0f * (float)busy / (float)cycles_per_block;
-        portENTER_CRITICAL(&s_stats_mux);
-        s_stats.dsp_load_pct += 0.01f * (inst_pct - s_stats.dsp_load_pct);
-        if (inst_pct > s_stats.dsp_load_peak_pct) {
-            s_stats.dsp_load_peak_pct = inst_pct;
-        }
-        if (busy > cycles_per_block) s_stats.underruns++;
-        s_stats.blocks_rendered++;
-        portEXIT_CRITICAL(&s_stats_mux);
-
-        /* Tap first, primary second. The primary's write is what consumes the
-         * block period, so feeding the tap ahead of it keeps the tap's
-         * deposits at a fixed phase against the audio clock instead of
-         * trailing a DMA wait of varying length. Its result is deliberately
-         * ignored: a tap is best-effort, and letting it influence anything
-         * here would hand a USB host partial control of the DAC's timing. */
-        if (s_tap != nullptr) {
-            (void)s_tap->write(s_out, SYNTH_BLOCK_SIZE);
-        }
-
-        /* Blocking write: the sink's DMA (or timer) is the real clock. */
-        const esp_err_t err = s_sink->write(s_out, SYNTH_BLOCK_SIZE);
-        if (SYNTH_UNLIKELY(err != ESP_OK)) {
-            /* Counted, not logged — see sink_errors in audio_io.h. The
-             * heartbeat prints it, with the name this err resolves to. */
-            portENTER_CRITICAL(&s_stats_mux);
-            s_stats.sink_errors++;
-            s_stats.sink_last_err = (int32_t)err;
-            portEXIT_CRITICAL(&s_stats_mux);
-        }
+        convert_block(s_buf_l[0], s_buf_r[0]);
+        account_load(esp_cpu_get_cycle_count() - c0, &s_stats.dsp_load_pct,
+                     /*count_block=*/true);
+        emit_block();
     }
 }
 
+#if SYNTH_ENABLE_SPLIT_RENDER
+
+/* Stage A, on kVoiceCore: the voice manager, working one block ahead.
+ *
+ * Owns no clock and no sink, and that is the load-bearing part. It runs only
+ * when the bus stage hands it a free slot and blocks the rest of the time, so
+ * the sink still paces both cores through it. A second free-running audio task
+ * would be a second clock, which is the one thing a pipeline must not have.
+ *
+ * What it does *not* do is yield when it is over budget: a stage that runs long
+ * finds its next credit already waiting and starts again immediately, at 100%
+ * of its core for as long as the patch is too expensive. That is why it is on
+ * the empty core — see kVoiceCore for what it cost to learn.
+ *
+ * The notification pair is the whole of the synchronisation, and it is the
+ * memory barrier as well: the bus stage writes the slot it is releasing and
+ * publishes the capture slot *before* the give, and a FreeRTOS notify is a full
+ * barrier on both sides. Nothing here needs an atomic of its own, because there
+ * is no moment when the two cores touch the same buffer at all. */
+void SYNTH_RENDER_IRAM audio_task_voices(void*) {
+    ESP_LOGI(TAG, "voice stage up: core %d, one block ahead of the sink",
+             xPortGetCoreID());
+
+    int prod = 0;
+    for (;;) {
+        /* Unbounded, unlike the bus stage's wait below. With no slot to fill
+         * there is nothing useful this task could do with the CPU, and the bus
+         * stage is the only thing that can ever hand one over -- a timeout here
+         * would just spin a high-priority task against whatever is already
+         * keeping its core busy, which is the situation it would be waking up
+         * to diagnose. */
+        (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        const uint32_t c0 = esp_cpu_get_cycle_count();
+        memset(s_buf_l[prod], 0, sizeof(s_buf_l[prod]));
+        memset(s_buf_r[prod], 0, sizeof(s_buf_r[prod]));
+        if (s_render_a != nullptr) {
+            s_render_a(s_buf_l[prod], s_buf_r[prod], SYNTH_BLOCK_SIZE,
+                       s_render_ctx);
+        }
+        account_load(esp_cpu_get_cycle_count() - c0, &s_load_a_pct,
+                     /*count_block=*/false);
+
+        xTaskNotifyGive(s_task);
+        prod ^= 1;
+    }
+}
+
+/* Stage B, on kBusCore: the capture, everything downstream of the voices, and
+ * the sink that paces the pair.
+ *
+ * The light half, and on the core everything else in this firmware is pinned
+ * to. It earns its place there by blocking on the sink's DMA every block, which
+ * is what hands that core back to the BLE host and the sequencer clock on a
+ * schedule rather than whenever the patch happens to allow it.
+ *
+ * The block indices are worth following once, because their agreement is what
+ * keeps the two cores off each other's buffers. The voice stage's iteration i
+ * fills bus slot i&1; this task's iteration i drains the same one, having been
+ * woken by the give at the end of that one. The two therefore overlap by
+ * exactly one iteration -- the voice stage is building block N+1 into the slot
+ * this task finished with last time, while this task finishes block N -- and
+ * the capture slot follows the same index, which is why the voice stage reading
+ * `cons ^ 1` is reading the one this task is not writing. */
+void SYNTH_RENDER_IRAM audio_task_pipe(void*) {
+    ESP_LOGI(TAG, "audio task up: core %d, %d Hz, block %d (%.2f ms), sink %s",
+             xPortGetCoreID(), SYNTH_SAMPLE_RATE, SYNTH_BLOCK_SIZE,
+             1000.0f * SYNTH_BLOCK_SIZE / SYNTH_SAMPLE_RATE, s_sink->name);
+
+    int cons = 0;
+    for (;;) {
+        /* Bounded, so a voice stage that has stopped delivering is *counted*
+         * rather than merely inaudible. Nothing is written to the sink during
+         * this wait, so its DMA drains and the output goes quiet -- and
+         * pipe_stalls is then the only thing that separates a starved pipeline
+         * from a patch that is simply not making a sound.
+         *
+         * Note that an over-budget voice stage does not land here: it delivers,
+         * only late, and the DMA absorbs that until it cannot. That case shows
+         * up as underruns and a dsp_load_pct near 100, not as a stall. */
+        while (ulTaskNotifyTake(pdTRUE, kStallTicks) == 0) {
+            portENTER_CRITICAL(&s_stats_mux);
+            /* Not before the first block has ever landed. The voice stage is
+             * created with one credit already given and starts within
+             * microseconds, but the scheduler is free to run this task first,
+             * and a stall counted there would be a fault report for a pipeline
+             * that is merely still starting up. */
+            if (s_stats.blocks_rendered != 0) s_stats.pipe_stalls++;
+            portEXIT_CRITICAL(&s_stats_mux);
+        }
+
+        const uint32_t c0 = esp_cpu_get_cycle_count();
+
+#if SYNTH_ENABLE_AUDIO_IN
+        /* Before the release below, never after: the give is what makes this
+         * visible to the voice stage, and what it publishes is the slot that
+         * stage may read -- the opposite one to the capture two lines further
+         * down. Getting this order wrong is the single way the two cores could
+         * end up on one capture buffer. */
+        publish_in_slots(cons);
+#endif
+        /* Released here rather than at the end of the block, so the voice
+         * stage gets this stage's own work *and* the sink's DMA wait to render
+         * the next block in. That is where the pipeline's headroom actually
+         * comes from. The slot it takes is the one this task finished with last
+         * time round, which nothing has touched since. */
+        xTaskNotifyGive(s_task_a);
+
+#if SYNTH_ENABLE_AUDIO_IN
+        /* Inside the c0 window on purpose: the input is not free and the DSP
+         * meter should say so. As early in the block as possible, too -- it
+         * gives the RX DMA the longest run at refilling before the next
+         * read. */
+        audio_in_capture(cons);
+#endif
+
+        /* No memset: this slot arrives carrying the voice stage's block, which
+         * is exactly what the rest of the chain is supposed to add to. */
+        if (s_render != nullptr) {
+            s_render(s_buf_l[cons], s_buf_r[cons], SYNTH_BLOCK_SIZE,
+                     s_render_ctx);
+        }
+
+        convert_block(s_buf_l[cons], s_buf_r[cons]);
+        account_load(esp_cpu_get_cycle_count() - c0, &s_stats.dsp_load_pct,
+                     /*count_block=*/true);
+        emit_block();
+        cons ^= 1;
+    }
+}
+
+#endif /* SYNTH_ENABLE_SPLIT_RENDER */
+
 } // namespace
 
-esp_err_t audio_io_start(audio_render_fn render, void* ctx) {
-    if (s_task != nullptr) return ESP_ERR_INVALID_STATE;
-
-    s_render = render;
+/* Everything both start paths do: pick and start the sink, bring the input
+ * devices up, attach the tap, name the result, and work out the block budget
+ * the meters divide by. Split out of audio_io_start() when the pipeline gave
+ * it a sibling (S45) -- all either caller adds on top is which tasks to
+ * create. */
+static esp_err_t start_common(void* ctx) {
     s_render_ctx = ctx;
     s_master_volume =
         osynth::ParamStore::instance().valuePtr(osynth::PID_MASTER_VOLUME);
@@ -568,10 +851,78 @@ esp_err_t audio_io_start(audio_render_fn render, void* ctx) {
         snprintf(s_sink_name, sizeof(s_sink_name), "%s", s_sink->name);
     }
 
+    /* Before any task exists, because both of them divide by it and neither
+     * owns it. The clamp is not defensiveness about the ROM call so much as
+     * about the division in account_load(), which runs on every block on both
+     * cores and has no other guard. */
+    s_cycles_per_block =
+        (uint32_t)((uint64_t)esp_rom_get_cpu_ticks_per_us() * 1000000u *
+                   SYNTH_BLOCK_SIZE / SYNTH_SAMPLE_RATE);
+    if (s_cycles_per_block == 0) s_cycles_per_block = 1;
+
+    return ESP_OK;
+}
+
+esp_err_t audio_io_start(audio_render_fn render, void* ctx) {
+    if (s_task != nullptr) return ESP_ERR_INVALID_STATE;
+
+    s_render = render;
+    const esp_err_t err = start_common(ctx);
+    if (err != ESP_OK) return err;
+
     BaseType_t ok = xTaskCreatePinnedToCore(audio_task, "audio", 6144, nullptr,
                                             configMAX_PRIORITIES - 2, &s_task, 1);
     return (ok == pdPASS) ? ESP_OK : ESP_FAIL;
 }
+
+#if SYNTH_ENABLE_SPLIT_RENDER
+esp_err_t audio_io_start_split(audio_render_fn stage_a, audio_render_fn stage_b,
+                               void* ctx) {
+    if (s_task != nullptr || s_task_a != nullptr) return ESP_ERR_INVALID_STATE;
+
+    s_render_a = stage_a;
+    s_render = stage_b;
+    const esp_err_t err = start_common(ctx);
+    if (err != ESP_OK) return err;
+
+    /* Both tasks exist before either is allowed to run a block, and the credit
+     * that starts the pipeline is given last. The order matters twice over.
+     *
+     * The voice stage is created at a priority that preempts whatever is on its
+     * core, so it runs the instant it exists — and the first thing it would do
+     * after a block is notify `s_task`, which the second create below has not
+     * filled in yet. Priming it here rather than there is what keeps that
+     * handle from being read before it is written; the task blocks immediately
+     * on a notification nobody has sent, which costs nothing and has no
+     * deadline to miss.
+     *
+     * The bus stage waking first is harmless in the other direction: it waits,
+     * times out, and declines to count a stall because no block has ever landed
+     * yet (see audio_task_pipe).
+     *
+     * Same priority on both, for the same reason: on each core the stage has
+     * to outrank the control tasks, so a busy UI or a BLE host is starved of
+     * CPU ahead of the audio deadline rather than alongside it. */
+    BaseType_t ok = xTaskCreatePinnedToCore(audio_task_voices, "audio_voi",
+                                            6144, nullptr,
+                                            configMAX_PRIORITIES - 2, &s_task_a,
+                                            kVoiceCore);
+    if (ok != pdPASS) return ESP_FAIL;
+
+    ok = xTaskCreatePinnedToCore(audio_task_pipe, "audio", 6144, nullptr,
+                                 configMAX_PRIORITIES - 2, &s_task, kBusCore);
+    if (ok != pdPASS) return ESP_FAIL;
+
+    xTaskNotifyGive(s_task_a); /* the pipeline's first free slot */
+
+    ESP_LOGI(TAG,
+             "render pipeline: voices on core %d, fx/looper + sink on core %d, "
+             "+1 block (%.2f ms) of output latency",
+             (int)kVoiceCore, (int)kBusCore,
+             1000.0f * SYNTH_BLOCK_SIZE / SYNTH_SAMPLE_RATE);
+    return ESP_OK;
+}
+#endif
 
 #if SYNTH_ENABLE_AUDIO_IN
 
@@ -590,10 +941,11 @@ inline void SYNTH_RENDER_IRAM mix_in(int pos, float* l, float* r,
                                      size_t frames) {
     const float g = s_in_g[pos];
     if (g <= kInSilent) return;
+    const int p = in_slot();
     for (int d = 0; d < kDevCount; ++d) {
-        const float dg = s_dev_g[d];
+        const float dg = s_dev_g[p][d];
         if (dg <= kInSilent) continue;
-        osynth::dsp::simd_mix_i16lr_f32(s_cap[d], g * dg * kInScale, l, r,
+        osynth::dsp::simd_mix_i16lr_f32(s_cap[p][d], g * dg * kInScale, l, r,
                                         frames);
     }
 }
@@ -624,10 +976,11 @@ bool SYNTH_RENDER_IRAM audio_io_in_mono(float* dst, size_t frames) {
      * channels comes back at its own level rather than 6 dB up, and the
      * ES8311 path is exactly that case (one mic, duplicated across the pair). */
     bool any = false;
+    const int p = in_slot();
     for (int d = 0; d < kDevCount; ++d) {
-        const float dg = s_dev_g[d];
+        const float dg = s_dev_g[p][d];
         if (dg <= kInSilent) continue;
-        const int16_t* __restrict__ c = s_cap[d];
+        const int16_t* __restrict__ c = s_cap[p][d];
         const float k = dg * kInScale * 0.5f;
         if (!any) {
             for (size_t i = 0; i < frames; ++i) {
@@ -683,9 +1036,9 @@ const int16_t* SYNTH_RENDER_IRAM audio_io_line_in_block(void) {
      * The bus mix points are where two devices are heard at once; a node is
      * one wire, and this is the end of it. */
 #if SYNTH_ENABLE_LINE_IN
-    return s_in_ok ? s_cap[kSlotLine] : nullptr;
+    return s_in_ok ? s_cap[in_slot()][kSlotLine] : nullptr;
 #else
-    return s_in_ok ? s_cap[kSlotMic] : nullptr;
+    return s_in_ok ? s_cap[in_slot()][kSlotMic] : nullptr;
 #endif
 }
 
@@ -700,18 +1053,33 @@ bool audio_io_in_fx_block(float*, float*, size_t) { return false; }
 
 #endif /* SYNTH_ENABLE_AUDIO_IN */
 
-void SYNTH_RENDER_IRAM audio_io_report_stages(uint32_t voices_cycles,
-                                              uint32_t fx_cycles,
-                                              uint32_t loop_cycles) {
+void SYNTH_RENDER_IRAM audio_io_report_stage_voices(uint32_t voices_cycles) {
     if (s_cycles_per_block == 0) return;
     const float inv = 100.0f / (float)s_cycles_per_block;
     /* Same ~130 ms EMA as dsp_load_pct so the three read against it. */
     s_stats.stage_voices_pct +=
         0.01f * ((float)voices_cycles * inv - s_stats.stage_voices_pct);
+}
+
+void SYNTH_RENDER_IRAM audio_io_report_stage_fx_loop(uint32_t fx_cycles,
+                                                     uint32_t loop_cycles) {
+    if (s_cycles_per_block == 0) return;
+    const float inv = 100.0f / (float)s_cycles_per_block;
     s_stats.stage_fx_pct +=
         0.01f * ((float)fx_cycles * inv - s_stats.stage_fx_pct);
     s_stats.stage_loop_pct +=
         0.01f * ((float)loop_cycles * inv - s_stats.stage_loop_pct);
+}
+
+/* The single-core chain measures all three in one place, so it reports them
+ * that way. Expressed as the two halves rather than beside them: three EMAs
+ * updated in two places would be three chances for the split and single paths
+ * to disagree about what a percentage means. */
+void SYNTH_RENDER_IRAM audio_io_report_stages(uint32_t voices_cycles,
+                                              uint32_t fx_cycles,
+                                              uint32_t loop_cycles) {
+    audio_io_report_stage_voices(voices_cycles);
+    audio_io_report_stage_fx_loop(fx_cycles, loop_cycles);
 }
 
 const char* audio_io_sink_name(void) { return s_sink_name; }
@@ -735,6 +1103,12 @@ void audio_io_get_stats(audio_io_stats_t* out) {
      * block that maxes in between is reported by neither window. */
     portENTER_CRITICAL(&s_stats_mux);
     *out = s_stats;
+#if SYNTH_ENABLE_SPLIT_RENDER
+    /* The worse of the two stages, not their sum -- see dsp_load_pct in
+     * audio_io.h. Folded in on the way out rather than kept folded, so each
+     * stage still owns exactly one float and neither has to read the other's. */
+    if (s_load_a_pct > out->dsp_load_pct) out->dsp_load_pct = s_load_a_pct;
+#endif
     s_stats.dsp_load_peak_pct = 0.0f;
     s_stats.out_peak = 0.0f;
     for (int d = 0; d < 2; ++d) {

@@ -185,6 +185,38 @@ CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y
 # CONFIG_ESPTOOLPY_FLASHSIZE_* so the image header matches the chip).
 # ===========================================================================
 
+# --- Render pipeline --------------------------------------------------------
+
+# Two-core render (S45): a voice stage on the empty core (1), and a bus stage
+# on core 0 carrying the drum bus, FX bus, looper, sampler tap and metronome
+# plus the sink. The two overlap by one block, so the per-block budget is
+# roughly doubled -- which is what pays for a fully loaded FX bus under a
+# modular patch, the case graph_compile.h's reservation table explicitly cannot
+# price.
+#
+# The assignment is the load-bearing part and it is argued at kVoiceCore in
+# components/audio_io/audio_io.cpp: the voice stage is the heavy half and does
+# not yield when it is over budget, so it belongs on the core nothing else is
+# pinned to. Putting it on core 0 was tried first and starved the BLE host, the
+# sequencer clock and the idle task the moment a granular patch went over.
+#
+# Set here rather than left at its Kconfig default because it is a P4-only
+# decision with a P4-only reason: the bus stage holds the sink and shares core 0
+# with the radio, and on this target the BLE controller is on the companion C6
+# (CONFIG_BT_CONTROLLER_DISABLED above), so that core sees the hosted
+# transport's interrupts and nothing worse. The S3 keeps the single-core chain
+# because its on-die controller runs high-priority interrupts pinned to core 0
+# that no task priority can preempt.
+#
+# Costs one block (1.33 ms at 48 kHz / 64) of extra output latency, ~3 KB of
+# .bss for the handover slots -- sram_high, not the sram_low region the IRAM
+# budget fights over -- and a second 6 KB task stack.
+#
+# Turn it off to A/B a fault against the single-core chain without changing
+# targets: render_chain() is the composition of the same two stage bodies, in
+# the same order, so both paths render the same thing.
+CONFIG_OSYNTH_SPLIT_RENDER=y
+
 # --- I2S analogue front end -------------------------------------------------
 
 # Same choice as on the S3 — DISCRETE (PCM5102A, optionally + PCM1808) or

@@ -1,7 +1,8 @@
 /*
  * osynth — audio I/O core.
  *
- * Owns the audio render task (pinned to core 1) and the output sinks.
+ * Owns the audio render task (pinned to core 1, or two of them across both
+ * cores under the S45 pipeline below) and the output sinks.
  * Session 2: sink abstraction with real pacing — I2S (SYNTH_ENABLE_I2S_DAC),
  * classic-ESP32 internal DAC, or a timer-paced null sink. The sink's blocking
  * write is the audio clock.
@@ -25,6 +26,17 @@
  * not have in common. Which is why those stages kept their names: what they
  * place in the render chain is "the input", and how many devices are behind it
  * is a question no consumer has to ask.
+ * Session 45: on the P4 the chain runs as a two-core pipeline
+ * (SYNTH_ENABLE_SPLIT_RENDER). audio_io_start_split() takes the chain in two
+ * pieces instead of one and runs them as overlapping stages -- a voice stage
+ * building block N+1, and a bus stage finishing block N with everything after
+ * the voices plus the sink. Which core each lands on is decided in audio_io.cpp
+ * and matters: see kVoiceCore there. Nothing below this line changes shape for
+ * it -- the same render callback type, the same stages, the same stats. What
+ * changes is that the capture is double-buffered, because the voice stage's
+ * engines read the input through audio_io_in_mono() and
+ * audio_io_line_in_block() while the bus stage is filling the next block into
+ * the other slot -- see those two for the skew that buys.
  */
 #pragma once
 
@@ -33,19 +45,36 @@
 
 #include "esp_err.h"
 
+#include "synth_config.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /* Renders one block of mono-per-channel float audio in [-1, 1].
- * Called from the audio task on core 1 — no blocking, no allocation. */
+ * Called from the audio task — no blocking, no allocation. Which core that is
+ * depends on the build and, under the two-core pipeline, on which half of the
+ * chain this callback is; no implementation of it should care. */
 typedef void (*audio_render_fn)(float* out_l, float* out_r, size_t frames, void* ctx);
 
 typedef struct {
     uint32_t blocks_rendered;
     uint32_t underruns;      /* blocks whose render ran past the block budget
-                              * (deadline misses) */
-    float dsp_load_pct;      /* render time / block budget, EMA-smoothed */
+                              * (deadline misses). Either core can raise one
+                              * under the two-core pipeline, and a block that
+                              * overran on both counts twice -- a distinction
+                              * not worth a second counter, since by then the
+                              * answer is the same in both directions. */
+    float dsp_load_pct;      /* render time / block budget, EMA-smoothed.
+                              * With the two-core pipeline this is the *worse*
+                              * of the two cores rather than a sum: the deadline
+                              * is per-core and per-block, so the core with the
+                              * fuller block is the one that decides whether the
+                              * next one arrives in time. Reading it as a total
+                              * would make a pipeline about to fail look half
+                              * loaded. The [voi fx loop] split beside it says
+                              * which stage that is -- voi is the whole of the
+                              * voice stage, the other two are the bus stage. */
     float dsp_load_peak_pct; /* worst single block since the previous
                               * audio_io_get_stats() call (reset on read) —
                               * for the per-engine CPU-budget figures (S8) */
@@ -155,6 +184,23 @@ typedef struct {
      * total, and what matters is whether it is climbing. */
     uint32_t sink_errors;
     int32_t sink_last_err;
+    /* Waits the bus stage timed out on a voice stage that had not arrived
+     * (S45); always 0 without the two-core pipeline.
+     *
+     * Distinct from `underruns` above, and the distinction is the whole
+     * diagnosis. An underrun is one stage failing to finish inside its own
+     * block period, which the per-stage percentages then localise -- an
+     * over-budget voice stage lands there, not here, because it does deliver,
+     * only late. A stall is the bus stage having nothing to work on at all: the
+     * voice stage starved of scheduling rather than of budget. It presents
+     * identically at the output while calling for the opposite fix -- not less
+     * DSP, but finding whatever is holding that core off the CPU.
+     *
+     * Counted per timed-out wait rather than per block, so it climbs at the
+     * timeout's rate while the condition lasts rather than at the block rate.
+     * Non-zero at all is a fault, and the sink is emitting silence for as long
+     * as it is climbing. */
+    uint32_t pipe_stalls;
 } audio_io_stats_t;
 
 /* Called once per block from the render chain (audio task only) with the
@@ -162,6 +208,17 @@ typedef struct {
  * budget. */
 void audio_io_report_stages(uint32_t voices_cycles, uint32_t fx_cycles,
                             uint32_t loop_cycles);
+
+/* The same three numbers, reported by whichever half of the chain measured
+ * them, for the two-core pipeline where no single task sees all three.
+ * audio_io_report_stages() above is these two called in order, so the single
+ * and split paths feed one set of meters through one piece of arithmetic.
+ *
+ * Each is called from its own core and touches only its own fields, which is
+ * what makes them safe without a lock: the EMA update is a read-modify-write,
+ * and two cores doing that to one float would lose part of it. */
+void audio_io_report_stage_voices(uint32_t voices_cycles);
+void audio_io_report_stage_fx_loop(uint32_t fx_cycles, uint32_t loop_cycles);
 
 /* Line input (S31), mixed into the render chain at one of three points — the
  * one `in.route` selects; the other two are silent and cost a compare each.
@@ -194,7 +251,13 @@ void audio_io_line_in_mon(float* l, float* r, size_t frames);
  * bus mix points above; a patched-in node is a different question, and making
  * the two interact would mean either a node that goes silent when the route is
  * off or an input heard twice when it is not. So a graph patch works with
- * `in.route` at off, which is also how you would set it up. */
+ * `in.route` at off, which is also how you would set it up.
+ *
+ * Its one caller is the graph's LineIn node, which is inside an engine and so
+ * on the voice stage under the two-core pipeline. It therefore gets the same
+ * previous-slot block audio_io_in_mono() describes above, for the same reason
+ * and with the same 2.7 ms of extra age. The pointer stays valid for the whole
+ * of that core's block. */
 const int16_t* audio_io_line_in_block(void);
 
 /* The current block as mono float in [-1, 1], summing every device `in.source`
@@ -227,7 +290,23 @@ const int16_t* audio_io_line_in_block(void);
  *
  * A MEMS mic at conversational distance sits far below full scale even after
  * that trim, so a caller that wants a usable signal from one should offer a
- * gain of its own rather than assume this arrives near unity. */
+ * gain of its own rather than assume this arrives near unity.
+ *
+ * Under the two-core pipeline (S45) what "the current block" means depends on
+ * which stage is asking, and both do: the granular engine and the sampler's
+ * pre-roll sit on opposite sides of the cut. A caller on the bus stage -- the
+ * FX bus, the sampler tap -- gets the block captured for the block being
+ * finished, the same one the three mix stages used. A caller on the voice stage
+ * -- an engine -- gets the previous slot instead, two block periods (2.7 ms)
+ * older, because the bus stage is filling the fresh one while that engine runs.
+ * Nothing is ever read while it is being written, and no caller has to know
+ * which core it is on.
+ *
+ * The skew is real but it is not a phase error anyone can hear: it applies to
+ * granulation and to sample pre-roll, neither of which is summed against the
+ * monitored input. A caller that *did* need phase agreement with the bus would
+ * have to be on the bus stage, and audio_io_in_fx_block() below is the entry
+ * point for exactly that. */
 bool audio_io_in_mono(float* dst, size_t frames);
 
 /* The input exactly as audio_io_line_in_fx() mixed it into the bus this block,
@@ -263,6 +342,28 @@ bool audio_io_in_fx_block(float* l, float* r, size_t frames);
  * `render` may be NULL (silence). Falls back to the null sink (no output,
  * timer pacing) if the hardware sink fails to start. */
 esp_err_t audio_io_start(audio_render_fn render, void* ctx);
+
+#if SYNTH_ENABLE_SPLIT_RENDER
+/* The same, with the chain handed over in two pieces to run as a two-core
+ * pipeline (S45). `stage_a` must be the part of the chain with no reader on the
+ * other side of the cut -- the voice manager, and nothing else. `stage_b` runs
+ * with the sink, and gets the bus `stage_a` produced one block period earlier.
+ * Which core each is pinned to, and why it is not arbitrary, is kVoiceCore in
+ * audio_io.cpp.
+ *
+ * Both are called exactly once per block, in the same order and with the same
+ * frame count as the single-core chain, so every ordering invariant the chain
+ * documents still holds. What the caller pays for it is one block period of
+ * added output latency and the requirement that the two halves really are
+ * separable: a `stage_a` that reads anything `stage_b` wrote during the same
+ * block gets the previous block's version of it.
+ *
+ * Either may be NULL (that half renders silence). Falls back to the null sink
+ * exactly as audio_io_start() does -- a sink that fails does not collapse the
+ * pipeline, since the null sink paces it just as well. */
+esp_err_t audio_io_start_split(audio_render_fn stage_a, audio_render_fn stage_b,
+                               void* ctx);
+#endif
 
 /* Name of the active sink: "i2s", "usb", "dac", "null" — or "none" before
  * start. A build that also taps a second destination reports both, primary

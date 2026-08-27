@@ -905,6 +905,56 @@ menu "osynth Synthesizer"
             do with the change. That is the out-of-internal-RAM message,
             and NNNN is how many bytes have to be found.
 
+    config OSYNTH_SPLIT_RENDER
+        bool "Render the chain as a two-core pipeline (S45)"
+        depends on IDF_TARGET_ESP32P4
+        default y if IDF_TARGET_ESP32P4
+        default n
+        help
+            Splits the render chain into two pipeline stages on separate
+            cores: a voice stage, and a bus stage carrying everything
+            after it — the drum bus, the FX bus, the looper, the sampler
+            tap and the metronome — alongside the sink. The voice stage
+            renders block N+1 while the bus stage finishes block N, so the
+            two overlap and the per-block budget roughly doubles.
+
+            How much that is worth depends on how the load actually
+            divides, and it is rarely even. Measured on a granular patch it
+            was 66% voices against 16% for the whole bus, so the ceiling
+            was nearer 1.5x than 2x — and a patch whose voices alone
+            exceed one core is not helped at all, because voices are a
+            single stage and cannot be split further.
+
+            The voice stage is pinned to the empty core (core 1) and the
+            bus stage to core 0, where every task this firmware pins
+            already lives. That is not arbitrary: a stage that goes over
+            budget never blocks, so it holds its core at 100% until the
+            patch gets cheaper. On core 0 that starves the BLE host, the
+            sequencer clock and the idle task with it; on core 1 it costs
+            only an idle task with nothing else to do. See kVoiceCore in
+            components/audio_io/audio_io.cpp.
+
+            Costs one block (1.33 ms at the defaults) of extra output
+            latency, and about 3 KB of internal RAM for the handover
+            buffers. All of it lands in .bss, so none of it touches the
+            P4's scarce sram_low region.
+
+            P4 only, and that gate is real rather than cautious. The
+            bus stage holds the sink, and therefore the hard deadline,
+            while sharing core 0 with the radio. On the P4 the BLE
+            controller lives on the companion chip (SYNTH_BLE_VIA_HOSTED),
+            so that core sees only the transport driver's interrupts. On
+            the S3 the on-die controller runs high-priority interrupts
+            pinned to core 0 that no priority here can preempt, landing
+            them on exactly the stage that must not miss a block. The S3
+            keeps the single-core chain, which is why render_chain() in
+            main.cpp is still the composition of the same two stage
+            bodies.
+
+            Turn it off to A/B a fault against the single-core chain
+            without changing targets: the chain order is defined once, so
+            both paths render the same thing in the same sequence.
+
     config OSYNTH_ENABLE_MODULAR
         bool "Enable the modular patch graph engine (S28)"
         default y if IDF_TARGET_ESP32S3 || IDF_TARGET_ESP32P4

@@ -61,6 +61,22 @@ std::atomic<uint32_t> s_evt_dropped{0};
  * story. */
 uint8_t s_block_note = 0;
 
+#if SYNTH_ENABLE_SPLIT_RENDER
+/* ...except when those two are not the same callback (S45). The synth
+ * produces this on the voice stage for block N+1 while the FX bus consumes
+ * block N's on the bus stage, so the byte above is being cleared and rewritten
+ * under the reader. These carry it across instead, in the two slots and with
+ * the phasing the audio bus already uses: the producer index is touched only by
+ * the voice stage and the consumer index only by the bus stage, and because
+ * each runs exactly once per block the two are permanently one apart. Neither
+ * ever names the slot the other is working on, which is what makes plain bytes
+ * enough here too. */
+uint8_t s_note_slot[2] = {0, 0};
+uint8_t s_note_prod = 0; /* voice stage only */
+uint8_t s_note_cons = 0; /* bus stage only */
+uint8_t s_note_fx = 0;   /* bus stage only: what the FX bus is answered with */
+#endif
+
 void push_event(EvType type, uint8_t note, uint8_t velocity) {
     bool dropped = false;
     portENTER_CRITICAL(&s_evt_mux);
@@ -407,8 +423,28 @@ extern "C" bool voice_manager_muted(void) {
 }
 
 extern "C" uint8_t SYNTH_RENDER_IRAM voice_manager_block_note(void) {
+#if SYNTH_ENABLE_SPLIT_RENDER
+    /* The FX bus is the only caller, and it is on the bus stage, so this
+     * answers with what the pipeline latched for the block that stage is
+     * finishing -- never with s_block_note, which by now belongs to the block
+     * the voice stage is building. */
+    return s_note_fx;
+#else
     return s_block_note;
+#endif
 }
+
+#if SYNTH_ENABLE_SPLIT_RENDER
+extern "C" void SYNTH_RENDER_IRAM voice_manager_stage_block_note(void) {
+    s_note_slot[s_note_prod] = s_block_note;
+    s_note_prod ^= 1;
+}
+
+extern "C" void SYNTH_RENDER_IRAM voice_manager_take_block_note(void) {
+    s_note_fx = s_note_slot[s_note_cons];
+    s_note_cons ^= 1;
+}
+#endif
 
 extern "C" void voice_manager_note_on(uint8_t note, uint8_t velocity) {
     push_event(EvType::NoteOn, note, velocity);

@@ -76,10 +76,33 @@ bool is_persisted(uint16_t id) {
 
 /* Any control task; must stay short. Marking is all it does — the writer task
  * decides when. Preset loads are included deliberately: a preset that changes
- * a persisted setting should survive a reboot like any other edit. */
+ * a persisted setting should survive a reboot like any other edit.
+ *
+ * ParamOrigin::Internal is not, and that exclusion is the whole of S45c. It is
+ * the firmware talking to itself, and what it says is usually *temporary* — the
+ * case that found this is sampler.cpp's monitor_hold(), which borrows in.route
+ * from `off` to `mon` while a pad is armed so the player can hear what they are
+ * about to record, and puts back what was there when the recorder goes idle.
+ * Storing the borrowed value defeats the borrow: a reset taken while the pad
+ * was still armed, or simply before the restore's own write window came round,
+ * left `mon` in NVS for good. The player turns the input monitor off, reflashes,
+ * and the box comes up monitoring.
+ *
+ * presets.cpp reached the same conclusion first, for the same reason, and
+ * state_tracks() there is worth reading beside this: parameter locks rewrite a
+ * patch value on every step and put it back when the track stops, and counting
+ * those as edits would store the lock's momentary value rather than the one the
+ * player set. Identical shape, different owner.
+ *
+ * Nothing is lost by it. The two other Internal writers that can reach a
+ * persisted id are usb_mode_resolve()'s corrective clamp — recomputed from the
+ * stored value at every boot, so persisting it only ever overwrote the choice
+ * the player is still entitled to — and ParamStore::resetRange(), which has no
+ * caller outside synth_params.cpp. A genuine reset-to-defaults arriving from
+ * the app, MIDI or the local UI carries that origin and is stored as always. */
 void param_listener(uint16_t id, float value, ParamOrigin origin, void*) {
     (void)value;
-    (void)origin;
+    if (origin == ParamOrigin::Internal) return;
     if (!s_ready || !is_persisted(id)) return;
     s_dirty.store(true, std::memory_order_relaxed);
     s_dirty_seq.fetch_add(1, std::memory_order_relaxed);

@@ -248,7 +248,94 @@ static void register_global_params() {
  * `dry` joins after it, recorded without effects. `mon` joins after the
  * looper entirely — heard, never recorded, which is what makes it safe to
  * leave a live microphone monitored while looping. Only the position
- * `in.route` selects carries gain; the other two return on a compare. */
+ * `in.route` selects carries gain; the other two return on a compare.
+ *
+ * The chain below is written as three pieces rather than one function (S45),
+ * because the P4 runs it as a two-core pipeline and the alternative was two
+ * copies of the order. Everything about *what* runs and in what sequence lives
+ * in the three chain_* helpers; the entry points after them add only the cycle
+ * markers and, where the pipeline is compiled in, the stage boundary.
+ *
+ * The boundary is between chain_voices() and chain_pre_fx(), and it is the
+ * only place in the chain where it could be. Everywhere else something
+ * downstream writes state that something upstream reads back inside the same
+ * block: drums_pre_fx() renders into a scratch buffer that drums_post_fx() and
+ * the FX bus compressor's key tap (drums_block_hit()) both read, and the three
+ * input mix points have to agree with what audio_io_in_fx_block() hands the
+ * noise-reduction units down to the last multiply. All of that stays whole on
+ * the bus stage; what crosses to the voice stage is a piece with one output and
+ * no readers. */
+static inline void SYNTH_RENDER_IRAM chain_voices(float* l, float* r,
+                                                  size_t frames, void* ctx) {
+    voice_manager_render(l, r, frames, ctx);
+}
+
+static inline void SYNTH_RENDER_IRAM chain_pre_fx(float* l, float* r,
+                                                  size_t frames) {
+    drums_pre_fx(l, r, frames);
+    audio_io_line_in_fx(l, r, frames);
+}
+
+static inline void SYNTH_RENDER_IRAM chain_post_fx(float* l, float* r,
+                                                   size_t frames) {
+    drums_post_fx(l, r, frames);
+    audio_io_line_in_dry(l, r, frames);
+    looper_process(l, r, frames);
+    /* After the record tap: monitored, never printed into a take. */
+    audio_io_line_in_mon(l, r, frames);
+    /* The sampler's capture point (S44), and its placement *is* the definition
+     * of `smp.src = bus`: after the looper, so resampling captures the loops
+     * that are playing, and before the metronome, so a count-in never ends up
+     * inside the sample it was counting in. Both are the same two reasons the
+     * looper's own record tap sits where it does. */
+    sampler_capture(l, r, frames);
+    /* After the looper on purpose: the metronome is monitoring, not material,
+     * and mixing it earlier printed count-in ticks into the take. */
+    drums_render_click(l, r, frames);
+}
+
+#if SYNTH_ENABLE_SPLIT_RENDER
+
+/* The voice stage, one block ahead of the sink. */
+static void SYNTH_RENDER_IRAM render_stage_a(float* out_l, float* out_r,
+                                             size_t frames, void* ctx) {
+    const uint32_t c0 = esp_cpu_get_cycle_count();
+    chain_voices(out_l, out_r, frames, ctx);
+    /* The one piece of state that has to cross the cut: the note-start tap the
+     * vocoder retriggers on, produced here and read by the FX bus a block
+     * later. Inside the measured window because it is part of the stage's
+     * work, and after chain_voices() because that is what fills it. */
+    voice_manager_stage_block_note();
+    audio_io_report_stage_voices(esp_cpu_get_cycle_count() - c0);
+}
+
+/* The bus stage, on the block the voice stage finished one period ago, and
+ * then the sink.
+ *
+ * `voi` on the heartbeat therefore means voices *only* here, where on a
+ * single-core build it also carries the drum bus and the input mix. That is
+ * the meter following the hardware rather than drifting from it: the three
+ * numbers now read as voice stage | bus stage, which is the split that says
+ * which of the two to take load off. */
+static void SYNTH_RENDER_IRAM render_stage_b(float* out_l, float* out_r,
+                                             size_t frames, void* ctx) {
+    (void)ctx; /* the voice stage got it; nothing downstream needs one */
+    const uint32_t c1 = esp_cpu_get_cycle_count();
+    /* Before anything in this stage can ask for it, and in particular before
+     * fx_process(): this is what makes voice_manager_block_note() answer for
+     * the block being finished rather than the one the voice stage is
+     * building. */
+    voice_manager_take_block_note();
+    chain_pre_fx(out_l, out_r, frames);
+    fx_process(out_l, out_r, frames);
+    const uint32_t c2 = esp_cpu_get_cycle_count();
+    chain_post_fx(out_l, out_r, frames);
+    const uint32_t c3 = esp_cpu_get_cycle_count();
+    audio_io_report_stage_fx_loop(c2 - c1, c3 - c2);
+}
+
+#else
+
 static void SYNTH_RENDER_IRAM render_chain(float* out_l, float* out_r,
                                            size_t frames, void* ctx) {
     /* Cycle-counter reads so the heartbeat can attribute the load to a stage
@@ -257,32 +344,30 @@ static void SYNTH_RENDER_IRAM render_chain(float* out_l, float* out_r,
      * curves (polyphony vs hit density vs always-on vs track count). The
      * drum bus is folded into the voices figure: both scale with how much is
      * sounding, and a fourth number would not have changed any diagnosis so
-     * far. */
+     * far. The input mix is folded in with it, for the same reason — it would
+     * never have earned a number of its own. */
     const uint32_t c0 = esp_cpu_get_cycle_count();
-    voice_manager_render(out_l, out_r, frames, ctx);
-    drums_pre_fx(out_l, out_r, frames);
-    /* Before the c1 marker, so the input's cost folds into `voi` alongside
-     * the drums rather than earning a fourth number nobody would read. */
-    audio_io_line_in_fx(out_l, out_r, frames);
+    chain_voices(out_l, out_r, frames, ctx);
+    chain_pre_fx(out_l, out_r, frames);
     const uint32_t c1 = esp_cpu_get_cycle_count();
     fx_process(out_l, out_r, frames);
     const uint32_t c2 = esp_cpu_get_cycle_count();
-    drums_post_fx(out_l, out_r, frames);
-    audio_io_line_in_dry(out_l, out_r, frames);
-    looper_process(out_l, out_r, frames);
-    /* After the record tap: monitored, never printed into a take. */
-    audio_io_line_in_mon(out_l, out_r, frames);
-    /* The sampler's capture point (S44), and its placement *is* the definition
-     * of `smp.src = bus`: after the looper, so resampling captures the loops
-     * that are playing, and before the metronome, so a count-in never ends up
-     * inside the sample it was counting in. Both are the same two reasons the
-     * looper's own record tap sits where it does. */
-    sampler_capture(out_l, out_r, frames);
-    /* After the looper on purpose: the metronome is monitoring, not material,
-     * and mixing it earlier printed count-in ticks into the take. */
-    drums_render_click(out_l, out_r, frames);
+    chain_post_fx(out_l, out_r, frames);
     const uint32_t c3 = esp_cpu_get_cycle_count();
     audio_io_report_stages(c1 - c0, c2 - c1, c3 - c2);
+}
+
+#endif /* SYNTH_ENABLE_SPLIT_RENDER */
+
+/* One place for "start the audio engine": which entry point that is depends on
+ * the build, and the call itself appears twice below — either side of
+ * codec_init(), for the OSYNTH_CODEC_INIT_BEFORE_I2S A/B. */
+static esp_err_t start_audio(void) {
+#if SYNTH_ENABLE_SPLIT_RENDER
+    return audio_io_start_split(render_stage_a, render_stage_b, nullptr);
+#else
+    return audio_io_start(render_chain, nullptr);
+#endif
 }
 
 extern "C" void app_main(void) {
@@ -377,7 +462,7 @@ extern "C" void app_main(void) {
     }
 
 #if !OSYNTH_CODEC_INIT_BEFORE_I2S
-    ESP_ERROR_CHECK(audio_io_start(render_chain, nullptr));
+    ESP_ERROR_CHECK(start_audio());
 #endif
 
     /* Deliberately not ESP_ERROR_CHECKed — a codec that fails to answer leaves
@@ -394,7 +479,7 @@ extern "C" void app_main(void) {
 #endif
 
 #if OSYNTH_CODEC_INIT_BEFORE_I2S
-    ESP_ERROR_CHECK(audio_io_start(render_chain, nullptr));
+    ESP_ERROR_CHECK(start_audio());
 #endif
 
 #if !OSYNTH_ES8311_INIT_BEFORE_I2S
@@ -470,6 +555,7 @@ extern "C" void app_main(void) {
                       * take out exactly the number that says the input is
                       * not clocking. */
     char sink_seg[64];
+    char pipe_seg[32]; /* the voice stage falling behind (S45) */
     /* Deadline misses as of the previous beat, for the warning below. The
      * first beat only records the baseline: the blocks either side of
      * codec_init() reliably miss a few, that is a boot transient rather than
@@ -498,6 +584,24 @@ extern "C" void app_main(void) {
                      esp_err_to_name((esp_err_t)st.sink_last_err));
         } else {
             sink_seg[0] = '\0';
+        }
+
+        /* Appended on the same terms and for the same reason (S45): a healthy
+         * board never prints it, and a board that does has a fault the
+         * underrun count beside it cannot express. An underrun is a core that
+         * ran out of *budget*; a stall is the bus stage with nothing to work
+         * on at all, because the voice stage never delivered — starved of
+         * scheduling rather than of DSP. The output is silence either way,
+         * which is exactly why the two need separating from here.
+         *
+         * An over-budget voice stage is the *other* one: it delivers late, not
+         * never, so it shows up in `underruns` and a dsp figure near 100 while
+         * this stays at zero. */
+        if (st.pipe_stalls != 0) {
+            snprintf(pipe_seg, sizeof(pipe_seg), " | PIPE STALL %u",
+                     (unsigned)st.pipe_stalls);
+        } else {
+            pipe_seg[0] = '\0';
         }
 
         /* The render chain missed deadlines during this window.
@@ -643,7 +747,7 @@ extern "C" void app_main(void) {
                  "alive | heap free %u (min %u) | audio blocks %u, underruns %u, "
                  "dsp %.1f%% (pk %.1f%%) [voi %.1f fx %.1f loop %.1f] | "
                  "out pk %.2f, sat %u | voices %u/%d (+%d drum) | engine %s | "
-                 "ble %s%s%s%s",
+                 "ble %s%s%s%s%s",
                  (unsigned)esp_get_free_heap_size(),
                  (unsigned)esp_get_minimum_free_heap_size(),
                  (unsigned)st.blocks_rendered, (unsigned)st.underruns,
@@ -653,7 +757,7 @@ extern "C" void app_main(void) {
                  (unsigned)voice_manager_active_voices(),
                  SYNTH_VOICES, drums_active_voices(),
                  eng != nullptr ? eng->name : "none",
-                 ble_ctrl_state_name(), usb_seg, in_seg, sink_seg);
+                 ble_ctrl_state_name(), usb_seg, in_seg, sink_seg, pipe_seg);
     }
 #endif
 }

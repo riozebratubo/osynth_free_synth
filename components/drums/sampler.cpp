@@ -213,7 +213,15 @@ inline uint32_t ms_to_frames(float ms) {
  * taken as "nobody has an opinion".
  *
  * `smp.src = bus` never borrows anything — the bus is the thing already coming
- * out of the speakers. */
+ * out of the speakers.
+ *
+ * The origin on both writes is load-bearing, not decoration. in.route is a
+ * persisted setting, and ParamOrigin::Internal is what keeps a borrowed value
+ * out of NVS (persist.cpp's param_listener). Without that, a reset taken while
+ * a pad was still armed stored `mon` permanently, and the player's `off` came
+ * back as monitoring on the next boot — which is how S45c found it. Anything
+ * added here that moves a persisted parameter temporarily has to carry the same
+ * origin for the same reason. */
 constexpr uint16_t kInRoutePid = 0x0008; /* PID_LINE_IN_ROUTE */
 constexpr float kInRouteMon = 1.0f;
 int s_route_saved = -1; /* -1 = not borrowed */

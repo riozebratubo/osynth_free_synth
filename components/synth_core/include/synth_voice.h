@@ -17,6 +17,7 @@
 
 #include "esp_err.h"
 
+#include "synth_config.h" /* SYNTH_ENABLE_SPLIT_RENDER, for the tap hooks */
 #include "synth_engine.h"
 
 #ifdef __cplusplus
@@ -63,8 +64,31 @@ void voice_manager_note_on(uint8_t note, uint8_t velocity);
  * voice_manager_render() has run in this callback, gets the previous block.
  *
  * The vocoder's sample replay is the caller -- it restarts the recorded
- * phrase on each note. */
+ * phrase on each note.
+ *
+ * Under the two-core pipeline (S45) the two halves of that contract land on
+ * different cores a block apart, so the value has to travel with the block
+ * rather than sit in a byte. The two calls below are how, and the render
+ * stages in main.cpp are their only callers. */
 uint8_t voice_manager_block_note(void);
+
+#if SYNTH_ENABLE_SPLIT_RENDER
+/* On the voice stage, immediately after voice_manager_render(): file this
+ * block's tap into the slot that will reach the FX bus one block period from
+ * now. */
+void voice_manager_stage_block_note(void);
+
+/* On the bus stage, before the FX bus runs: make the slot belonging to the
+ * block now being finished the one voice_manager_block_note() answers with.
+ *
+ * The pair is safe for the same reason the audio bus's two slots are, and it
+ * is deliberately the same argument rather than a new one: each is called
+ * exactly once per block by a stage that runs exactly once per block, so the
+ * producer is always one slot ahead of the consumer and the two never name the
+ * same one. Calling either from anywhere else breaks that, and would present
+ * as a vocoder that retriggers on the wrong note. */
+void voice_manager_take_block_note(void);
+#endif
 void voice_manager_note_off(uint8_t note);
 void voice_manager_all_notes_off(void); /* release everything (CC 123) */
 void voice_manager_all_sound_off(void); /* immediate silence (CC 120) */
