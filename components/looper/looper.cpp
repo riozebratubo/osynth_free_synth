@@ -272,6 +272,13 @@ const ParamDesc kParams[] = {
      0.0f, 1.0f, 1.0f, nullptr, 0},
     {LOOP_PID_LEVEL(7), "loop.lvl8", ParamType::Float, ParamCurve::Linear,
      0.0f, 1.0f, 1.0f, nullptr, 0},
+    {LOOP_PID_CLICK, "loop.click", ParamType::Bool, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0}, /* metronome; off — a synth that ticked
+                                     * on its own at power-on would be a bug
+                                     * report. The level is drums.click. */
+    {LOOP_PID_RECCLICK, "loop.recclick", ParamType::Bool, ParamCurve::Linear,
+     0.0f, 1.0f, 0.0f, nullptr, 0}, /* metronome while recording; same level,
+                                     * same reason to default off */
 };
 constexpr size_t kParamCount = sizeof(kParams) / sizeof(kParams[0]);
 
@@ -317,6 +324,16 @@ inline float loop_param_max_s() {
 }
 
 const std::atomic<float>* s_lvl[LOOP_TRACKS];
+/* loop.click, read by beat_cb on the clock task. Null until register_params
+ * binds it, which beat_cb tolerates as "no metronome" — the subscription is
+ * live from looper_init and there is no ordering guarantee worth asserting
+ * for a control that is off by default anyway. */
+const std::atomic<float>* s_p_metro = nullptr;
+/* loop.recclick, and the transport it is conditioned on. loop.mode is read
+ * from the store rather than through s_ctl_mode because that shadow belongs to
+ * loop_ctl and this runs on the clock task; the store is where the two agree. */
+const std::atomic<float>* s_p_metro_rec = nullptr;
+const std::atomic<float>* s_p_mode = nullptr;
 
 /* ---- shared state (ownership per the header comment) ---- */
 
@@ -1072,6 +1089,47 @@ void ctl_arm_cancel() {
 /* Clock task. Short by construction: click, decrement, and hand the start
  * over to loop_ctl. */
 void beat_cb(int beat_in_bar, void*) {
+    /* The metronome (loop.click), ahead of everything else here because it is
+     * not part of the arm: it ticks on every beat whether a take is armed,
+     * recording, playing or stopped, and the early return below is only about
+     * the countdown.
+     *
+     * It cannot reach a take. drums_render_click() mixes past the looper's
+     * record tap and past the FX bus, which is exactly what the count-in
+     * click below already depends on.
+     *
+     * Overlapping a count-in beat costs nothing: drums_click() is a single
+     * atomic the audio task consumes once per block, so two arms on the same
+     * beat are one tick. The count-in's deliberate silence on the downbeat
+     * the take opens on is not extended here either — that silence exists so
+     * four counts do not become five, while a timekeeper that dropped the
+     * beat at the top of the take would simply be wrong. */
+    bool tick = s_p_metro != nullptr &&
+                s_p_metro->load(std::memory_order_relaxed) >= 0.5f;
+
+    /* The record metronome (loop.recclick): the same click, gated on the
+     * looper being in record.
+     *
+     * On loop.mode and not on an open take, deliberately. Pressing rec sets
+     * the mode immediately and the arm only delays the take, so this is
+     * already ticking through the count-in and carries straight on into the
+     * recording — which is the point of it, and why the beat the take opens
+     * on is *not* silent here the way loop.countin alone leaves it. It also
+     * keeps ticking through a punch-in waiting for the loop to wrap, where
+     * no take is open yet but the rec button is lit.
+     *
+     * Both metronomes on is one tick, not two: drums_click() is a single
+     * atomic the audio task consumes once per block. `tick` short-circuits
+     * anyway, so the common case does not even load the second pair. */
+    if (!tick && s_p_metro_rec != nullptr && s_p_mode != nullptr &&
+        s_p_metro_rec->load(std::memory_order_relaxed) >= 0.5f) {
+        const int mode =
+            (int)(s_p_mode->load(std::memory_order_relaxed) + 0.5f);
+        tick = mode == MODE_REC;
+    }
+
+    if (tick) drums_click(beat_in_bar == 0);
+
     /* Compare-exchange rather than a plain decrement: if loop_ctl zeroed the
      * countdown between the load and here, the arm is gone and this beat must
      * not resurrect it. */
@@ -1088,7 +1146,12 @@ void beat_cb(int beat_in_bar, void*) {
         /* Deliberately no click on this beat. It is the downbeat the take
          * opens on, and the four counts have already been given on the four
          * beats before it — clicking here would be counting to five, and it
-         * put the last tick at sample zero of the loop. */
+         * put the last tick at sample zero of the loop.
+         *
+         * Only the count-in's own click is meant: either metronome above has
+         * already ticked this beat, and should have. For one that goes on
+         * running through the take this is beat 1, and skipping it would put
+         * a hole at the top of every take. */
         s_arm_fire.store(true, std::memory_order_release);
         s_flags.fetch_or(kFlagArmFire, std::memory_order_release);
     } else {
@@ -2247,6 +2310,13 @@ extern "C" esp_err_t looper_init(void) {
      * rather than only the filled ones, and "cannot happen" is a poor thing
      * to have a render-path dereference resting on. Unity, not zero: a
      * missing control should leave the track audible. */
+    /* Not checked the way the levels below are: a null here is a metronome
+     * that never ticks, which is the same thing the parameter says when it is
+     * off. There is no silent-wrong-behaviour case to guard against. */
+    s_p_metro = ps.valuePtr(LOOP_PID_CLICK);
+    s_p_metro_rec = ps.valuePtr(LOOP_PID_RECCLICK);
+    s_p_mode = ps.valuePtr(LOOP_PID_MODE);
+
     static const std::atomic<float> s_lvl_unity{1.0f};
     for (int t = 0; t < LOOP_TRACKS; ++t) {
         s_lvl[t] = ps.valuePtr((uint16_t)LOOP_PID_LEVEL(t));

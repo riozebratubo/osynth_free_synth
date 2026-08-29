@@ -52,6 +52,12 @@ Rectangle {
     property string resizeMode: App.setting("keyboard_resize_mode") === "slider" ? "slider" : "divider"
     property int dividerThickness: Math.max(2, parseInt(App.setting("keyboard_divider_thickness")) || 5)
     property bool showNoteNames: App.settingIsTrue("keyboard_show_note_names")
+    // Whether the control strip shows its buttons. Deliberately NOT a setting:
+    // it is a per-take convenience for touch devices where the strip is close
+    // enough to the keys to be hit while playing, so every run starts with the
+    // buttons there - a player who hid them last week should not have to
+    // remember where the octave controls went.
+    property bool ribbonVisible: true
     // Computer-keyboard wiring, both toggleable from the control strip (and
     // from Settings ▸ Keyboard). computerKeys gates the whole key capture;
     // topRowDrums decides whether the top two rows fire drum pads or play a
@@ -88,6 +94,11 @@ Rectangle {
     onVisibleChanged: {
         if (visible) {
             reloadSettings()
+            // The Synth connections below are gated on `visible` and nothing
+            // replays what they missed, so a strip hidden while the params
+            // were discovered came back with no chord state: stale key labels,
+            // and now a chord button whose visibility depends on the param id.
+            refreshChordState()
         } else {
             // Hiding the strip takes the key-up with it: capture stops the
             // moment `visible` goes false, and the Connections below are gated
@@ -373,8 +384,10 @@ Rectangle {
         }
     }
 
-    // Control strip: octave shift (left) and key-area size slider (right, only in
-    // "slider" resize mode).
+    // Control strip: octave shift, the computer-key wiring and the latch /
+    // chord-mode toggles (left), the key-area size slider (right, only in
+    // "slider" resize mode), and the button that hides all of them (far
+    // right, always shown).
     Item {
         id: controlBar
         height: 30
@@ -383,6 +396,7 @@ Rectangle {
         anchors.right: parent.right
 
         Row {
+            visible: root.ribbonVisible
             anchors.left: parent.left
             anchors.leftMargin: 4
             anchors.verticalCenter: parent.verticalCenter
@@ -492,6 +506,70 @@ Rectangle {
                               : Tr.t("Q…I and 1…8 play a second octave. Click to fire the drum pads instead.")
             }
 
+            // What a key *does*, rather than which keys are wired up: latch and
+            // chord mode. Their own group, and not desktop-gated like the pair
+            // above - both are just as useful under a finger, which is also why
+            // this separator stays when the desktop-only buttons are gone.
+            Rectangle {
+                width: 1
+                height: 18
+                anchors.verticalCenter: parent.verticalCenter
+                color: Material.foreground
+                opacity: 0.2
+            }
+            ToolButton {
+                width: 34
+                text: "\uf08d"  // thumbtack: the note stays pinned down
+                font.family: App.fontAwesomeName
+                font.weight: Font.Black  // solid face
+                font.pointSize: UI.fontSize * 0.95
+                highlighted: root.hold
+                opacity: root.hold ? 1.0 : 0.45
+                // Written through the setting rather than the property, like
+                // Settings ▸ Keyboard: reloadSettings() is the one writer of
+                // `hold`, and onHoldChanged is what ends the latched notes when
+                // it goes off. Assigning the property here would give it a
+                // second writer for the Settings switch to disagree with.
+                //
+                // What is sounding goes first, in both directions, for the same
+                // reason the wiring buttons drop it: with latch on, both release
+                // paths bail out early (onComputerKeyReleased returns, and
+                // onTouchUpdated returns before it reconciles), so a key held
+                // across the click would never get its note-off.
+                onClicked: {
+                    root.releaseSounding()
+                    App.saveSetting("keyboard_hold", root.hold ? "false" : "true")
+                }
+                ToolTip.visible: hovered
+                ToolTip.text: root.hold
+                              ? Tr.t("Notes latch on. Click to play them momentarily again.")
+                              : Tr.t("Notes play momentarily. Click to latch them on.")
+            }
+            ToolButton {
+                // Firmware without the chord engine registers no chord.enable,
+                // and a button that cannot do anything is worse than an absent
+                // one - the Chord page hides its controls the same way.
+                visible: root.pidChordEnable >= 0
+                width: 34
+                text: "\uf5fd"  // layer-group: one key, a stack of notes
+                font.family: App.fontAwesomeName
+                font.weight: Font.Black  // solid face
+                font.pointSize: UI.fontSize * 0.95
+                highlighted: root.chordOn
+                opacity: root.chordOn ? 1.0 : 0.45
+                // Only the param is written: chordOn follows it back through
+                // refreshChordState(), which also re-labels the keys with the
+                // chord names. Nothing sounding is dropped here, unlike the
+                // buttons above - the firmware re-voices every held key when
+                // chord.enable moves (chord.cpp revoice_entry), so a key down
+                // across the click keeps playing and simply changes shape.
+                onClicked: Synth.setParam(root.pidChordEnable, root.chordOn ? 0 : 1)
+                ToolTip.visible: hovered
+                ToolTip.text: root.chordOn
+                              ? Tr.t("Chord mode is on: each key plays a chord. Click to play single notes.")
+                              : Tr.t("Each key plays a single note. Click to play chords instead.")
+            }
+
             Label {
                 text: root.hold ? "· " + Tr.t("hold") : ""
                 anchors.verticalCenter: parent.verticalCenter
@@ -501,8 +579,11 @@ Rectangle {
         }
 
         Row {
-            visible: root.resizeMode === "slider"
-            anchors.right: parent.right
+            // A slider is exactly the sort of thing a stray thumb moves, so it
+            // goes with the buttons; the toggle owns the right edge now, so
+            // this hangs off the toggle rather than off the strip.
+            visible: root.resizeMode === "slider" && root.ribbonVisible
+            anchors.right: ribbonToggle.left
             anchors.rightMargin: 8
             anchors.verticalCenter: parent.verticalCenter
             spacing: 4
@@ -523,6 +604,33 @@ Rectangle {
                 value: root.keyHeight
                 onMoved: root.setKeyHeight(value)
             }
+        }
+
+        // Hides every control above. On a phone or a small touch panel the
+        // strip sits a thumb's width from the keys, and a mistimed press lands
+        // on the octave buttons mid-take; with the ribbon away the whole strip
+        // is inert except for this one button, parked in the far corner.
+        //
+        // Its polarity is the opposite of the buttons it hides: they are dim
+        // until switched on, this one is dim in the state the app starts in
+        // (ribbon shown) and lights up while it is holding something back.
+        ToolButton {
+            id: ribbonToggle
+            width: 34
+            anchors.right: parent.right
+            anchors.rightMargin: 4
+            anchors.verticalCenter: parent.verticalCenter
+            text: root.ribbonVisible ? "\uf06e" : "\uf070"  // eye / eye-slash
+            font.family: App.fontAwesomeName
+            font.weight: Font.Black  // solid face
+            font.pointSize: UI.fontSize * 0.95
+            highlighted: !root.ribbonVisible
+            opacity: root.ribbonVisible ? 0.45 : 1.0
+            onClicked: root.ribbonVisible = !root.ribbonVisible
+            ToolTip.visible: hovered
+            ToolTip.text: root.ribbonVisible
+                          ? Tr.t("Hide the keyboard's buttons, so playing cannot hit them.")
+                          : Tr.t("The keyboard's buttons are hidden. Click to show them.")
         }
     }
 

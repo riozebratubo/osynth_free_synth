@@ -290,6 +290,8 @@ Pane {
                         }
 
                         SettingsSwitch {
+                            // Also a button in the keyboard's control strip
+                            // (the thumbtack), which writes this same setting.
                             text: Tr.t("Latch notes (hold)")
                             checked: App.settingIsTrue("keyboard_hold")
                             onToggled: App.saveSetting("keyboard_hold", checked ? "true" : "false")

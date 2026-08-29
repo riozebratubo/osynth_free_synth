@@ -103,6 +103,35 @@ extern "C" {
 
 #define LOOP_PID_LEVEL(t) (0x0610 + (t)) /* loop.lvl1..8, t = 0..7           */
 
+/* Metronome (S45). A click on every beat of the seq/arp clock, for playing
+ * along to while recording — so it must not end up *in* the recording, and
+ * does not: drums_render_click() mixes past the looper's record tap and past
+ * the FX bus, which is the same placement loop.countin's clicks already rely
+ * on. The level is drums.click, shared with the count-in.
+ *
+ * No tempo of its own. The beat grid it rides free-runs at seq.tempo (or the
+ * external MIDI clock when seq.clock says so) whether or not the sequencer is
+ * playing, so the metronome is the sequencer's tempo by construction rather
+ * than a second setting that could drift out of agreement with it.
+ *
+ * Off by default: it is a monitoring aid you ask for, and a synth that
+ * started ticking on its own at power-on would be a bug report. */
+#define LOOP_PID_CLICK  0x0618 /* loop.click  bool, metronome on             */
+
+/* The same click, but only while the looper is in record — and "in record"
+ * means loop.mode, not an open take, which is what makes this continue the
+ * count-in instead of starting after it. Pressing rec sets the mode at once;
+ * loop.sync and loop.countin only delay the take. So the four counts, the
+ * beat the take opens on (which loop.countin alone leaves silent) and the
+ * take itself are one unbroken tick, and a punch-in waiting for the loop to
+ * wrap is ticked through too.
+ *
+ * Independent of loop.click rather than a mode of it: wanting a click only
+ * while tracking and wanting one always are different habits, and a player
+ * who has both on hears one click, not two — drums_click() is a single atomic
+ * the audio task consumes once per block. */
+#define LOOP_PID_RECCLICK 0x0619 /* loop.recclick bool, metronome while rec  */
+
 #define LOOP_TRACKS 8
 
 /* Registers the 0x06xx params, hooks the ParamStore listener and starts the

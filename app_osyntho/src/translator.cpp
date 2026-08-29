@@ -554,6 +554,19 @@ Translator::Translator() {
       "Q…I e 1…8 tocam os pads de bateria. Clique para tocarem uma segunda oitava.";
   pt["Q…I and 1…8 play a second octave. Click to fire the drum pads instead."] =
       "Q…I e 1…8 tocam uma segunda oitava. Clique para tocarem os pads de bateria.";
+  pt["Notes latch on. Click to play them momentarily again."] =
+      "As notas ficam sustentadas. Clique para voltarem a tocar momentaneamente.";
+  pt["Notes play momentarily. Click to latch them on."] =
+      "As notas tocam momentaneamente. Clique para sustentá-las.";
+  pt["Chord mode is on: each key plays a chord. Click to play single notes."] =
+      "O modo acorde está ligado: cada tecla toca um acorde. Clique para tocar notas "
+      "simples.";
+  pt["Each key plays a single note. Click to play chords instead."] =
+      "Cada tecla toca uma nota simples. Clique para tocar acordes.";
+  pt["Hide the keyboard's buttons, so playing cannot hit them."] =
+      "Oculta os botões do teclado, para que tocar não os acione.";
+  pt["The keyboard's buttons are hidden. Click to show them."] =
+      "Os botões do teclado estão ocultos. Clique para mostrá-los.";
 }
 
 Translator* Translator::create(QQmlEngine*, QJSEngine*) {

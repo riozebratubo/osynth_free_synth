@@ -301,43 +301,93 @@ Item {
 
             Repeater {
                 model: Synth.seqTracks
-                delegate: Row {
-                    id: trackRow
+                // A Column, so each track is a number with its mute directly
+                // underneath: the mutes form their own row under the track
+                // switches and can be read across in one glance, which is the
+                // whole point of a mute row. Interleaved in a Row — "1 M 2 M
+                // 3 M" — eight tracks read as sixteen unrelated buttons.
+                //
+                // One Column per track rather than two Repeaters in two Flows,
+                // because the pair has to stay together: two independent rows
+                // come apart at the first wrap on a narrow phone, and at any
+                // width difference between a number and an M.
+                delegate: Column {
+                    id: trackCell
                     required property int index
                     spacing: 2
 
-                    // Safe as bindings, unlike the page-level ids above: a
-                    // delegate is only created once its model has content, and
-                    // both models (Synth.kitSlots, Synth.seqTracks) are filled
-                    // from responses requested at finishDiscovery() — i.e.
-                    // after every parameter's metadata is in. Any later model
-                    // change recreates the delegates and re-resolves these.
-                    readonly property int pidMute: Synth.paramIdForName("trk" + (index + 1) + ".mute")
-                    ParamValue { id: muteVal; paramId: trackRow.pidMute }
-                    readonly property bool muted: muteVal.on
-
-                    Button {
-                        text: trackRow.index + 1
-                        highlighted: Synth.editTrack === trackRow.index
-                        // Dimmed rather than marked: the M beside it now says
-                        // *which* state this is, so a second glyph in here only
-                        // competed with it for a very small button.
-                        opacity: trackRow.muted ? 0.45 : 1.0
-                        padding: 8
-                        onClicked: Synth.editTrack = trackRow.index
-                        // The long-press survives the button beside it: it is
-                        // the fastest gesture on a phone, where the M is a
-                        // small target, and it costs nothing to keep.
-                        // >= 0, matching the button beside it: paramIdForName
-                        // answers -1 for "no such name", and 0 is a real id.
-                        onPressAndHold: if (trackRow.pidMute >= 0)
-                                            Synth.setParam(trackRow.pidMute,
-                                                           trackRow.muted ? 0 : 1)
+                    // Resolved imperatively, like the page-level ids above
+                    // and for the same reason: paramIdForName() has no change
+                    // signal, so as a binding it answers once, when the
+                    // delegate is created, and keeps that answer forever.
+                    //
+                    // It used to be a binding, on the reasoning that delegates
+                    // only exist once Synth.seqTracks has content — i.e. after
+                    // SEQ_INFO, which finishDiscovery() asks for, by which
+                    // point every parameter's metadata is in. That last step
+                    // does not hold: finishDiscovery() is also reached when
+                    // the discovery budget expires with ids still unresolved
+                    // (kDiscoveryBudgetMs, synthcontroller.cpp), and
+                    // trk*.mute sits at the top of the id space (0x0430+), so
+                    // it is among the last the metadata pump reaches and the
+                    // first to be left out. The name then resolved to -1, the
+                    // M button's `visible` latched false, and the top-up that
+                    // filled the metadata in seconds later changed nothing —
+                    // mute was unreachable for the rest of the session, from
+                    // the long-press too, since it shares this guard.
+                    //
+                    // paramsDiscovered is the signal to re-ask: every newly
+                    // known PARAM_INFO schedules one, top-ups included.
+                    property int pidMute: -1
+                    function refreshPid(): void {
+                        pidMute = Synth.paramIdForName(
+                            "trk" + (trackCell.index + 1) + ".mute")
+                    }
+                    Component.onCompleted: refreshPid()
+                    // Non-visual, so the Column does not position it.
+                    property Connections _pidConn: Connections {
+                        target: Synth
+                        function onParamsDiscovered() { trackCell.refreshPid() }
                     }
 
-                    // Mute, in the open. It was a long-press and nothing else
-                    // before — undiscoverable, and impossible to read back at a
-                    // glance across eight tracks while playing.
+                    ParamValue { id: muteVal; paramId: trackCell.pidMute }
+                    readonly property bool muted: muteVal.on
+
+                    // Both buttons take the wider of the two, so the stack is
+                    // square and every mute sits exactly under its number.
+                    // Reading implicitWidth to set width is not a loop: a
+                    // Button's implicit size comes from its label, which never
+                    // reads the width back.
+                    readonly property real cellWidth:
+                        Math.max(trackBtn.implicitWidth, muteBtn.implicitWidth)
+
+                    Button {
+                        id: trackBtn
+                        width: trackCell.cellWidth
+                        text: trackCell.index + 1
+                        highlighted: Synth.editTrack === trackCell.index
+                        // Dimmed rather than marked: the M under it now says
+                        // *which* state this is, so a second glyph in here only
+                        // competed with it for a very small button.
+                        opacity: trackCell.muted ? 0.45 : 1.0
+                        padding: 8
+                        onClicked: Synth.editTrack = trackCell.index
+                        // The long-press survives the button under it: it is
+                        // the fastest gesture on a phone, where the M is a
+                        // small target, and it costs nothing to keep.
+                        // >= 0, matching the button under it: paramIdForName
+                        // answers -1 for "no such name", and 0 is a real id.
+                        onPressAndHold: if (trackCell.pidMute >= 0)
+                                            Synth.setParam(trackCell.pidMute,
+                                                           trackCell.muted ? 0 : 1)
+                    }
+
+                    // Mute. Not a volume control and never was: the firmware
+                    // gates the whole trigger branch on this parameter
+                    // (seq_play.cpp, track_audible in fire_step), so a muted
+                    // lane generates no note-ons and no drum hits at all —
+                    // there is no per-track audio path to attenuate, since
+                    // every lane feeds one engine and one voice bus.
                     //
                     // Synced, not plain-checkable: the firmware owns this
                     // parameter and moves it on its own (a loaded sequence or
@@ -345,21 +395,23 @@ Item {
                     // a `checked` the button assigned itself would go stale.
                     // See SyncedButton.qml.
                     SyncedButton {
+                        id: muteBtn
+                        width: trackCell.cellWidth
                         text: "M"
-                        visible: trackRow.pidMute >= 0
+                        visible: trackCell.pidMute >= 0
                         padding: 8
                         font.bold: true
                         // Red rather than the accent: mute is the one state
-                        // here that means "you are not hearing this", and it
+                        // here that means "this lane is not playing", and it
                         // has to read as different from the blue selection
-                        // highlight on the button it sits against.
+                        // highlight on the button it sits under.
                         Material.accent: "#FF5252"
                         // Filled when muted. The default checked Button is a
                         // very quiet change, which is not enough for a state
                         // you need to read across eight of these mid-take.
                         highlighted: checked
-                        modelChecked: trackRow.muted
-                        onToggled: Synth.setParam(trackRow.pidMute, checked ? 1 : 0)
+                        modelChecked: trackCell.muted
+                        onToggled: Synth.setParam(trackCell.pidMute, checked ? 1 : 0)
                     }
                 }
             }
@@ -705,13 +757,40 @@ Item {
                         value: root.sel.vel !== undefined ? root.sel.vel : 100
                         onEdited: (v) => Synth.setStepField(root.selectedStep, "vel", v)
                     }
+                    // How long the note is held, counted in steps — the same
+                    // unit as the grid's squares and as the track's own
+                    // Length, which is what you are thinking in when you want
+                    // a note to ring on over the next square. The firmware
+                    // stores the gate in 1/16 of a step; that encoding is
+                    // converted here and is not visible anywhere else.
+                    //
+                    // Whole steps only. The byte can express a fraction of a
+                    // step (a staccato gate), but a spinner that walks in
+                    // sixteenths of a square reads as broken next to a grid
+                    // whose unit is the square — and nothing has asked for
+                    // one yet. If something does, it belongs in this
+                    // conversion, not in StepField.
+                    //
+                    // 16 steps maps to 255, not 256, which the byte cannot
+                    // hold: the firmware calls that "a tie across the bar",
+                    // landing the note-off a hair before the next bar instead
+                    // of on top of it. Math.round carries 255 back to 16, so
+                    // the value round-trips. A gate that is not a multiple of
+                    // 16 — written by an older build, or by the firmware
+                    // itself — shows as the nearest whole step and is left
+                    // alone until the field is actually edited.
+                    //
+                    // A long note only rings over the steps that follow it
+                    // while they are empty: a lane is monophonic, so the next
+                    // trig on the same track cuts it short.
                     StepField {
-                        label: Tr.t("Gate")
-                        from: 1; to: 255
-                        // 16 = exactly one step; show it in step-lengths.
-                        suffix: "(" + ((root.sel.gate !== undefined ? root.sel.gate : 16) / 16.0).toFixed(2) + "x)"
-                        value: root.sel.gate !== undefined ? root.sel.gate : 16
-                        onEdited: (v) => Synth.setStepField(root.selectedStep, "gate", v)
+                        label: Tr.t("Length")
+                        from: 1; to: 16
+                        suffix: Tr.t("steps")
+                        value: Math.max(1, Math.round(
+                                   (root.sel.gate !== undefined ? root.sel.gate : 16) / 16))
+                        onEdited: (v) => Synth.setStepField(root.selectedStep, "gate",
+                                                            Math.min(255, v * 16))
                     }
                     StepField {
                         label: Tr.t("Probability")

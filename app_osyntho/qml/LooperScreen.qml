@@ -33,6 +33,14 @@ Item {
     property int idSync: -1
     property int idCountIn: -1
     property int idArmed: -1
+    // Metronome (S45): a click on every beat of the sequencer clock, mixed
+    // past the record tap so it never lands in a take.
+    property int idClick: -1
+    property bool clickOn: false
+    // The same click, but only while the looper is in record — so it runs on
+    // from the count-in into the take instead of starting after it.
+    property int idRecClick: -1
+    property bool recClickOn: false
     // Beats left before an armed take starts; 0 when not waiting.
     property int armedBeats: 0
     property bool syncOn: false
@@ -159,6 +167,12 @@ Item {
         idSync = Synth.paramIdForName("loop.sync")
         idCountIn = Synth.paramIdForName("loop.countin")
         idArmed = Synth.paramIdForName("loop.armed")
+        idClick = Synth.paramIdForName("loop.click")
+        if (idClick >= 0 && Synth.paramValueKnown(idClick))
+            clickOn = Synth.paramValue(idClick) > 0.5
+        idRecClick = Synth.paramIdForName("loop.recclick")
+        if (idRecClick >= 0 && Synth.paramValueKnown(idRecClick))
+            recClickOn = Synth.paramValue(idRecClick) > 0.5
         if (idArmed >= 0 && Synth.paramValueKnown(idArmed))
             armedBeats = Math.round(Synth.paramValue(idArmed))
         if (idSync >= 0 && Synth.paramValueKnown(idSync))
@@ -315,6 +329,8 @@ Item {
             else if (id === root.idArmed) root.armedBeats = Math.round(value)
             else if (id === root.idSync) root.syncOn = value > 0.5
             else if (id === root.idCountIn) root.countInOn = value > 0.5
+            else if (id === root.idClick) root.clickOn = value > 0.5
+            else if (id === root.idRecClick) root.recClickOn = value > 0.5
         }
     }
 
@@ -562,6 +578,7 @@ Item {
                     Row {
                         spacing: 8
                         visible: root.idSync >= 0 || root.idCountIn >= 0
+                                 || root.idClick >= 0 || root.idRecClick >= 0
 
                         // SyncedButton for the same reason the two switches
                         // above are re-asserted by hand: a press replaces a
@@ -586,6 +603,33 @@ Item {
                             ToolTip.visible: hovered
                             ToolTip.text: Tr.t("Four clicked beats before "
                                               + "recording begins.")
+                        }
+                        // Beside the count-in because it is the same click at
+                        // the same tempo, just running continuously — and it
+                        // is what you want *while* a take is going down, which
+                        // is where the eye already is.
+                        SyncedButton {
+                            text: Tr.t("Metronome")
+                            visible: root.idClick >= 0
+                            modelChecked: root.clickOn
+                            onToggled: Synth.setParam(root.idClick, checked ? 1 : 0)
+                            ToolTip.visible: hovered
+                            ToolTip.text: Tr.t("A click on every beat at the "
+                                              + "sequencer tempo. Never "
+                                              + "recorded into a take.")
+                        }
+                        // Next to the free-running one because they are the
+                        // same click and the choice between them is one
+                        // decision: always, or only while tracking.
+                        SyncedButton {
+                            text: Tr.t("Rec Metronome")
+                            visible: root.idRecClick >= 0
+                            modelChecked: root.recClickOn
+                            onToggled: Synth.setParam(root.idRecClick, checked ? 1 : 0)
+                            ToolTip.visible: hovered
+                            ToolTip.text: Tr.t("The same click, but only while "
+                                              + "recording — it runs on from "
+                                              + "the count-in into the take.")
                         }
                         Label {
                             visible: root.armedBeats > 0
