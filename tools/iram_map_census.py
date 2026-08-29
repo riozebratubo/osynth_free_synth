@@ -13,11 +13,24 @@ is exact: it reads the addresses the linker actually assigned.
     sram_low  0x4FF00000 + 0x2BBD0 (179,152 B) = IRAM code + .sdata/.data
     sram_high 0x4FF40000 + 0x60000 (393,216 B) = the spill target + heap
 
+FREE IS NOT HEADROOM (learned S47, the hard way). `.dram0.data` captures
+`*(.data .data.*)` as well as `*(.sdata)`, and `.data` ALSO has a fallback
+output section in sram_high (`.dram1.data`). So `.data` is placed greedily:
+it backfills whatever room IRAM gives up, and the raw free figure hardly
+moves. Freeing 2,254 B of IRAM moved FREE by -170 B, because 2,444 B of
+`.data` walked down into sram_low to fill the gap.
+
+`.sdata` is the only thing in that region with nowhere else to go. So:
+
+    IRAM headroom = sram_low - .iram0.text - .sdata
+
+is the number that says whether the next IRAM_ATTR function fits, and the
+`.data` sitting in sram_low is evictable slack, not consumption.
+
 .dram0.bss and .dram1.bss capture the SAME input patterns and .dram0.bss is
-declared first, so .bss is *eligible* for sram_low; in practice sram_low is so
-full that --enable-non-contiguous-regions spills all of it to .dram1.bss and
-.dram0.bss measures 0. Read that off the REGION SUMMARY rather than assuming
-either way -- the ordering is an IDF detail and has flipped before.
+declared first, so .bss is *eligible* for sram_low; whether it lands there
+depends on what is left after IRAM and .data. Read that off the REGION SUMMARY
+rather than assuming -- the ordering is an IDF detail and has flipped before.
 
 Usage:
     python tools/iram_map_census.py [map] [--objects] [--symbols] [--ours]
@@ -175,6 +188,17 @@ def main(argv):
     low_used = sum(totals.get(s, 0) for s in LOW_SECS)
     free = SRAM_LOW - low_used
 
+    # .sdata has no fallback output section anywhere in the script; .data has
+    # one in sram_high. Only the first genuinely consumes sram_low.
+    sdata = evictable = 0
+    for size, sec, _lib, _mem, _sym in chunks[".dram0.data"]:
+        if sec.startswith(".sdata") or sec.startswith(".srodata"):
+            sdata += size
+        else:
+            evictable += size
+    iram = totals.get(".iram0.text", 0)
+    headroom = SRAM_LOW - iram - sdata
+
     print("=" * 76)
     print("REGION SUMMARY")
     print("=" * 76)
@@ -183,10 +207,20 @@ def main(argv):
         print("  %-13s %s %10s  (%s padding)"
               % (s, region, format(totals.get(s, 0), ","), format(fills[s], ",")))
     print()
-    print("  sram_low  %s / %s used  (%.1f%%)     FREE: %s"
+    print("  sram_low  %s / %s used  (%.1f%%)     raw free: %s"
           % (format(low_used, ","), format(SRAM_LOW, ","),
              100.0 * low_used / SRAM_LOW, format(free, ",")))
-    if free < 8192:
+    print()
+    print("  IRAM HEADROOM  %s     <- the number that decides whether the"
+          % format(headroom, ","))
+    print("                             next IRAM_ATTR function links")
+    print("    = sram_low %s - .iram0.text %s - .sdata %s"
+          % (format(SRAM_LOW, ","), format(iram, ","), format(sdata, ",")))
+    print("    (%s of .data is sitting in sram_low as well, but it has a"
+          % format(evictable, ","))
+    print("     fallback in sram_high and is evicted automatically, so it is")
+    print("     slack rather than consumption -- see the module docstring.)")
+    if headroom < 8192:
         print("  ^ under 8 KB. Any new IRAM function can break the link.")
     print()
 

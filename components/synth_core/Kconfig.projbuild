@@ -895,6 +895,17 @@ menu "osynth Synthesizer"
             sdkconfig.defaults.esp32p4, which pays for the SD stack that
             way.
 
+            THE ONE EXCEPTION (S47): with CONFIG_SPIRAM_XIP_FROM_PSRAM on,
+            the paragraph above no longer applies. XiP moves the firmware
+            image off flash and into PSRAM, and on the P4 those are two
+            separate MSPI buses — so the code this option un-marks falls
+            back to PSRAM, not to flash, and a flash write cannot stall it.
+            The immunity becomes a property of where the image lives rather
+            than of IRAM_ATTR, and the attribute is redundant rather than
+            sacrificed. That is the only configuration in which turning
+            this off is the *right* first lever; without XiP it is still
+            the last one.
+
             The failure this answers does not say "region iram0
             overflowed" on the P4. It says
 

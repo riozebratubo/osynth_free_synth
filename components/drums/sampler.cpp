@@ -221,7 +221,17 @@ inline uint32_t ms_to_frames(float ms) {
  * a pad was still armed stored `mon` permanently, and the player's `off` came
  * back as monitoring on the next boot — which is how S45c found it. Anything
  * added here that moves a persisted parameter temporarily has to carry the same
- * origin for the same reason. */
+ * origin for the same reason.
+ *
+ * S47: the origin alone was not enough, and it is worth knowing why before
+ * relying on it. Not marking the borrow dirty stopped it *starting* a write,
+ * but persist.cpp then read the value back out of ParamStore when the write
+ * finally happened — so a borrow that began after some unrelated edit had
+ * already armed the timer was still the value that got stored. The same
+ * symptom, one step further along. It is fixed on that side, by snapshotting
+ * in the listener (persist.cpp's s_shadow), and the rule here is unchanged:
+ * carry ParamOrigin::Internal. Both guards are now needed, and neither
+ * substitutes for the other. */
 constexpr uint16_t kInRoutePid = 0x0008; /* PID_LINE_IN_ROUTE */
 constexpr float kInRouteMon = 1.0f;
 int s_route_saved = -1; /* -1 = not borrowed */

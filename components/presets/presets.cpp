@@ -68,6 +68,7 @@
 #include "engines.h"
 #include "fx.h" /* FX_PID_*: the S36 enable-switch migration */
 #include "persist.h" /* persist_owns(): the fence around the NVS settings */
+#include "sampler.h" /* SMP_PID_*: the recorder's transport is not patch data */
 #include "seq_model.h"
 #include "seqarp.h"
 #include "synth_config.h"
@@ -469,6 +470,38 @@ bool skip_id(uint16_t id) {
      * stored, but the kit selection and the audition trigger are not — a
      * preset that silently swapped the kit (or fired a hit) on load would be
      * a surprise, and the kit list differs per device anyway. */
+    /* The sampler's transport, triggers and telemetry (0x0751-0x0754,
+     * 0x075E, 0x0760-0x0767) — S47. Its *settings* are a patch value and stay
+     * stored: source, threshold, trim, normalise, pre-roll, ceiling, slicing,
+     * monitor, count-in and record trim are all how the recorder is set up,
+     * and they sit either side of this hole in the id space.
+     *
+     * What is excluded is everything that describes a gesture in progress.
+     * `smp.arm` is why this exists, and it took a whole session to find:
+     * arming a pad is restored on the next boot, sampler.cpp's param_listener
+     * does `(void)origin;` so it cannot tell a restore from a player tapping
+     * the pad, and it publishes SAMPLER_ARMED — which calls monitor_hold(),
+     * which borrows in.route from `off` to `mon`. The player had set the
+     * input to off; the box came up monitoring, with NVS still correctly
+     * holding `off` and nothing in any log to say why. The borrow is
+     * ParamOrigin::Internal and therefore never written, so the instrument
+     * disagreed with its own stored settings on every boot, indefinitely.
+     *
+     * `smp.rec` is the same restore and worse: it is the record gate, and a
+     * stored 1 would have the recorder trying to start a take during init.
+     * The triggers (erase, undo, save, the copy/duplicate pair) self-clear
+     * after they run, so restoring them re-runs an action the player already
+     * completed. The telemetry (state, pos, free, peak) is published by the
+     * firmware and read by the app; a restored value is stale by the first
+     * block and overwritten by the first publish.
+     *
+     * Same rule as DRUM_PID_TRIG below, which is here because a preset that
+     * fired a drum hit would be a surprise. A preset — or a power cycle —
+     * that arms the recorder is the same surprise with a longer tail. */
+    if ((id >= SMP_PID_ARM && id <= SMP_PID_UNDO) || id == SMP_PID_SAVE ||
+        (id >= SMP_PID_COPYFROM && id <= SMP_PID_PEAK)) {
+        return true;
+    }
     switch (id) {
         case DRUM_PID_KIT:
         case DRUM_PID_TRIG:

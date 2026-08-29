@@ -71,8 +71,142 @@ CONFIG_SPIRAM_MODE_HEX=y
 CONFIG_SPIRAM_SPEED_200M=y
 CONFIG_SPIRAM_IGNORE_NOTFOUND=y
 
+# --- XiP from PSRAM (S47) — UNDER EVALUATION, measure before trusting -------
+#
+# This moves the *firmware image* out of flash, not data out of internal RAM,
+# and those are constantly confused. At startup IDF copies `.flash.text`
+# (780,158 B) and `.flash.rodata` (740,124 B) — about 1.45 MB, against 32 MB
+# of PSRAM — into external RAM and executes from there. In memory.ld.in you
+# can see it happen: `irom_seg`/`drom_seg` move from 0x40000020 to 0x48000020.
+# The symbol `select`s SPIRAM_FETCH_INSTRUCTIONS, SPIRAM_RODATA and
+# SPIRAM_FLASH_LOAD_TO_PSRAM, so do not set those by hand — kconfgen
+# recomputes them from this line.
+#
+# **Why it is here.** It is the only lever that attacks the actual constraint.
+# `sram_low` (179,152 B) holds every byte of IRAM code and is 96.9 % full with
+# 5,572 B spare; our components alone are 100,240 B of it, and essentially all
+# of that exists because of SYNTH_RENDER_IRAM, whose whole purpose (see the
+# note in synth_core/include/synth_config.h) is that a flash-cache miss during
+# BLE or LittleFS traffic must not add jitter to the audio deadline. IDF's own
+# help for this option says it removes that requirement:
+#
+#     "code that requires execution during an MSPI1 Flash operation does not
+#      have to be placed in IRAM ... P4 flash and PSRAM are using two separate
+#      SPI buses"
+#
+# Two buses is the load-bearing part, and it is a P4 fact that does not hold
+# on the S3. If it holds in practice, OSYNTH_RENDER_IN_IRAM=n stops being the
+# blunt instrument of last resort and becomes correct — worth ~98 KB, which is
+# not a slice of the shortage but the whole of it.
+#
+# **What it might cost, and why this is step 1 of 2.** Instruction fetch now
+# shares the PSRAM bus with everything line_alloc() put there: the FX delay
+# lines, the looper's streaming ring, the drum-kit pools, the vocoder capture.
+# IDF is explicit that the impact "will be dependent on your app usage of
+# PSRAM" and asks for profiling. So this line goes in ALONE, with
+# OSYNTH_RENDER_IN_IRAM still y: nothing should change functionally, and the
+# per-stage meter isolates bus contention while the render path is still
+# flash-immune. Only if that reads clean does OSYNTH_RENDER_IN_IRAM=n follow,
+# and that second step is decided by listening under preset-write and BLE
+# traffic at full polyphony, not by the meter — that failure mode is exactly
+# what the meter cannot see.
+#
+# **What it costs unconditionally**: ~1.45 MB copied before app_main, so boot
+# is slower; and SPIRAM_IGNORE_NOTFOUND above becomes an empty promise, since
+# firmware executing from PSRAM has nothing to fall back to if the PSRAM does
+# not enumerate. IDF encodes no `depends on` for that — it is ours to know.
+#
+# If the audio degrades and the cause is not obvious, this line is the first
+# thing to remove — but read the paragraph below first, because it does not
+# come out alone.
+CONFIG_SPIRAM_XIP_FROM_PSRAM=y
+
+# --- paying XiP's entry fee (S47) ------------------------------------------
+#
+# XiP does not link on its own. It COSTS internal RAM before it saves any:
+# SPIRAM_XIP_FROM_PSRAM selects SPIRAM_FLASH_LOAD_TO_PSRAM, and three
+# linker.lf files key `(noflash)` mappings off that symbol — esp_psram
+# (mmu_psram_flash_v2, esp_psram_init, s_psram_chip_init), esp_hw_support
+# (pmu_init, pmu_param) and esp_mm (esp_mmu_map_init, ext_mem_layout). That is
+# the code which repoints the MMU from flash to PSRAM, so it can live in
+# neither, and it is paid up front whether or not OSYNTH_RENDER_IN_IRAM ever
+# goes off. Measured at 6,627 B by tools/xip_iram_cost.py, against the 5,572 B
+# the previous good link had spare — so the first attempt overflowed and the
+# linker reported 7,563 bytes of discarded sections, naming libspi_flash text
+# that had nothing to do with the change.
+#
+# These two pay for it, and are worth having regardless. Both were found by
+# tools/iram_map_census.py against the last good map:
+#
+#   HEAP_PLACE_FUNCTION_INTO_FLASH  8,070 B (tlsf 6,156 + heap_caps 698 +
+#     multi_heap 624 + heap_caps_base 592). The documented hazard is a heap
+#     call from an IRAM ISR running with the cache disabled; `grep -rn
+#     ESP_INTR_FLAG_IRAM components/ main/` returns nothing, so osynth
+#     registers no such handler. IDF encodes the same hazard as
+#     `SPI_MASTER_ISR_IN_IRAM depends on !HEAP_PLACE_FUNCTION_INTO_FLASH`,
+#     which S41 already satisfied. With XiP on it is safer still: "flash" is
+#     PSRAM now, and a flash write no longer takes the instruction cache down.
+#
+#   SPI_SLAVE_ISR_IN_IRAM=n         1,422 B (gdma.c 684 + gdma_hal_axi 364 +
+#     gdma_hal_ahb_v2 350 + gdma_hal_top 24). This is the loose end from S41:
+#     that session set SPI_MASTER_ISR_IN_IRAM=n expecting the four symbols it
+#     `select`s back as margin, and three never returned, because
+#     SPI_SLAVE_ISR_IN_IRAM — IDF default y — selects the same GDMA pair and
+#     ESP_PERIPH_CTRL_FUNC_IN_IRAM. There is no SPI slave anywhere in this
+#     tree. ESP_PERIPH_CTRL_FUNC_IN_IRAM still will not come back: it is also
+#     selected by ESP_HW_SUPPORT_FUNC_IN_IRAM, which is promptless and pinned
+#     y unless SPI_FLASH_AUTO_SUSPEND is on. Do not try to set the selected
+#     symbols by hand; kconfgen recomputes them.
+#
+# Net effect on the region: -6,627 + 9,492 = about 2,900 B better than the
+# last good link, so the render path stays entirely IRAM-resident and this
+# build measures ONLY XiP's PSRAM-bus contention. That is the isolation the
+# original plan wanted, reached with config rather than with a code change.
+CONFIG_HEAP_PLACE_FUNCTION_INTO_FLASH=y
+CONFIG_SPI_SLAVE_ISR_IN_IRAM=n
+
+# --- step 2: the render path leaves IRAM (S47) ------------------------------
+#
+# This is what the whole XiP exercise was for. OSYNTH_RENDER_IN_IRAM is worth
+# 100,236 B of `sram_low` on this build — fx 39,372, engines 26,392, graph
+# 15,482, looper 6,562, drums 5,254, audio_io 3,820, synth_core 3,170 — which
+# is 59 % of everything in the region and more than every other lever on this
+# page put together.
+#
+# Its Kconfig help calls turning it off "a big, blunt lever, and usually the
+# wrong first one", and that was right for every build before this one: it
+# bought internal RAM by giving up the flash-cache immunity that filesystem
+# and radio traffic make matter. **XiP removes the premise.** With
+# SPIRAM_XIP_FROM_PSRAM on, the code this un-marks does not fall back to
+# flash — it falls back to PSRAM, on the P4's other MSPI bus, where a flash
+# write cannot reach it. The immunity is now a property of where the image
+# lives rather than of IRAM_ATTR, so the attribute is redundant, not
+# sacrificed.
+#
+# Step 1 measured the part that could go wrong on its own: XiP with the render
+# path still IRAM-resident, so any change in the heartbeat's `dsp`/`pk` was
+# instruction fetch competing with line_alloc()'s delay lines, the looper ring
+# and the kit pools on the PSRAM bus. That read clean.
+#
+# What step 2 adds on top is the render path itself fetching from PSRAM
+# instead of internal RAM. L2 (128 KB) should hold the hot loops after first
+# touch, but this is the change with real DSP-throughput risk, and the
+# heartbeat is the instrument: compare `dsp X.X%% (pk X.X%%) [voi fx loop]`
+# against the pre-XiP baseline of ~71 %% peak at 8 voices.
+#
+# **The acceptance test is not the meter.** It is full polyphony while forcing
+# preset writes (LittleFS) and BLE traffic, listening for the crackle that
+# SYNTH_RENDER_IRAM was added to prevent. If XiP is doing its job that traffic
+# is inaudible; if it is not, this line is what to revert first, and the two
+# Tier-1 symbols above will still hold the link together on their own.
+CONFIG_OSYNTH_RENDER_IN_IRAM=n
+
 # Loop-persistence flash backend: same warning as on the S3 — do NOT enable
 # SPI_FLASH_AUTO_SUSPEND. See the long note in sdkconfig.defaults.esp32s3.
+# Note that XiP above reaches the same goal by the other road: auto-suspend
+# keeps the flash cache alive through a write, XiP takes the code off flash
+# altogether. They are alternatives, and XiP is the one that is safe with a
+# 1.33 ms audio deadline and BLE running.
 # CONFIG_SPI_FLASH_AUTO_SUSPEND is not set
 
 # External I2S DAC is the master out, as on the S3.
@@ -860,7 +994,23 @@ CONFIG_OSYNTH_SD_PWR_LDO_MV=3300
 # OSYNTH_RENDER_IN_IRAM=n, which is the wrong direction: it is worth ~98 KB but
 # gives up the render path's cache-miss immunity precisely when the new SD
 # traffic makes it matter most.
-CONFIG_SPI_MASTER_ISR_IN_IRAM=n
+#
+# **S47: this line is now dead, and must stay commented out.** Enabling
+# HEAP_PLACE_FUNCTION_INTO_FLASH (see the XiP block near the top of this file)
+# makes SPI_MASTER_ISR_IN_IRAM unreachable — IDF gives it
+# `depends on !HEAP_PLACE_FUNCTION_INTO_FLASH`, because the SPI master
+# allocates DMA transaction buffers through the heap API and an IRAM ISR
+# cannot call into a heap that lives in flash. kconfgen therefore drops the
+# symbol from sdkconfig entirely, and setting it here is what
+# tools/check_sdkconfig_drift.py reports as "wants n, build has <absent>".
+#
+# Nothing is lost: the outcome this line asked for is now guaranteed by the
+# dependency instead of by the setting. But the coupling runs the other way
+# too — turning HEAP_PLACE_FUNCTION_INTO_FLASH back off returns
+# SPI_MASTER_ISR_IN_IRAM to its `default y` and brings the SD stack's ~8.1 KB
+# back into IRAM, so **uncomment this line in the same edit** if that ever
+# happens. The S41 reasoning above is still the reason it should be n.
+# CONFIG_SPI_MASTER_ISR_IN_IRAM=n
 
 # --- Serial MIDI ------------------------------------------------------------
 
