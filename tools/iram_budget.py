@@ -16,12 +16,37 @@ THE LAYOUT, because none of it is guessable from the errors:
       .dram1.bss   > dram_high_seg   .bss + .sbss + COMMON
       .dram1.heap_start > dram_high_seg
 
-So `sram_low` = IRAM code + *initialised* data, and nothing else. .bss is not
-in it: `.dram1.bss` targets sram_high and is declared ~330 lines before
-`.dram0.bss`, so it claims every .bss input section first. Moving a .bss
-object to PSRAM therefore frees sram_high, which is not the constraint, and
-does exactly nothing for a sram_low overflow. (Asked and answered the hard
-way.)
+CORRECTED 2026-08-28 -- the paragraph that used to be here was WRONG, and it
+cost three rounds of work aimed at the wrong region. Verify against the
+generated build/esp-idf/esp_system/ld/sections.ld before trusting either
+version; the ordering below is an IDF detail and has already flipped once.
+
+It used to say that .bss lives in sram_high because `.dram1.bss` is declared
+first. In this IDF the order is the other way round:
+
+      679-789   .dram0.data  > dram_seg        .data + .sdata
+      809-823   .dram0.bss   > dram_seg        *(.bss .bss.*)   <-- FIRST
+      824-926   .dram1.data  > dram_high_seg   .data only
+      927-940   .dram1.bss   > dram_high_seg   *(.bss .bss.*)
+
+Both bss sections capture `*(.bss .bss.*)`, and `.dram0.bss` -- which targets
+sram_low -- comes first, so it claims them and sram_high gets only what
+--enable-non-contiguous-regions spills into it. So:
+
+    sram_low = IRAM code + .data + .sdata + .bss
+
+which means moving an object from .data to .bss does NOTHING for a sram_low
+overflow: both are in it. (Measured: moving 1,016 bytes of fx.cpp statics from
+.data to .bss left the discarded total unchanged to the byte.)
+
+WHY .sdata IS ALWAYS THE CASUALTY, and why the total is not the shortfall.
+`.dram1.data` captures `*(.data .data.*)` but NOT `.sdata`, and `.sdata`
+appears in exactly one place in the whole script (inside `.dram0.data`). So
+.data and .bss have a fallback region and .sdata has none. When sram_low
+fills, .sdata is the only thing the linker cannot place anywhere, and the
+"Total discarded" figure is therefore **how much .sdata exists**, quantised by
+whole input sections -- not how far over budget you are. Expect it to sit on
+one value across several real improvements and then drop in a step.
 
 WHAT IRAM ACTUALLY IS. Summing sections named .iram* undercounts badly. The
 .iram0.text output section carries ~350 per-object rules from IDF's linker
@@ -70,11 +95,13 @@ DEFAULT_BUILD = os.path.join(ROOT, "build")
 
 SRAM_LOW = 0x4FF2BBD0 - 0x4FF00000  # 175 KB, from memory.ld
 
-# .iram* is what IRAM_ATTR / SYNTH_RENDER_IRAM produce. .data/.sdata are the
-# initialised-data half of the same region. .bss deliberately absent: it lives
-# in sram_high -- see the header.
+# .iram* is what IRAM_ATTR / SYNTH_RENDER_IRAM produce; .data/.sdata/.bss are
+# the rest of the same region -- see the header for why .bss is in it (it was
+# excluded here until 2026-08-28, which is what made this tool agree with a
+# wrong model instead of contradicting it).
 IRAM_RE = re.compile(r"^\.iram\d*(\.|$)")
 DATA_RE = re.compile(r"^\.(data|sdata)(\.|$)")
+BSS_RE = re.compile(r"^\.(bss|sbss)(\.|$)")
 
 OURS = {
     "fx", "fx_gpl", "synth_core", "engines", "graph", "audio_io", "looper",

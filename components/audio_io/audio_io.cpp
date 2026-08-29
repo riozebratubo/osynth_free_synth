@@ -422,6 +422,19 @@ constexpr float kVolStep = 0.125f;
 uint32_t s_dith = 0x6d5f3781u;
 
 inline int16_t to_i16_dith(float v) {
+    /* NaN, before anything else, and for the reason f2i16() in synth_line.h
+     * spells out: the conversion below saturates a NaN to INT32_MAX, so
+     * without this one compare a single NaN sample leaves the box as +full
+     * scale on both channels — and because soft_clip() upstream deliberately
+     * does not fence non-finite input (a size decision, see the note above
+     * it), a NaN that has settled into a recursive filter's state arrives
+     * here every sample. That is a DC rail, not a click.
+     *
+     * This is the fence that note points at. It is a separate copy rather
+     * than a call to f2i16() only because the dither has to be added before
+     * the conversion; the rule the two implement is the same one, and it
+     * should stay the same one. */
+    if (v != v) return 0;
     uint32_t x = s_dith;
     x ^= x << 13;
     x ^= x >> 17;

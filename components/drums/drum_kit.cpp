@@ -394,8 +394,16 @@ uint32_t wav_read_mono(FILE* f, const WavInfo& w, int16_t* dst,
                 acc += v;
             }
             acc /= (float)ch;
-            if (acc > 0.999f) acc = 0.999f;
-            if (acc < -0.999f) acc = -0.999f;
+            /* Written as a rejection rather than two clamps because of the
+             * one input this decoder does not control: a 32-bit float WAV
+             * (fmt_tag 3) may carry a NaN, which passes `> 0.999f` and
+             * `< -0.999f` both, and converting one is undefined — a wild
+             * int16 written into a pad from a file off the SD card. This form
+             * sends it to silence and clamps everything else exactly as
+             * before. */
+            if (!(acc > -0.999f && acc < 0.999f)) {
+                acc = (acc > 0.0f) ? 0.999f : (acc < 0.0f ? -0.999f : 0.0f);
+            }
             dst[done + i] = (int16_t)(acc * 32767.0f);
         }
         done += n;

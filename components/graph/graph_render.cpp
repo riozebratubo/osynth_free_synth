@@ -56,12 +56,11 @@ float* s_buf[kMaxBufs] = {};
 float* s_zero = nullptr; /* one row of silence, shared by every unpatched
                           * audio input of every voice (read-only) */
 
-/* Control-rate outputs, one float per voice per slot, plus the previous
- * block's value for the ramp described in the file header. 12 x 8 x 4 B x 2
- * is under 800 bytes, which is why control-rate routing is effectively
- * free and audio-rate routing is not. */
-float s_ctl[kMaxNodes][kRenderRows];
-float s_ctl_prev[kMaxNodes][kRenderRows];
+/* Control-rate outputs live on the voice (VoiceState::ctl / ctl_prev), not in
+ * a global keyed by render row — see the note there for what that cost. They
+ * are still one float per slot per voice plus the previous block's, which is
+ * why control-rate routing is effectively free and audio-rate routing is not.
+ */
 
 /* Per-slot parameter smoothers (S21). Keyed by slot rather than stored in
  * the plan so that a cable edit — which rebuilds the plan but leaves every
@@ -148,6 +147,19 @@ inline float psm_exp(const Plan& pl, int slot, int p, float dflt) {
     return dsp::smooth_exp(s_sm[slot][p], pval(pl, slot, p, dflt));
 }
 
+/* A bypassed audio node passes its input through — except that its output
+ * buffer may *be* its input buffer. graph_compile.cpp writes an audio node's
+ * result over an input whose only consumer is that node and whose live range
+ * ends there (the in-place reuse pass), and the factory patch already compiles
+ * to a single audio buffer that way. The per-sample kernels are fine with it —
+ * they read and write one index in lockstep, which is what the reuse pass
+ * checks for — but `memcpy` requires its regions not to overlap, and dst == src
+ * overlaps completely. It worked, and was undefined; there is nothing to copy
+ * in that case anyway. */
+inline void copy_or_alias(float* dst, const float* src, size_t n) {
+    if (dst != src) memcpy(dst, src, n * sizeof(float));
+}
+
 /* Audio input row for one voice: the real buffer, or shared silence. */
 inline const float* audio_in(const PlanNode& n, int port, int v) {
     return (n.in_buf[port] >= 0) ? buf_row(n.in_buf[port], v) : s_zero;
@@ -157,9 +169,9 @@ inline const float* audio_in(const PlanNode& n, int port, int v) {
  * per-voice value; an *audio* source is coerced by taking the block's last
  * sample. Coercing rather than refusing is deliberate — see the rate note
  * in graph_compile.cpp. */
-inline float mod_in(const PlanNode& n, int port, int v, size_t frames,
-                    float dflt) {
-    if (n.in_ctl[port] >= 0) return s_ctl[n.in_ctl[port]][v];
+inline float mod_in(const PlanNode& n, int port, const VoiceState& vs, int v,
+                    size_t frames, float dflt) {
+    if (n.in_ctl[port] >= 0) return vs.ctl[n.in_ctl[port]];
     if (n.in_buf[port] >= 0) return buf_row(n.in_buf[port], v)[frames - 1];
     return dflt;
 }
@@ -167,9 +179,9 @@ inline float mod_in(const PlanNode& n, int port, int v, size_t frames,
 /* Previous-block value of a modulation input, for the linear ramp. Matches
  * mod_in()'s fallbacks so an unpatched input ramps from and to the same
  * constant (i.e. does not ramp at all). */
-inline float mod_in_prev(const PlanNode& n, int port, int v, size_t frames,
-                         float dflt) {
-    if (n.in_ctl[port] >= 0) return s_ctl_prev[n.in_ctl[port]][v];
+inline float mod_in_prev(const PlanNode& n, int port, const VoiceState& vs,
+                         int v, size_t frames, float dflt) {
+    if (n.in_ctl[port] >= 0) return vs.ctl_prev[n.in_ctl[port]];
     if (n.in_buf[port] >= 0) return buf_row(n.in_buf[port], v)[frames - 1];
     return dflt;
 }
@@ -230,8 +242,6 @@ esp_err_t render_init() {
             return ESP_ERR_NO_MEM;
         }
     }
-    memset(s_ctl, 0, sizeof(s_ctl));
-    memset(s_ctl_prev, 0, sizeof(s_ctl_prev));
     /* The voiceless row is never pooled, so nothing else ever resets it — and
      * a zero xorshift word is zero forever, which would make a Noise or S&H
      * node on that row permanently silent. Seeded here, once. */
@@ -337,6 +347,19 @@ void slot_reset(VoiceState& v, int slot) {
     v.n[slot].noise.s = 0x9E3779B9u ^ (uint32_t)(slot * 2654435761u) ^
                         (uint32_t)(uintptr_t)&v;
     if (v.n[slot].noise.s == 0) v.n[slot].noise.s = 0x9E3779B9u;
+    /* Whoever cleared it stamps what it is now; render_block() is the only
+     * caller that knows a kind, so the rest reset to Empty and re-seed on
+     * their next visit. */
+    v.kind[slot] = Kind::Empty;
+}
+
+/* Re-seed `slot` if this voice's bytes belong to a different kind, and stamp
+ * it. One byte compare per slot per voice per block in the settled case,
+ * which is every block but the one after a patch edit. */
+inline void slot_sync(VoiceState& v, int slot, Kind kind) {
+    if (SYNTH_LIKELY(v.kind[slot] == kind)) return;
+    slot_reset(v, slot);
+    v.kind[slot] = kind;
 }
 
 void voice_reset(VoiceState& v) {
@@ -344,7 +367,14 @@ void voice_reset(VoiceState& v) {
     v.vel = 0.0f;
     v.gate = 0.0f;
     v.rnd = 0.0f;
-    for (int i = 0; i < kMaxNodes; ++i) slot_reset(v, i);
+    for (int i = 0; i < kMaxNodes; ++i) {
+        slot_reset(v, i);
+        /* The control values are this voice's too (VoiceState::ctl), so a
+         * voice handed back to the pool must not carry an envelope level into
+         * whatever is patched next. */
+        v.ctl[i] = 0.0f;
+        v.ctl_prev[i] = 0.0f;
+    }
 }
 
 void note_on(VoiceState& v, uint8_t note, float vel01, bool was_sounding) {
@@ -360,6 +390,17 @@ void note_on(VoiceState& v, uint8_t note, float vel01, bool was_sounding) {
 
     for (int t = 0; t < pl->n_nodes; ++t) {
         const PlanNode& n = pl->nodes[t];
+        /* Before the switch touches the union, not after.
+         *
+         * This runs from drain_events(), which is upstream of render_block()
+         * in the same callback — so a voice whose slot is still holding the
+         * previous kind's bytes would have its gate written into them here and
+         * then zeroed by the sync in the render, arriving Idle with v.gate at
+         * 1: held by voice_busy() and silent until the key came up. Syncing
+         * here means the state a note event writes is always the state the
+         * render will read. A no-op for every voice already in step, which is
+         * every voice on every block but the one after a patch edit. */
+        slot_sync(v, n.slot, n.kind);
         switch (n.kind) {
             case Kind::Env:
                 dsp::adsr_gate_on(v.n[n.slot].adsr);
@@ -392,6 +433,10 @@ void note_off(VoiceState& v) {
     const Plan* pl = s_live.load(std::memory_order_acquire);
     v.gate = 0.0f;
     for (int t = 0; t < pl->n_nodes; ++t) {
+        /* Same reason as note_on(): the release is written into the union, so
+         * the union has to be this kind's first. Free on a sounding voice,
+         * which is the only kind that can be receiving one. */
+        slot_sync(v, pl->nodes[t].slot, pl->nodes[t].kind);
         if (pl->nodes[t].kind == Kind::Env) {
             dsp::adsr_gate_off(v.n[pl->nodes[t].slot].adsr);
         }
@@ -505,23 +550,32 @@ void SYNTH_RENDER_IRAM render_block(void* const* in_states,
 
         /* A slot that changed kind must not inherit the previous kind's
          * smoothers: parameter index 1 might have been a cutoff in hertz
-         * and be a decay time in seconds now. */
+         * and be a decay time in seconds now. The smoothers are global — one
+         * set per slot for all voices — so this is the right place for them,
+         * and s_sm_kind is what says the kind moved. */
         if (s_sm_kind[slot] != node.kind) {
             for (int p = 0; p < kNodeParams; ++p) s_sm[slot][p] = dsp::Smooth{};
-            /* And the node state, which is a union: the incoming kind would
-             * otherwise read the outgoing kind's bytes as its own. Mostly
-             * that just means an odd first block, but not always — a Noise
-             * node leaves a raw xorshift word where a filter expects an
-             * integrator, and roughly one word in 250 is a NaN bit pattern.
-             * A NaN in a recursive filter never decays: the slot would stay
-             * silent until something reset it. Costs one slot per voice on a
-             * kind change and nothing at all in steady state. (S33 — the
-             * hazard predates it, but four filter kinds aliasing each other
-             * is what made it worth closing.) */
-            for (int v = 0; v < nv; ++v) {
-                slot_reset(*(VoiceState*)states[v], slot);
-            }
             s_sm_kind[slot] = node.kind;
+        }
+        /* The node state is a union, and the incoming kind would otherwise
+         * read the outgoing kind's bytes as its own. Mostly that just means an
+         * odd first block, but not always — a Noise node leaves a raw xorshift
+         * word where a filter expects an integrator, and roughly one word in
+         * 250 is a NaN bit pattern. A NaN in a recursive filter never decays:
+         * the slot would stay silent until something reset it. (S33 — the
+         * hazard predates it, but four filter kinds aliasing each other is
+         * what made it worth closing.)
+         *
+         * Per voice and every block, not once per kind change over whatever
+         * rows happened to be in `states` (S46). `states` holds only the
+         * *sounding* voices, so the old form reset two of eight and then
+         * updated the global record, leaving the other six to read stale bytes
+         * on their next note — and it missed the voiceless LineIn row entirely
+         * whenever a patch had no free-running LineIn on the block the kind
+         * moved. The stamp lives on the voice, so the question is asked of the
+         * voice; see VoiceState::kind. */
+        for (int v = 0; v < nv; ++v) {
+            slot_sync(*(VoiceState*)states[v], slot, node.kind);
         }
 
         switch (node.kind) {
@@ -545,7 +599,7 @@ void SYNTH_RENDER_IRAM render_block(void* const* in_states,
                 dsp::Osc& o = vs.n[slot].osc;
                 float* dst = buf_row(node.out_buf, v);
 
-                const float semis = mod_in(node, 1, v, nf, 0.0f) * 12.0f;
+                const float semis = mod_in(node, 1, vs, v, nf, 0.0f) * 12.0f;
                 const float hz = frames[v].freq_hz * b.mul *
                                  ((semis != 0.0f) ? exp2f(semis * (1.0f / 12.0f))
                                                   : 1.0f);
@@ -675,10 +729,10 @@ void SYNTH_RENDER_IRAM render_block(void* const* in_states,
                 const float* src = audio_in(node, 0, v);
                 float* dst = buf_row(node.out_buf, v);
                 if (!b.on) {
-                    memcpy(dst, src, nf * sizeof(float));
+                    copy_or_alias(dst, src, nf);
                     continue;
                 }
-                const float oct = b.cutamt * mod_in(node, 1, v, nf, 0.0f) +
+                const float oct = b.cutamt * mod_in(node, 1, vs, v, nf, 0.0f) +
                                   b.kbd * ((float)vs.note - 60.0f) * (1.0f / 12.0f);
                 const float hz = b.cutoff * exp2f(oct);
                 if (wide) {
@@ -727,10 +781,10 @@ void SYNTH_RENDER_IRAM render_block(void* const* in_states,
                 const float* src = audio_in(node, 0, v);
                 float* dst = buf_row(node.out_buf, v);
                 if (!b.on) {
-                    memcpy(dst, src, nf * sizeof(float));
+                    copy_or_alias(dst, src, nf);
                     continue;
                 }
-                const float oct = b.cutamt * mod_in(node, 1, v, nf, 0.0f) +
+                const float oct = b.cutamt * mod_in(node, 1, vs, v, nf, 0.0f) +
                                   b.kbd * ((float)vs.note - 60.0f) * (1.0f / 12.0f);
                 const dsp::LadderCoef fc = dsp::ladder_coef(
                     b.cutoff * exp2f(oct), b.reso, b.drive, kSr);
@@ -757,10 +811,10 @@ void SYNTH_RENDER_IRAM render_block(void* const* in_states,
                 const float* src = audio_in(node, 0, v);
                 float* dst = buf_row(node.out_buf, v);
                 if (!b.on) {
-                    memcpy(dst, src, nf * sizeof(float));
+                    copy_or_alias(dst, src, nf);
                     continue;
                 }
-                const float oct = b.cutamt * mod_in(node, 1, v, nf, 0.0f) +
+                const float oct = b.cutamt * mod_in(node, 1, vs, v, nf, 0.0f) +
                                   b.kbd * ((float)vs.note - 60.0f) * (1.0f / 12.0f);
                 const dsp::Svf2Coef fc = dsp::dual_coef(
                     b.cutoff * exp2f(oct), b.reso, spread, b.drive, kSr);
@@ -793,13 +847,14 @@ void SYNTH_RENDER_IRAM render_block(void* const* in_states,
                 const float* src = audio_in(node, 0, v);
                 float* dst = buf_row(node.out_buf, v);
                 if (!b.on) {
-                    memcpy(dst, src, nf * sizeof(float));
+                    copy_or_alias(dst, src, nf);
                     continue;
                 }
                 /* The cable moves the morph, not the cutoff — vowel_coef()
                  * clamps it, so an over-driven cable parks on "u" instead of
                  * wrapping round to "a". */
-                const float morph = b.vowel + b.modamt * mod_in(node, 1, v, nf, 0.0f);
+                const float morph =
+                    b.vowel + b.modamt * mod_in(node, 1, vs, v, nf, 0.0f);
                 const float oct = b.kbd * ((float)vs.note - 60.0f) * (1.0f / 12.0f);
                 const dsp::VowelCoef fc = dsp::vowel_coef(
                     morph, b.shift * exp2f(oct), b.reso, b.drive, kSr);
@@ -821,6 +876,7 @@ void SYNTH_RENDER_IRAM render_block(void* const* in_states,
             const float gain = psm(*pl, slot, pidx::VCA_GAIN, 1.0f);
             const float depth = psm(*pl, slot, pidx::VCA_DEPTH, 1.0f);
             for (int v = 0; v < nv; ++v) {
+                const VoiceState& vs = *(const VoiceState*)states[v];
                 const float* src = audio_in(node, 0, v);
                 float* dst = buf_row(node.out_buf, v);
                 if (node.in_buf[1] >= 0) {
@@ -834,8 +890,8 @@ void SYNTH_RENDER_IRAM render_block(void* const* in_states,
                     }
                 } else {
                     /* control gain: ramp across the block (file header) */
-                    const float c1 = mod_in(node, 1, v, nf, 1.0f);
-                    const float c0 = mod_in_prev(node, 1, v, nf, 1.0f);
+                    const float c1 = mod_in(node, 1, vs, v, nf, 1.0f);
+                    const float c0 = mod_in_prev(node, 1, vs, v, nf, 1.0f);
                     float ga = gain * (1.0f - depth + depth * c0);
                     const float gb = gain * (1.0f - depth + depth * c1);
                     if (ga < 0.0f) ga = 0.0f;
@@ -872,9 +928,11 @@ void SYNTH_RENDER_IRAM render_block(void* const* in_states,
             const float drive = psm_exp(*pl, slot, pidx::SHP_DRIVE, 1.0f);
             const float amt = psm(*pl, slot, pidx::SHP_AMT, 0.0f);
             for (int v = 0; v < nv; ++v) {
+                const VoiceState& vs = *(const VoiceState*)states[v];
                 const float* src = audio_in(node, 0, v);
                 float* dst = buf_row(node.out_buf, v);
-                const float d = drive * (1.0f + amt * mod_in(node, 1, v, nf, 0.0f));
+                const float d =
+                    drive * (1.0f + amt * mod_in(node, 1, vs, v, nf, 0.0f));
                 const float dd = (d < 0.01f) ? 0.01f : d;
                 /* Compensate so raising drive changes timbre, not level —
                  * otherwise the control doubles as a volume knob and the
@@ -902,6 +960,7 @@ void SYNTH_RENDER_IRAM render_block(void* const* in_states,
         case Kind::RingMod: {
             const float amount = psm(*pl, slot, pidx::RNG_AMOUNT, 1.0f);
             for (int v = 0; v < nv; ++v) {
+                const VoiceState& vs = *(const VoiceState*)states[v];
                 const float* a = audio_in(node, 0, v);
                 float* dst = buf_row(node.out_buf, v);
                 if (node.in_buf[1] >= 0) {
@@ -912,7 +971,7 @@ void SYNTH_RENDER_IRAM render_block(void* const* in_states,
                 } else {
                     /* nothing in the second jack: a ring modulator with one
                      * input is a wire */
-                    const float mb = mod_in(node, 1, v, nf, 1.0f);
+                    const float mb = mod_in(node, 1, vs, v, nf, 1.0f);
                     const float g = (1.0f - amount) + mb * amount;
                     for (size_t i = 0; i < nf; ++i) dst[i] = a[i] * g;
                 }
@@ -931,8 +990,8 @@ void SYNTH_RENDER_IRAM render_block(void* const* in_states,
                                     blk_rate);
             for (int v = 0; v < nv; ++v) {
                 VoiceState& vs = *(VoiceState*)states[v];
-                s_ctl_prev[slot][v] = s_ctl[slot][v];
-                s_ctl[slot][v] = dsp::adsr_next(vs.n[slot].adsr, b.coef);
+                vs.ctl_prev[slot] = vs.ctl[slot];
+                vs.ctl[slot] = dsp::adsr_next(vs.n[slot].adsr, b.coef);
             }
             break;
         }
@@ -949,12 +1008,12 @@ void SYNTH_RENDER_IRAM render_block(void* const* in_states,
                 VoiceState& vs = *(VoiceState*)states[v];
                 float inc = b.inc;
                 if (b.rateamt != 0.0f) {
-                    inc *= exp2f(b.rateamt * mod_in(node, 0, v, nf, 0.0f));
+                    inc *= exp2f(b.rateamt * mod_in(node, 0, vs, v, nf, 0.0f));
                 }
                 float x = dsp::lfo_next(vs.n[slot].lfo, b.wave, inc) * b.depth;
                 if (b.uni) x = x * 0.5f + 0.5f;
-                s_ctl_prev[slot][v] = s_ctl[slot][v];
-                s_ctl[slot][v] = x;
+                vs.ctl_prev[slot] = vs.ctl[slot];
+                vs.ctl[slot] = x;
             }
             break;
         }
@@ -972,11 +1031,11 @@ void SYNTH_RENDER_IRAM render_block(void* const* in_states,
                      * stepped modulator, which is what an S&H with an empty
                      * input jack does on hardware too. */
                     sh.held = (node.in_ctl[0] >= 0 || node.in_buf[0] >= 0)
-                                  ? mod_in(node, 0, v, nf, 0.0f)
+                                  ? mod_in(node, 0, vs, v, nf, 0.0f)
                                   : dsp::noise_next(sh.rng);
                 }
-                s_ctl_prev[slot][v] = s_ctl[slot][v];
-                s_ctl[slot][v] = sh.held;
+                vs.ctl_prev[slot] = vs.ctl[slot];
+                vs.ctl[slot] = sh.held;
             }
             break;
         }
@@ -986,13 +1045,14 @@ void SYNTH_RENDER_IRAM render_block(void* const* in_states,
             const float offset = psm(*pl, slot, pidx::MM_OFFSET, 0.0f);
             const int quant = (int)pval(*pl, slot, pidx::MM_QUANT, 0.0f);
             for (int v = 0; v < nv; ++v) {
-                float x = mod_in(node, 0, v, nf, 0.0f) * scale + offset;
+                VoiceState& vs = *(VoiceState*)states[v];
+                float x = mod_in(node, 0, vs, v, nf, 0.0f) * scale + offset;
                 if (quant > 0) {
                     const float q = (float)quant;
                     x = floorf(x * q + 0.5f) / q;
                 }
-                s_ctl_prev[slot][v] = s_ctl[slot][v];
-                s_ctl[slot][v] = x;
+                vs.ctl_prev[slot] = vs.ctl[slot];
+                vs.ctl[slot] = x;
             }
             break;
         }
@@ -1003,7 +1063,7 @@ void SYNTH_RENDER_IRAM render_block(void* const* in_states,
             const float bend = voice_manager_pitch_bend();
             const float wheel = synth_mod_wheel();
             for (int v = 0; v < nv; ++v) {
-                const VoiceState& vs = *(const VoiceState*)states[v];
+                VoiceState& vs = *(VoiceState*)states[v];
                 float x;
                 switch (src) {
                     case MidiSource::Note:
@@ -1015,8 +1075,8 @@ void SYNTH_RENDER_IRAM render_block(void* const* in_states,
                     case MidiSource::Rand:  x = vs.rnd; break;
                     default:                x = vs.vel; break;
                 }
-                s_ctl_prev[slot][v] = s_ctl[slot][v];
-                s_ctl[slot][v] = x;
+                vs.ctl_prev[slot] = vs.ctl[slot];
+                vs.ctl[slot] = x;
             }
             break;
         }
@@ -1033,9 +1093,10 @@ void SYNTH_RENDER_IRAM render_block(void* const* in_states,
             const float dgs = (g1 - g0) * inv_nf; /* the swap duck */
 
             for (int v = 0; v < nv; ++v) {
+                const VoiceState& vs = *(const VoiceState*)states[v];
                 const float* src = audio_in(node, 0, v);
-                const float a1 = mod_in(node, 1, v, nf, 1.0f);
-                const float a0 = mod_in_prev(node, 1, v, nf, 1.0f);
+                const float a1 = mod_in(node, 1, vs, v, nf, 1.0f);
+                const float a0 = mod_in_prev(node, 1, vs, v, nf, 1.0f);
                 float amp = a0 * level;
                 const float damp = (a1 * level - amp) * inv_nf;
                 const float gl = frames[v].gain_l * pl_g;

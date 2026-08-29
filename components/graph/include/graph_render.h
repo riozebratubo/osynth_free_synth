@@ -89,6 +89,45 @@ union NodeState {
 
 struct VoiceState {
     NodeState n[kMaxNodes];
+    /* Which kind each slot's union bytes currently hold, per voice.
+     *
+     * The union has to be re-seeded when a slot changes kind, or the incoming
+     * kind reads the outgoing one's bytes as its own — see slot_reset() in
+     * graph_render.cpp for why that is a NaN hazard and not just an odd first
+     * block. Until S46 that reset was driven off a *global* per-slot record of
+     * the last kind rendered, and applied to the voices in the render's
+     * `states` array, which is only the voices that are sounding: with two
+     * notes down, the other six kept the old kind's bytes and the global
+     * record was then updated, so they were never reset at all. Their next
+     * note read them.
+     *
+     * Per voice, the question answers itself — a voice whose stamp does not
+     * match the node's kind has not seen it, whether it was sounding at the
+     * time or not — and the voiceless LineIn row (idle_voice()) is covered by
+     * the same test rather than by having been present on the right block.
+     * Zero is Kind::Empty, which no plan node ever is, so a freshly zeroed
+     * voice reseeds every slot on its first visit. */
+    Kind kind[kMaxNodes] = {};
+    /* This voice's control-rate node outputs, and the previous block's, which
+     * the audio consumers ramp between (see the file header in
+     * graph_render.cpp).
+     *
+     * Per voice since S46, and that is a correctness fix rather than a tidy-up.
+     * They used to be `s_ctl[slot][row]` globals, where `row` is the position
+     * in the render's `states` array — and the voice manager *compacts* the
+     * sounding voices into that array, so a note starting or ending on a
+     * lower-numbered voice shifts every row above it onto a different voice.
+     * `ctl` survived that (it is written before it is read, in topological
+     * order, every block) but `ctl_prev` is by definition last block's, so
+     * after a shift it belonged to somebody else: a VCA or an Out then ramped
+     * one block from an unrelated envelope's value to its own. Worst case is a
+     * full-scale 1.33 ms ramp on a voice that should have been silent, which
+     * is a click on note changes at any polyphony above one.
+     *
+     * Attached to the voice, the row it is rendered on stops mattering. Costs
+     * 96 bytes a voice and gives back the two 432-byte globals. */
+    float ctl[kMaxNodes] = {};
+    float ctl_prev[kMaxNodes] = {};
     uint8_t note = 60;
     float vel = 0.0f;
     float gate = 0.0f;  /* 1 while held — the MidiSrc "gate" source */

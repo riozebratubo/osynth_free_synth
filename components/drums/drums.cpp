@@ -350,8 +350,16 @@ void SYNTH_RENDER_IRAM steal_declick(Voice& v) {
     /* Still waiting out its delay: it has emitted nothing, so there is no
      * discontinuity to cover. */
     if (v.delay > 0) return;
+    /* Tested as a float before the conversion, because a voice can legally be
+     * sitting outside the buffer when this is called. render_voices() advances
+     * `pos` past its bound and only notices at the top of the *next* sample,
+     * so a reversed voice that ran off the front is still active with a
+     * negative pos until the following block — and a float-to-unsigned
+     * conversion of a negative value is undefined, which is a wild index
+     * rather than a wrong one. There is nothing to declick out there in any
+     * case: the voice is about to be retired. */
+    if (!(v.pos >= 0.0f && v.pos < (float)(v.frames - 1))) return;
     const uint32_t i0 = (uint32_t)v.pos;
-    if (i0 >= v.frames - 1) return; /* ran off the end; already silent */
     const float frac = v.pos - (float)i0;
     const float a = sample_at(v.data, v.format, i0);
     const float b = sample_at(v.data, v.format, i0 + 1);
@@ -376,6 +384,18 @@ void SYNTH_RENDER_IRAM release_slot(int slot) {
              * release ramp would run forever against a signal that keeps
              * coming back round. */
             x.loop_end = 0;
+            /* ...and the bound goes back to the buffer's, or the voice would
+             * stop dead at the loop point instead of ringing out through
+             * whatever follows it. start_voice() aims the bound at the loop
+             * edge precisely because that is where a *looping* voice wraps;
+             * once it is not looping, the edge it may reach is the sample's
+             * again. The unreachable one of the pair is left where it is. */
+            const float last = (float)(x.frames > 0 ? x.frames - 1 : 0);
+            if (x.step >= 0.0f) {
+                x.hi = last;
+            } else {
+                x.lo = 0.0f;
+            }
         }
     }
 }
@@ -440,6 +460,28 @@ void start_voice(const drum_kit_t* kit, int slot, int vel, uint32_t delay) {
          * disagree about what a pad does. */
         v.loop_end = 0;
     }
+    /* The last frame a loop may name is frames-1, not frames, and the
+     * difference is the whole of whether `loop` loops at all.
+     *
+     * The playback bound below is `last` = frames-1, because the interpolator
+     * reads pos and pos+1. A loop that ends at `frames` therefore has a span
+     * one sample longer than the distance the voice can actually travel, so
+     * `fmodf(pos - loop_start, span)` at the moment it runs off is the
+     * identity — pos comes back unchanged, trips the out-of-range guard in
+     * render_voices(), and the voice ends. That is every whole-sample loop,
+     * i.e. every `loop` pad with no explicit points (the branch above) and
+     * every kit image whose loop_end == frames, which drum_kit.cpp accepts.
+     * Measured as "loop mode behaves exactly like gate" at any rate <= 1.
+     *
+     * Clamping here rather than in the wrap keeps the span, the playback
+     * bound and the safety guard all describing the same last frame. */
+    if (v.loop_end > 0 && s.frames > 0 && v.loop_end > s.frames - 1) {
+        v.loop_end = s.frames - 1;
+    }
+    /* A loop with under two frames in it is not a loop — same test the wrap
+     * in render_voices() makes on `span`, made once here so the bounds below
+     * never describe a degenerate region. */
+    if (v.loop_end != 0 && v.loop_start + 1 >= v.loop_end) v.loop_end = 0;
 
     /* Stored rate vs the engine's rate is the whole resampling story for a
      * one-shot; `tune` rides on top of it. Reverse flips the sign and starts
@@ -463,13 +505,18 @@ void start_voice(const drum_kit_t* kit, int slot, int vel, uint32_t delay) {
          * approaches that edge again after the first sample, so it has to be
          * handled here instead. */
         v.pos = fminf(last - ofs * last, last - 0.001f);
-        v.lo = 0.0f;
+        /* The bound a looping voice trips is the loop's own edge, not the
+         * buffer's: wrapping is what `loop_start`/`loop_end` mean, and taking
+         * the bound from the buffer instead is what made a loop pad play its
+         * sample once and stop (see the clamp above). A one-shot keeps the
+         * out-of-reach value it always had. */
+        v.lo = (v.loop_end != 0) ? (float)v.loop_start : 0.0f;
         v.hi = (float)s.frames + 1.0f; /* out of reach: only `lo` can trip */
     } else {
         v.step = rate;
         v.pos = ofs * last;
         v.lo = -1.0f; /* out of reach: only `hi` can trip */
-        v.hi = last;
+        v.hi = (v.loop_end != 0) ? fminf(last, (float)v.loop_end) : last;
     }
 
     v.gain_l = d.gain_l * amp;

@@ -39,6 +39,7 @@
 #include "drum_kit.h"
 #include "drums_priv.h"
 #include "synth_config.h"
+#include "synth_line.h"
 #include "synth_params.h"
 #include "synth_smooth.h"
 
@@ -187,11 +188,10 @@ UndoOp s_undo;
 
 /* ---- small helpers ---- */
 
-inline int16_t f2i16(float x) {
-    if (x > 0.999969f) x = 0.999969f;
-    if (x < -0.999969f) x = -0.999969f;
-    return (int16_t)(x * 32767.0f);
-}
+/* Shared since S46 (synth_line.h): the clamp already ran in the float domain
+ * here, but a NaN passes both of its compares untouched and the conversion of
+ * one is undefined. */
+using osynth::dsp::f2i16;
 
 inline uint32_t ms_to_frames(float ms) {
     if (ms < 0.0f) ms = 0.0f;

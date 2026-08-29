@@ -102,6 +102,7 @@
 #include "loop_store.h"
 #include "loop_stream.h"
 #include "synth_config.h"
+#include "synth_line.h"
 #include "synth_params.h"
 #include "synth_smooth.h"
 
@@ -619,12 +620,10 @@ inline bool audio_join_prearm(int t) {
 #endif
 }
 
-inline int16_t f2i16(float v) {
-    int32_t s = (int32_t)(v * 32767.0f);
-    if (s > 32767) s = 32767;
-    if (s < -32768) s = -32768;
-    return (int16_t)s;
-}
+/* Shared since S46 (synth_line.h). The clamp used to run on the int32 *after*
+ * the conversion, which is undefined for anything past 2^31 — and a NaN, which
+ * this bus can produce, passed both compares and converted to full scale. */
+using osynth::dsp::f2i16;
 
 inline void audio_raise(uint32_t bits) {
     s_evt.fetch_or(bits, std::memory_order_release);

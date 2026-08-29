@@ -446,6 +446,15 @@ const ParamDesc kParams[P_COUNT] = {
     /* ---- mic noise reduction (S42) ---- */
     {FX_PID_MNR_ON, "fx.mnr.on", ParamType::Bool, ParamCurve::Linear,
      0.0f, 1.0f, 0.0f, nullptr, 0},
+    /* `bus` here is not the same bargain it is on the two units below, and the
+     * difference is worth having at the control rather than only in the
+     * unit's own header ("mono, and the delay", above mnr_frame's constants):
+     * this one folds its source to mono and writes the cleaned result to both
+     * channels, so at full mix `bus` collapses the whole stereo image — a
+     * ping-pong delay, the granular panner and the stereo stage all arrive
+     * centred. That is the trade that makes the transform count affordable and
+     * it is the right one for a microphone, which is what the unit is for.
+     * fx.anr and fx.nr keep their channels apart and have no such cost. */
     {FX_PID_MNR_SRC, "fx.mnr.src", ParamType::Enum, ParamCurve::Linear,
      0.0f, (float)(kNrSrcCount - 1), 1.0f /* input */, kNrSrcs, kNrSrcCount},
     {FX_PID_MNR_AMOUNT, "fx.mnr.amount", ParamType::Float, ParamCurve::Linear,
@@ -2350,12 +2359,17 @@ constexpr float kVocClarityGain = 0.35f;
  * 240 KB, which is nothing next to the looper on a P4 or S3 and impossible on
  * a classic ESP32, where 0.75 s still holds a word or two.
  *
- * Recording is linear from the press, not circular: a circular buffer would
- * always hold the last N seconds, which sounds like the same thing but makes
- * the release edge decide where the phrase *starts*, and that is exactly the
- * timing nobody can hit — the mistake the spectral freeze made twice. Here
- * the press starts the recording and the release only ends it, so both edges
- * are ones a person can place. */
+ * Recording is circular (S46 — it was linear from the press until then; the
+ * VocoderFx note below has the failure that forced the change). The objection
+ * to a ring was that always holding the last N seconds makes the *release*
+ * edge decide where the phrase starts, which is a timing nobody can hit. That
+ * is still true, and it is why the press edge is kept: it drops the fill, so a
+ * phrase that had one starts where the button went down exactly as the linear
+ * form did. What the ring adds is an answer for the gesture that arrives
+ * without a press — which, because fx.voc.freeze is excluded from presets and
+ * therefore starts at 0 on every boot, was the player's *first* one every
+ * time. Both edges are still ones a person can place; only the case where one
+ * of them is missing changed. */
 #if CONFIG_SPIRAM
 constexpr float kVocSampS = 2.5f;
 #else
@@ -2379,11 +2393,31 @@ struct VocoderFx {
     float env_bb = 0.0f;  /* broadband modulator follower, opens sibilance */
     float env_car = 0.0f; /* carrier follower — see the sibilance block */
     float nrm = 1.0f;     /* fx.voc.norm scale, block rate */
-    /* Capture (S43). `rec` is linear: `rec_w` is the write cursor while
-     * recording and `rec_len` freezes it on release. `play` runs past
-     * `rec_len` and stays there, which is what makes the tail silent. */
+    /* Capture (S43; made circular in S46). `rec_w` is the write cursor and
+     * `rec_filled` how much valid audio sits behind it, both wrapping at
+     * `rec.len`; the release freezes them into `rec_start` + `rec_len`, and
+     * `play` is an offset from `rec_start` that runs past `rec_len` and stays
+     * there, which is what makes the tail silent.
+     *
+     * A *ring* and not the linear fill this was, because the press edge is
+     * not guaranteed to arrive. fx.voc.freeze defaults to 0 and is excluded
+     * from presets (presets.cpp), so it is 0 at every boot and `was_sampling`
+     * starts false to match — no edge. The unit therefore began recording the
+     * moment it was un-bypassed, filled in kVocSampS seconds and stopped, and
+     * the player's first press wrote the 0 that was already there: no edge,
+     * no reset, nothing recorded. The release then froze a phrase made of
+     * whatever the room was doing when the vocoder was switched on. It came
+     * right on the second gesture (was_sampling is true by then, so the press
+     * *is* an edge), which is exactly what made it look like it worked.
+     *
+     * Rolling, the release always takes the last kVocSampS seconds, so the
+     * gesture is correct with or without its press edge; the press is now an
+     * optimisation — it trims the phrase to start where the button went
+     * down — rather than the thing correctness rests on. */
     osynth::dsp::Line rec;
     uint32_t rec_w = 0;
+    uint32_t rec_filled = 0;
+    uint32_t rec_start = 0;
     uint32_t rec_len = 0;
     uint32_t play = 0;
     bool rec_ok = false;
@@ -2490,14 +2524,19 @@ NOINLINE_ATTR void vocoder_process(float* __restrict__ bl,
 
     if (sampling != v.was_sampling) {
         if (sampling) {
-            /* Release: the phrase ends wherever the recording got to, and the
-             * playhead is left at that end so nothing sounds until a note
-             * asks for it. */
-            v.rec_len = v.rec_w;
+            /* Release: the phrase is whatever is behind the write head — the
+             * span the press started, or the last kVocSampS seconds if there
+             * was no press. The playhead is left at the end so nothing sounds
+             * until a note asks for it. */
+            v.rec_len = v.rec_filled;
+            v.rec_start = (v.rec.len > 0)
+                              ? (v.rec_w + v.rec.len - v.rec_filled) % v.rec.len
+                              : 0;
             v.play = v.rec_len;
         } else {
-            /* Press: a new phrase starts here. */
-            v.rec_w = 0;
+            /* Press: a new phrase starts here. Only the *fill* is dropped —
+             * the write cursor keeps its place, so this costs no wrap. */
+            v.rec_filled = 0;
             v.rec_len = 0;
         }
         v.was_sampling = sampling;
@@ -2526,7 +2565,13 @@ NOINLINE_ATTR void vocoder_process(float* __restrict__ bl,
                 }
                 v.play = 0;
             }
-            s_voc_mod[i] = (float)v.rec.buf[v.play++] * (1.0f / 32768.0f);
+            /* `play` is an offset into the phrase, not an index into the
+             * buffer: the phrase starts wherever the ring's oldest retained
+             * sample is. One add and one compare against a phrase that can
+             * wrap the buffer exactly once. */
+            uint32_t idx = v.rec_start + v.play++;
+            if (idx >= v.rec.len) idx -= v.rec.len;
+            s_voc_mod[i] = (float)v.rec.buf[idx] * (1.0f / 32768.0f);
         }
         /* Live even past the end of the phrase: the analysis has to keep
          * running on the silence so the band envelopes decay through their
@@ -2534,16 +2579,17 @@ NOINLINE_ATTR void vocoder_process(float* __restrict__ bl,
         live = true;
     } else if (!sampling && fits && audio_io_in_mono(s_voc_mod, frames)) {
         live = true;
-        /* Record while the button is down, linearly, until the buffer is
-         * full. Full is not an error: it is the longest phrase this build can
-         * hold, and the release still ends it wherever it got to. */
-        if (v.rec_ok) {
-            for (size_t i = 0; i < frames && v.rec_w < v.rec.len; ++i) {
-                int32_t s = (int32_t)(s_voc_mod[i] * 32767.0f);
-                if (s > 32767) s = 32767;
-                if (s < -32768) s = -32768;
-                v.rec.buf[v.rec_w++] = (int16_t)s;
+        /* Record while the button is down, into the ring, always. Reaching
+         * the end is not the end of recording: it is the longest phrase this
+         * build can hold, so the oldest sample is dropped and the release
+         * still gets the most recent kVocSampS seconds. */
+        if (v.rec_ok && v.rec.len > 0) {
+            for (size_t i = 0; i < frames; ++i) {
+                v.rec.buf[v.rec_w] = osynth::dsp::f2i16(s_voc_mod[i]);
+                if (++v.rec_w >= v.rec.len) v.rec_w = 0;
             }
+            const uint32_t room = v.rec.len - v.rec_filled;
+            v.rec_filled += (frames < room) ? (uint32_t)frames : room;
         }
     }
     if (!live && !v.warned) {
@@ -3985,6 +4031,25 @@ void SYNTH_RENDER_IRAM eq_process(float* __restrict__ bl,
     const bool do_mid = fabsf(gmid) > kEqFlatDb;
     const bool do_hi = fabsf(ghi) > kEqFlatDb;
 
+    /* The corner frequencies smooth unconditionally, and ahead of the flat
+     * test below — including the early return.
+     *
+     * A smoother only moves when it is stepped, so building these inside the
+     * `if (do_lo)` arms left them frozen wherever the band was last run. Set a
+     * corner while its band sits at 0 dB — which is the ordinary way to use an
+     * EQ, you aim before you cut — and the first block after the gain comes up
+     * built the filter at the *old* frequency and then swept ~90 ms to the new
+     * one. A sweep nobody asked for, on a control that had already been moved
+     * and had visibly settled.
+     *
+     * Costs four float compares a block while nothing is moving, which is what
+     * a settled smoother is (synth_smooth.h), so the "on but flat" case below
+     * is still effectively free. */
+    const float lof = osynth::dsp::smooth_exp(e.s_lof, pvm(EQ_LOFREQ));
+    const float midf = osynth::dsp::smooth_exp(e.s_midf, pvm(EQ_MIDFREQ));
+    const float midq = osynth::dsp::smooth_exp(e.s_midq, pvm(EQ_MIDQ));
+    const float hif = osynth::dsp::smooth_exp(e.s_hif, pvm(EQ_HIFREQ));
+
     /* A band that has just gone flat stops being run, and its state would sit
      * there holding whatever it last saw — for minutes, if the knob is left
      * alone — to be emitted as a transient the moment it comes back. Clear on
@@ -4000,16 +4065,9 @@ void SYNTH_RENDER_IRAM eq_process(float* __restrict__ bl,
     if (!do_lo && !do_mid && !do_hi) return; /* on, but flat */
 
     Biquad clo, cmid, chi;
-    if (do_lo) {
-        clo = bq_shelf(osynth::dsp::smooth_exp(e.s_lof, pvm(EQ_LOFREQ)), glo, -1);
-    }
-    if (do_mid) {
-        cmid = bq_peak(osynth::dsp::smooth_exp(e.s_midf, pvm(EQ_MIDFREQ)), gmid,
-                       osynth::dsp::smooth_exp(e.s_midq, pvm(EQ_MIDQ)));
-    }
-    if (do_hi) {
-        chi = bq_shelf(osynth::dsp::smooth_exp(e.s_hif, pvm(EQ_HIFREQ)), ghi, 1);
-    }
+    if (do_lo) clo = bq_shelf(lof, glo, -1);
+    if (do_mid) cmid = bq_peak(midf, gmid, midq);
+    if (do_hi) chi = bq_shelf(hif, ghi, 1);
 
     for (size_t i = 0; i < frames; ++i) {
         float l = bl[i], r = br[i];
@@ -4205,8 +4263,16 @@ void SYNTH_RENDER_IRAM stereo_process(float* __restrict__ bl,
     const bool do_bass = bass > 20.0f + kStNeutralEps;
     const bool do_amp = fabsf(amp - 1.0f) > kStNeutralEps;
     const bool do_pan = fabsf(pan) > kStNeutralEps;
+
+    /* The crossover's integrator is dropped whenever it stops being run, and
+     * not only on the all-neutral return below. Easing `bass` back to its
+     * minimum while width, amp or pan keep the unit alive left it charged with
+     * the last side signal it saw, to be subtracted as a transient the moment
+     * the control came back up — the same falling-edge hazard the EQ's bands
+     * have, and the reason the all-neutral path already cleared it. */
+    if (!do_bass) s.lp = 0.0f;
+
     if (!do_width && !do_bass && !do_amp && !do_pan && !mono) {
-        s.lp = 0.0f;
         return;
     }
 

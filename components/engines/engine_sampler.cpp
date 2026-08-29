@@ -149,6 +149,15 @@ void arm_voice(SmpVoice& v, const drums_pad_t& p, float rate,
          * so the two surfaces cannot disagree about what a pad does. */
         v.loop_end = 0;
     }
+    /* Clamp to the last frame the interpolator can read, and drop a loop with
+     * under two frames in it. Both for the reason spelled out in drums.cpp's
+     * start_voice(), and kept identical to it because the two surfaces must
+     * agree about what a pad does: a loop ending at `frames` makes the wrap
+     * below a no-op, and the voice stops where it should have wrapped. */
+    if (v.loop_end > 0 && p.frames > 0 && v.loop_end > p.frames - 1) {
+        v.loop_end = p.frames - 1;
+    }
+    if (v.loop_end != 0 && v.loop_start + 1 >= v.loop_end) v.loop_end = 0;
 
     float ofs = p.start_ofs + extra_start;
     if (ofs < 0.0f) ofs = 0.0f;
@@ -157,13 +166,15 @@ void arm_voice(SmpVoice& v, const drums_pad_t& p, float rate,
     if (p.reverse != 0) {
         v.step = -rate;
         v.pos = fminf(last - ofs * last, last - 0.001f);
-        v.lo = 0.0f;
+        /* A looping voice trips on the loop's edge, a one-shot on the
+         * buffer's — see drums.cpp. */
+        v.lo = (v.loop_end != 0) ? (float)v.loop_start : 0.0f;
         v.hi = (float)p.frames + 1.0f;
     } else {
         v.step = rate;
         v.pos = ofs * last;
         v.lo = -1.0f;
-        v.hi = last;
+        v.hi = (v.loop_end != 0) ? fminf(last, (float)v.loop_end) : last;
     }
 
     /* Equal-power pan from the pad's own placement, scaled by smp.spread — a
@@ -329,9 +340,20 @@ void SYNTH_RENDER_IRAM smp_render(void* vs, const synth_voice_frame_t* f,
      * only thing that still touches the buffer, and it is a captured value
      * rather than a read. */
     if (SYNTH_UNLIKELY(v.data != nullptr && v.gen != b.gen)) {
-        const uint32_t i0 = (uint32_t)v.pos;
         float tail = 0.0f;
-        if (i0 + 1 < v.frames) {
+        /* Tested as a float before the conversion, and both ends of it, for
+         * the reason drums.cpp's steal_declick() spells out: a voice can
+         * legally be sitting outside its buffer when this runs. The range
+         * check in the sample loop below is at the *top* of an iteration, so
+         * the block's last `pos += step` is never checked — a reversed voice
+         * that ran off the front is still `data != nullptr` with a negative
+         * pos until the following block, and a float-to-unsigned conversion of
+         * a negative value is undefined, which is a wild index rather than a
+         * wrong one. `i0 + 1 < v.frames` alone only ever covered the far end.
+         * There is nothing to fade out there in either direction anyway: the
+         * voice is about to be retired. */
+        if (v.pos >= 0.0f && v.pos + 1.0f < (float)v.frames) {
+            const uint32_t i0 = (uint32_t)v.pos;
             tail = sample_at(v.data, v.format, b.ulaw, i0) * v.env.level;
         }
         v.drop = tail;

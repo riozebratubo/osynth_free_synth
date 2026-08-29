@@ -361,6 +361,15 @@ void WetReverb::render(const float* in_l, const float* in_r, float* out_l,
         comb_d_l[c] = dl;
         comb_d_r[c] = dr;
     }
+    /* The combs `size` is not currently using are held clean, so the one that
+     * comes back when it is turned up starts from a filter that has seen
+     * nothing rather than one charged at whatever damping was set minutes
+     * ago. The lines themselves are kept fed in the loop below — the two
+     * halves of the same fix, and see the note there for why it is one. */
+    for (int c = combs; c < kCombs; ++c) {
+        comb_damp_l_[c] = 0.0f;
+        comb_damp_r_[c] = 0.0f;
+    }
 
     const float comb_norm =
         (combs > 0) ? 1.0f / ((float)combs * kCombNorm) : 0.0f;
@@ -408,6 +417,35 @@ void WetReverb::render(const float* in_l, const float* in_r, float* out_l,
             comb_damp_r_[c] = damp_c * dr + (1.0f - damp_c) * comb_damp_r_[c];
             line_push(comb_r_[c], mono + comb_damp_r_[c] * fb);
             late_r += dr;
+        }
+        /* The combs above `combs` are kept fed with the input, and that is a
+         * correctness fix rather than a refinement.
+         *
+         * `size` selects between 4 and 12 combs. A comb outside the count is
+         * neither read nor written, so its line sits holding whatever was last
+         * pushed into it — and turning `size` back up reads that straight into
+         * the sum at full level, through the x16.7 output make-up. What comes
+         * out is a slice of tail from whenever `size` was last that high, which
+         * can be minutes. fx.rev.size is also an LFO destination ("rev sz"), so
+         * a modulated size cycles combs in and out and re-injects a slice from
+         * one LFO period ago on every cycle.
+         *
+         * Feeding them keeps the line current, so a comb that comes back
+         * carries recent input rather than a stale tail. Input only, no
+         * feedback and no read: what has to be true is that the line holds
+         * something continuous with now, and running the whole loop for combs
+         * nobody is listening to would double this algorithm's cost at the
+         * small-room settings to buy nothing audible. The residual step — one
+         * comb of correlated input joining the sum — is bounded and is inherent
+         * to the count changing at all; the unbounded stale burst is not.
+         *
+         * The same "kept primed while bypassed" reasoning the shared pre-delay
+         * in fx.cpp already runs on, and cheap for the same reason: it is one
+         * f2i16 and a store per comb per internal (half-rate) sample, falling to
+         * zero as `size` rises. */
+        for (int c = combs; c < kCombs; ++c) {
+            line_push(comb_l_[c], mono);
+            line_push(comb_r_[c], mono);
         }
         late_l *= comb_norm;
         late_r *= comb_norm;

@@ -81,6 +81,40 @@ inline float midi_to_freq(float note) {
  */
 inline constexpr float kSoftKnee = 0.80f;
 
+/* Non-finite input is deliberately NOT fenced here, unlike in fold() below,
+ * and that is a size decision rather than an oversight.
+ *
+ * A NaN fails the knee compare and passes through unchanged; an infinity
+ * makes `d * inf / (inf + d)`, i.e. inf/inf, so this manufactures one. Both
+ * would be worth catching — except that this function is the most heavily
+ * inlined thing in the render path. filt_next() alone expands it about a
+ * dozen times (svf_next_drive twice, svf2_next_drive and dual_next_drive four
+ * each, ladder_next and vowel_next_drive once), and filt_next() is
+ * instantiated in six translation units; the graph's kernels add their own,
+ * and the flanger, phaser, vocoder and voice bus add more. Call it a hundred
+ * expansions, all of them inside libfx, libengines and libgraph — which are
+ * the three largest occupants of the ESP32-P4's sram_low, the region that
+ * binds this build (tools/iram_budget.py). One extra compare and branch there
+ * cost about a kilobyte and overflowed it.
+ *
+ * The fence that matters is at the *sink* instead, in to_i16_dith()
+ * (audio_io.cpp), which is the one place where a NaN is not a click but a
+ * permanent condition: the conversion there saturates it to +full scale, so
+ * before S46b a NaN that had settled into a recursive filter's state left the
+ * box as full-scale DC on both channels, every sample, until the patch was
+ * reloaded. One `v != v` at that single call site turns it into silence.
+ *
+ * Not in f2i16() (synth_line.h) as well, though the delay lines have the same
+ * saturation, and the reason is the same budget this paragraph is about:
+ * fencing there inlines into 29 sites and overflowed sram_low by 794 bytes at
+ * link. A NaN into a delay line is a bounded spike that decays with the tail;
+ * a NaN at the sink is not. See the note over f2i16 for what to restore
+ * first if that region ever has room.
+ *
+ * What is given up by not fencing here is the driven filters being able to
+ * flush a NaN out of their own recursive state. A NaN that reaches one stays
+ * in it — so the fence downstream makes it inaudible rather than making it go
+ * away, and a slot stuck silent is still a bug to find at its source. */
 inline float soft_clip(float x) {
     const float a = fabsf(x);
     if (a <= kSoftKnee) return x;
@@ -505,7 +539,10 @@ inline float filt_next(Filt& f, const FiltCoef& c, float x) {
 /* ---- ADSR: linear attack, one-pole exponential decay/release ----
  *
  * There is no separate Sustain stage: Decay converges on the (live) sustain
- * value forever, so sustain edits during a held note track for free.
+ * value forever, so sustain edits during a held note track for free. It never
+ * arrives, though, and at sustain 0 that costs a held voice about 100 s of
+ * inaudible rendering — see the note in adsr_block(), which is where the fix
+ * goes if sram_low ever has room for it.
  * gate_on restarts the attack from the current level ("analog" retrigger —
  * a retrigger or steal never clicks). Rate-agnostic: pass rate = sr for
  * per-sample use, or sr / frames for one update per block. */
@@ -560,6 +597,13 @@ inline float adsr_next(Adsr& e, const AdsrCoef& c) {
             }
             break;
         case AdsrStage::Decay:
+            /* No zero-snap here, unlike adsr_block() — deliberately, and it
+             * is a size decision. This variant drives the block-rate
+             * envelopes (env2), which advance once per 1.33 ms rather than
+             * per sample and gate no render loop, so the snap would buy about
+             * a 64th of the work its counterpart does while costing the same
+             * inline expansion in all six engines. sram_low did not have it
+             * (see f2i16 in synth_line.h). */
             e.level = c.sustain + (e.level - c.sustain) * c.decay_k;
             break;
         case AdsrStage::Release:
@@ -610,7 +654,31 @@ inline AdsrRamp adsr_block(Adsr& e, const AdsrCoef& c, uint32_t frames) {
             }
             break;
         case AdsrStage::Decay:
-            /* converges on the (live) sustain forever, like adsr_next() */
+            /* Converges on the (live) sustain forever, like adsr_next(), and
+             * never arrives — which has a cost worth knowing about (S46b,
+             * measured and then deliberately not fixed).
+             *
+             * At sustain 0 the level only reaches an exact 0.0f by underflow,
+             * which at a 1.2 s decay is about 79 000 blocks: 105 seconds of
+             * rendering an inaudible voice, the last stretch of it feeding
+             * denormals into a recursive filter. adsr_ramp_silent() below
+             * stays false for all of it, so every engine's skip path is
+             * missed. Not a corner case either — sustain 0 is the FM engine's
+             * *default* patch on both pairs ("piano-like fade while held"),
+             * and several factory patches on the other engines use it.
+             *
+             * The fix is one line here: `if (end < kAdsrSilence && c.sustain <
+             * kAdsrSilence) end = 0.0f;` — staying in Decay rather than going
+             * Idle, so the voice is not freed with its key down and the
+             * live-sustain edit at the top of this file still brings the note
+             * back. It is not here because it does not fit. Both compares are
+             * against a float constant, so on RISC-V each is a `lui`+`flw`
+             * pair, and this function inlines into all six engines; measured
+             * at link it was most of a 227-byte sram_low overflow. The same
+             * budget that keeps the NaN fence out of f2i16() (synth_line.h).
+             *
+             * Restore it when that region has room. It costs polyphony and
+             * CPU, not correctness, which is the only reason it lost. */
             end = c.sustain + (lv - c.sustain) * c.decay_k_blk;
             break;
         case AdsrStage::Release:
