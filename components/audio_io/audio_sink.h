@@ -31,6 +31,35 @@ struct audio_sink_t {
  * start. */
 const audio_sink_t* audio_sink_null(void);
 
+#if defined(SYNTH_TARGET_HOST)
+/* The standalone build's output: a real device through miniaudio
+ * (port/host/src/sink_miniaudio.cpp).
+ *
+ * It honours the same blocking-write contract as the I2S sink, and has to:
+ * the render task is written against a sink whose write() is the clock. A
+ * host audio API is callback-driven and blocks nobody, so that file puts a
+ * ring buffer between the two and blocks on it. See the header comment there
+ * for what that costs and why it is not optional. */
+const audio_sink_t* audio_sink_host(void);
+
+/* Capture blocks the render chain did not collect before the next arrived
+ * (read-only, cumulative). Expected to climb whenever `in.route` is off --
+ * nothing reads then, and every block is dropped by design -- so it is a
+ * diagnostic for "is the input being consumed", not a fault counter. */
+uint32_t audio_sink_host_capture_dropped(void);
+
+/* Blocks the device asked for that the render chain had not delivered
+ * (read-only, cumulative). Distinct from audio_io's underrun counter, which
+ * counts the chain missing its *budget*: on a host the DSP can be well inside
+ * budget and still be descheduled past the deadline, and only this sees it. */
+uint32_t audio_sink_host_starves(void);
+
+/* Releases the device. Nothing in the firmware ever stops a sink -- the synth
+ * runs until power is removed -- but a library inside an app has to be able to
+ * shut down without leaving a device open. */
+void audio_sink_host_stop(void);
+#endif
+
 #if SYNTH_ENABLE_USB
 /* USB (UAC2) bridge to usb_dev (ESP32-S3). Host iso polling paces the audio
  * task while the capture stream is open; timer pacing (as in the null sink)

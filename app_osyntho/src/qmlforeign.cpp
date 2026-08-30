@@ -5,7 +5,9 @@
 
 #include "src/app.h"
 
-#ifdef Q_OS_WINDOWS
+#ifdef OSYNTHO_EMBEDDED
+#include "src/embeddedmanager.h"
+#elif defined(Q_OS_WINDOWS)
 #include "src/bluetoothmanager2.h"
 #else
 #include "src/bluetoothmanager.h"
@@ -23,7 +25,14 @@ SynthController* SynthForeign::create(QQmlEngine*, QJSEngine*) {
 }
 
 IBluetoothManager* BluetoothManagerForeign::create(QQmlEngine*, QJSEngine*) {
+  // The one place the transport is chosen. QML binds to IBluetoothManager and
+  // never learns which of the three it got -- Qt Bluetooth, SimpleBLE, or the
+  // engine compiled into this process.
+#ifdef OSYNTHO_EMBEDDED
+  IBluetoothManager* manager = &EmbeddedManager::instance();
+#else
   IBluetoothManager* manager = &BluetoothManager::instance();
+#endif
   QJSEngine::setObjectOwnership(manager, QJSEngine::CppOwnership);
   return manager;
 }

@@ -62,7 +62,15 @@ App& App::instance() {
   return myInstance;
 }
 
+// The composition root's one platform decision. Everything below this line
+// takes IBluetoothManager by reference and never asks which it got.
+#ifdef OSYNTHO_EMBEDDED
+App::App()
+    : App(Database::instance(), EmbeddedManager::instance(),
+          Settings::instance()) {}
+#else
 App::App() : App(Database::instance(), BluetoothManager::instance(), Settings::instance()) {}
+#endif
 
 App::App(IDatabase& db, IBluetoothManager& btm, ISettings& st)
   : database{db}, bluetoothManager{btm}, settings{st} {
@@ -138,6 +146,14 @@ App::App(IDatabase& db, IBluetoothManager& btm, ISettings& st)
   }
 
   deleteTemporaryAppFiles();
+
+#ifdef OSYNTHO_EMBEDDED
+  // Last, and inside the constructor rather than in main(): every connect()
+  // above is already made, so the manager's startup signals -- infoRead and
+  // connectedChanged -- have somewhere to land. Both are emitted queued, so
+  // they are delivered after this returns and the object is fully built.
+  EmbeddedManager::instance().start();
+#endif
 }
 
 void App::deleteTemporaryAppFiles() {

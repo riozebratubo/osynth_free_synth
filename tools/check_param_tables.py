@@ -103,12 +103,23 @@ def check_graph() -> int:
 
 
 def check_factory_banks() -> int:
-    """Every factory bank must be exactly PRESETS_FACTORY_SLOTS rows.
+    """Report each factory bank's row count; verify every F() table exists.
 
-    Same hazard as the tables above, with a worse ending: a short initializer
-    zero-fills the tail, and fetch_snapshot() copies `name` unconditionally,
-    so selecting one of those slots dereferences a null. Also checks that
-    every F(name, table) names a table that exists and uses it once.
+    A short initializer zero-fills the tail, so those entries have a NULL
+    name. That used to be fatal -- fetch_snapshot() and presets_slot_info()
+    both copied `name` unconditionally, and merely *listing* such an engine's
+    presets dereferenced it. Both now treat a NULL or empty name as an empty
+    slot, which is what it is.
+
+    So a short bank is legal, and one is deliberate: the sampler's, because
+    every other engine's presets describe a sound while a sampler's sound is
+    whichever kit the player recorded (see the note above its table). Short
+    banks are therefore reported rather than failed -- the count is still
+    worth seeing, since an unintentionally short one looks exactly the same
+    here and is a bank someone meant to finish.
+
+    What is still fatal: an F() naming a table that does not exist, or the
+    same table used twice.
     """
     bad = 0
     src = (ROOT / "components/presets/presets_factory.cpp").read_text(
@@ -151,10 +162,9 @@ def check_factory_banks() -> int:
             re.findall(r'\{\s*"init"', bank)
         )
         used += re.findall(r"F\(\s*\"[^\"]*\",\s*(\w+)\s*\)", bank)
-        status = "ok" if rows == slots else "MISMATCH"
-        if rows != slots:
-            bad += 1
-        print(f"  bank {i:<7d} {status:9s} slots={slots:3d} rows={rows:3d}")
+        status = "full" if rows == slots else "short"
+        note = "" if rows == slots else "  (tail reads as empty slots)"
+        print(f"  bank {i:<7d} {status:9s} slots={slots:3d} rows={rows:3d}{note}")
 
     missing = [t for t in used if t not in defined]
     dupes = sorted({t for t in used if used.count(t) > 1})

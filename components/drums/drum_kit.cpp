@@ -18,9 +18,25 @@ static const char* TAG = "drumkit";
 
 /* The factory image, embedded by CMake (target_add_binary_data). The symbol
  * names are derived from the file name — keep them in sync with the
- * add_custom_command output in CMakeLists.txt. */
+ * add_custom_command output in CMakeLists.txt.
+ *
+ * The asm() label is how GCC and Clang reach a linker symbol whose name is not
+ * a valid C identifier, which is what the objcopy-style `_binary_<file>_start`
+ * is. MSVC has no equivalent, so the host build generates a C file defining
+ * these two as ordinary identifiers instead (tools/bin2c.py, driven from
+ * port/host/CMakeLists.txt) and declares them plainly here. Same bytes, same
+ * names in this translation unit; only the route to the linker differs. */
+#if defined(_MSC_VER)
+/* Pointers rather than arrays, because the generated file cannot portably
+ * place a second array symbol exactly one past the end of the first. The two
+ * uses below -- the pointer difference on line 146 and passing _start as a
+ * const uint8_t* on 147 -- read identically either way. */
+extern "C" const uint8_t* const drumkit_bin_start;
+extern "C" const uint8_t* const drumkit_bin_end;
+#else
 extern "C" const uint8_t drumkit_bin_start[] asm("_binary_drumkit_bin_start");
 extern "C" const uint8_t drumkit_bin_end[] asm("_binary_drumkit_bin_end");
+#endif
 
 namespace {
 

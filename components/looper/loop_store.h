@@ -69,6 +69,17 @@ bool loop_store_mount(void);
  * the flash backend. */
 bool loop_store_ensure_dir(const char* path);
 
+/* The directory the backend keeps its files in, without a trailing separator;
+ * "" on the flash backend, which has no filesystem.
+ *
+ * Exists because loop_stream.cpp writes its live takes alongside the save
+ * slots and needs to name the same place. It used to spell "/sd/osynth" a
+ * second time, which was correct exactly as long as the location was a
+ * constant -- and it stopped being one when the host port put it under a
+ * user-profile path resolved at run time. One owner, asked rather than
+ * copied. */
+const char* loop_store_dir(void);
+
 /* What the idle card poll found. Three states, not two: "no card" and "the
  * card just left" call for opposite responses, and collapsing them into one
  * boolean made a mount that was merely between retries look like a removal. */

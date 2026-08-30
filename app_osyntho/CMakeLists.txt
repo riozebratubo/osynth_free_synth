@@ -7,6 +7,18 @@ set(APP_ID "org.osynth.osyntho")
 option(GIT_REVISION "Append the current git revision to the app's version string" ON)
 option(BLE_DIRECT_CONNECT "Skip BLE scan and connect directly by address on Windows" ON)
 
+# Build the synth INTO the app instead of talking to one over BLE.
+#
+# With this on, port/host compiles the firmware's own audio engine as a library
+# and src/embeddedmanager.cpp reaches it through SynthCtl v1 -- the same
+# protocol the BLE backends carry. SynthController and every QML screen sit
+# above IBluetoothManager and are untouched by the choice.
+#
+# Off by default: the normal osyntho is a controller for the instrument, and
+# that is the build most people want. Configure with -DOSYNTHO_EMBEDDED=ON for
+# the standalone one.
+option(OSYNTHO_EMBEDDED "Embed the synth engine and run standalone" OFF)
+
 # change the values here
 # NOTE: intentional — these normal-variable set()s shadow the cache options
 # above, so a -D value passed on the configure command line has no effect.
@@ -105,14 +117,21 @@ qt_add_android_permission(${PROJECT_NAME}
 )
 endif()
 
-if (WIN32)
-  set(CONDITIONAL_WIN32_BLUETOOTHMANAGER
-    src/bluetoothmanager2.cpp src/bluetoothmanager2.h
-  )
-endif()
+if (OSYNTHO_EMBEDDED)
+  # The engine replaces the radio entirely: neither BLE backend is compiled,
+  # so an embedded build carries no Bluetooth code at all rather than carrying
+  # it unused.
+  set(CONDITIONAL_EMBEDDED_MANAGER src/embeddedmanager.cpp src/embeddedmanager.h)
+else()
+  if (WIN32)
+    set(CONDITIONAL_WIN32_BLUETOOTHMANAGER
+      src/bluetoothmanager2.cpp src/bluetoothmanager2.h
+    )
+  endif()
 
-if (ANDROID OR LINUX OR APPLE)
-  set(CONDITIONAL_ANDROID_BLUETOOTHMANAGER src/bluetoothmanager.cpp src/bluetoothmanager.h)
+  if (ANDROID OR LINUX OR APPLE)
+    set(CONDITIONAL_ANDROID_BLUETOOTHMANAGER src/bluetoothmanager.cpp src/bluetoothmanager.h)
+  endif()
 endif()
 
 set(GIT_REV "")
@@ -211,6 +230,7 @@ qt_add_qml_module(
     SOURCES src/app.h src/app.cpp
     SOURCES ${CONDITIONAL_WIN32_BLUETOOTHMANAGER}
     SOURCES ${CONDITIONAL_ANDROID_BLUETOOTHMANAGER}
+    SOURCES ${CONDITIONAL_EMBEDDED_MANAGER}
     SOURCES src/singleinstance/singleinstance.h src/singleinstance/singleinstance.cpp
     SOURCES src/synthcontroller.h src/synthcontroller.cpp
     QML_FILES qml/Main.qml
@@ -396,14 +416,11 @@ if (ANDROID)
   )
 endif()
 
-if (WIN32)
+if (WIN32 AND NOT OSYNTHO_EMBEDDED)
   add_subdirectory(${CMAKE_SOURCE_DIR}/simpleble/simpleble)
   if (BLE_DIRECT_CONNECT)
     target_compile_definitions(${PROJECT_NAME} PRIVATE BLE_DIRECT_CONNECT)
   endif()
-endif()
-
-if (WIN32)
   set(CONDITIONAL_SIMPLEBLE "simpleble::simpleble")
 endif()
 
@@ -440,15 +457,35 @@ if (WIN32 OR LINUX)
   target_compile_definitions(${PROJECT_NAME} PRIVATE NFD_AVAILABLE)
 endif()
 
+# ---------------------------------------------------------------------------
+# The embedded engine (OSYNTHO_EMBEDDED)
+#
+# port/host builds the firmware's own components -- the same .cpp files the
+# ESP-IDF build compiles -- against shims that stand in for ESP-IDF. See
+# port/host/README.md.
+# ---------------------------------------------------------------------------
+if (NOT OSYNTHO_EMBEDDED)
+  # Only a build that talks to a real instrument needs the Bluetooth module.
+  set(CONDITIONAL_QT_BLUETOOTH "Qt${QT_VERSION_MAJOR}::Bluetooth")
+endif()
+
+if (OSYNTHO_EMBEDDED)
+  add_subdirectory(${CMAKE_SOURCE_DIR}/../port/host
+                   ${CMAKE_BINARY_DIR}/osynth_core)
+  target_compile_definitions(${PROJECT_NAME} PRIVATE OSYNTHO_EMBEDDED)
+  set(CONDITIONAL_OSYNTH_CORE osynth_core)
+endif()
+
 target_link_libraries(
     ${PROJECT_NAME}
+    PRIVATE ${CONDITIONAL_OSYNTH_CORE}
     PRIVATE Qt${QT_VERSION_MAJOR}::Multimedia
     # PRIVATE Qt${QT_VERSION_MAJOR}::Positioning
     # PRIVATE Qt${QT_VERSION_MAJOR}::Quick
     PRIVATE Qt${QT_VERSION_MAJOR}::QuickControls2
     # PRIVATE Qt${QT_VERSION_MAJOR}::QuickPrivate
     PRIVATE Qt${QT_VERSION_MAJOR}::Sql
-    PRIVATE Qt${QT_VERSION_MAJOR}::Bluetooth
+    PRIVATE ${CONDITIONAL_QT_BLUETOOTH}
     PRIVATE Qt${QT_VERSION_MAJOR}::Concurrent
     PRIVATE Qt${QT_VERSION_MAJOR}::Network
     PRIVATE Qt${QT_VERSION_MAJOR}::CorePrivate # since Qt 6.10

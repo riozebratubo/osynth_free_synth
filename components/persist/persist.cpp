@@ -16,6 +16,7 @@
 
 #include "audio_io.h"
 #include "synth_params.h"
+#include "synth_pack.h"
 
 static const char* TAG = "persist";
 
@@ -65,17 +66,19 @@ constexpr uint32_t kPollMs = 500;
 constexpr int kTaskPrio = 2; /* below every other control task */
 constexpr int kTaskStack = 3584;
 
-struct __attribute__((packed)) Header {
+OSYNTH_PACK_PUSH
+struct OSYNTH_PACKED Header {
     uint32_t magic;
     uint16_t version;
     uint16_t count;
 };
-struct __attribute__((packed)) Pair {
+struct OSYNTH_PACKED Pair {
     uint16_t id;
     float value;
 };
 static_assert(sizeof(Header) == 8, "on-disk layout");
 static_assert(sizeof(Pair) == 6, "on-disk layout");
+OSYNTH_PACK_POP
 
 uint16_t s_ids[PERSIST_MAX_PARAMS];
 size_t s_count = 0;

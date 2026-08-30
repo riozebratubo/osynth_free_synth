@@ -39,8 +39,35 @@
 #define SYNTH_HAS_INTERNAL_DAC 1  /* 8-bit DAC on GPIO25/26 */
 #define SYNTH_HAS_I2S_MCLK     0
 #define SYNTH_HAS_RADIO        1
+#elif defined(SYNTH_TARGET_HOST)
+/* The standalone build: the same engine compiled into the osyntho app against
+ * the shims in port/host, with miniaudio where the peripherals were.
+ *
+ * All four capabilities are 0, and they are 0 in the literal sense rather than
+ * as a way of switching features off: each names a *peripheral on a die*, and
+ * this build has no die. There is no USB-OTG controller to enumerate with, no
+ * internal DAC, no I2S port to carry a system clock, and no radio. The output
+ * and the input arrive through a host audio API that answers to none of these
+ * questions, and the app reaches the engine in-process rather than over a
+ * link.
+ *
+ * That makes every derived flag below correct without special-casing: with no
+ * USB there is no audio tap and no host role, with no radio and BLE off there
+ * is no NimBLE, and the whole codec and pin layer compiles away -- which is
+ * exactly what port/host/CMakeLists.txt leaves out of the source list.
+ *
+ * The one flag this does *not* settle is the audio input. SYNTH_ENABLE_LINE_IN
+ * derives from SYNTH_ENABLE_I2S_DAC && SYNTH_HAS_I2S_MCLK because on hardware
+ * the input shares the output's I2S port, and on a host it shares nothing --
+ * the capture side of one miniaudio device is not an I2S slave. Turning it on
+ * here therefore needs its own branch at that derivation rather than a
+ * capability that pretends a port exists; see the note there. */
+#define SYNTH_HAS_USB          0
+#define SYNTH_HAS_INTERNAL_DAC 0
+#define SYNTH_HAS_I2S_MCLK     0
+#define SYNTH_HAS_RADIO        0
 #else
-#error "osynth supports the esp32, esp32s3 and esp32p4 targets only"
+#error "osynth supports the esp32, esp32s3 and esp32p4 targets, or SYNTH_TARGET_HOST"
 #endif
 
 /* ---- Feature switches ---- */
@@ -96,7 +123,25 @@
  * so capture and playback share one clock. The capability gate is repeated
  * here for the same reason the USB tap's is — the classic-ESP32 exclusion is
  * real hardware, not defensiveness (see SYNTH_HAS_I2S_MCLK above). */
-#if defined(CONFIG_OSYNTH_ENABLE_I2S_LINE_IN) && SYNTH_ENABLE_I2S_DAC && \
+#if defined(SYNTH_TARGET_HOST)
+/* The host build's audio input, and the branch the capability block above
+ * promised.
+ *
+ * Separate rather than folded into the condition below, because the two
+ * describe different things. On hardware the input is the RX half of the
+ * *output's* I2S port, so it exists only if that port does — which is what the
+ * condition below tests. A host has no port at all: the capture side of one
+ * miniaudio device is not an I2S slave, and that condition would answer 0 for
+ * a reason that does not apply here.
+ *
+ * Everything downstream is unchanged. `in.route`, `in.gain`, the three mix
+ * stages, the meters, and every consumer that asks only "did a block arrive"
+ * — the granular engine, the vocoder, the two noise-reduction units, the
+ * graph's LineIn node, the looper's line recording, the sampler's pre-roll —
+ * work exactly as they do on an S3, because SYNTH_ENABLE_AUDIO_IN below is
+ * what they test and this is what feeds it. */
+#define SYNTH_ENABLE_LINE_IN 1
+#elif defined(CONFIG_OSYNTH_ENABLE_I2S_LINE_IN) && SYNTH_ENABLE_I2S_DAC && \
     SYNTH_HAS_I2S_MCLK
 #define SYNTH_ENABLE_LINE_IN 1
 #else

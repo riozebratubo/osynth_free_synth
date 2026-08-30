@@ -149,6 +149,10 @@ enum Engine : quint8 {
   // connected firmware actually has it, and is the index to select.
   ENG_MODULAR     = 4,
   ENG_GRANULAR    = 5,
+  // S44. Plays the recordable sample kits the drum bus owns, so on a build
+  // with no kit storage it registers its parameters and refuses every take --
+  // the engine is still bindable and still has to be offered.
+  ENG_SAMPLER     = 6,
 };
 
 // PARAM_INFO caps mask — which optional modules the active engine exposes, so

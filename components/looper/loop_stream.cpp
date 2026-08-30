@@ -81,7 +81,20 @@ using osynth::loopstream::g_underruns;
 namespace {
 
 /* Created by loop_store on the card mount; shared with the save slots. */
-constexpr const char* kSetDir = "/sd/osynth";
+/* The same directory loop_store keeps its save slots in -- asked for rather
+ * than spelled again, because since the host port it is resolved at run time
+ * (a user-profile path) instead of being the constant it was for years. */
+#define kSetDir (loop_store_dir())
+
+/* Bytes for a path here. 64 covered "/sd/osynth/live0.olt" with room to
+ * spare; a host data directory does not fit in it at all, and since every
+ * path below is built with snprintf the failure would be a quietly truncated
+ * name rather than a crash. */
+#if defined(SYNTH_TARGET_HOST)
+constexpr size_t kPathMax = 640;
+#else
+constexpr size_t kPathMax = 64;
+#endif
 
 /* Transfer size for one fread/fwrite. A multiple of the 512 B sector and
  * well under the ring, so a refill pass tops up every track a few times
@@ -332,7 +345,7 @@ bool ensure_set_dir() { return loop_store_ensure_dir(kSetDir); }
 /* Removes every scratch file, by name — the slots share this directory and
  * are never touched. Lock held. */
 void wipe_live_files() {
-    char path[64];
+    char path[kPathMax];
     /* The manifest goes first. While it exists it claims the tracks exist, so
      * a wipe interrupted half way through would otherwise leave one pointing
      * at files that are gone. This order leaves the opposite — tracks with
@@ -454,7 +467,7 @@ extern "C" void loop_stream_end_set(void) {
 extern "C" void loop_stream_save_manifest(uint32_t loop_frames, bool mono,
                                            uint8_t filled) {
     if (!loop_stream_ready() || !s_set_open) return;
-    char path[64];
+    char path[kPathMax];
     man_path(path, sizeof(path));
     xSemaphoreTake(s_lock, portMAX_DELAY);
     if (loop_frames == 0 || filled == 0) {
@@ -483,7 +496,7 @@ extern "C" void loop_stream_save_manifest(uint32_t loop_frames, bool mono,
 extern "C" bool loop_stream_load_manifest(uint32_t* loop_frames, bool* mono,
                                            uint8_t* filled) {
     if (!loop_stream_ready()) return false;
-    char path[64];
+    char path[kPathMax];
     man_path(path, sizeof(path));
     Manifest m = {};
     xSemaphoreTake(s_lock, portMAX_DELAY);
@@ -500,7 +513,7 @@ extern "C" bool loop_stream_load_manifest(uint32_t* loop_frames, bool* mono,
          * are separate files, so a card pulled mid-write — or edited on a PC —
          * can disagree, and a set that is only partly on the card is not one
          * to hand the transport. */
-        char t_path[64];
+        char t_path[kPathMax];
         struct stat st;
         for (int t = 0; t < LOOP_TRACKS && ok; ++t) {
             if (((m.filled >> t) & 1) == 0) continue;
@@ -543,7 +556,7 @@ extern "C" esp_err_t loop_stream_adopt_set(uint32_t loop_frames, bool mono,
     g_resync.store(0, std::memory_order_release);
     g_hold.store(0, std::memory_order_release);
     esp_err_t err = ESP_OK;
-    char path[64];
+    char path[kPathMax];
     for (int t = 0; t < LOOP_TRACKS; ++t) {
         if (((filled >> t) & 1) == 0) continue;
         track_path(path, sizeof(path), t);
@@ -610,7 +623,7 @@ extern "C" bool loop_stream_resume_set(uint8_t filled) {
         ESP_LOGW(TAG, "the card in the slot is not the one this set was "
                       "recorded to");
     } else {
-        char path[64];
+        char path[kPathMax];
         s_playing = 0;
         for (int t = 0; t < LOOP_TRACKS; ++t) {
             close_play(t);
@@ -645,7 +658,7 @@ extern "C" esp_err_t loop_stream_open_record(int t, uint32_t loop_frames) {
     }
     xSemaphoreTake(s_lock, portMAX_DELAY);
     esp_err_t err = ESP_OK;
-    char path[64];
+    char path[kPathMax];
     tmp_path(path, sizeof(path));
     /* Not only begin_set's job: a punch-in comes here without one, and the
      * directory can be gone by then (card swapped, or removed from a host). */
@@ -725,7 +738,7 @@ extern "C" esp_err_t loop_stream_close_record(int t, bool keep) {
         ESP_LOGI(TAG, "track %d take: %u KB %s", t + 1,
                  (unsigned)(s_rec_written / 1024),
                  keep ? "kept" : "discarded");
-        char tmp[64], dst[64];
+        char tmp[kPathMax], dst[kPathMax];
         tmp_path(tmp, sizeof(tmp));
         track_path(dst, sizeof(dst), t);
         /* Did the audio task take the staged window at the wrap? Read before
@@ -779,7 +792,7 @@ extern "C" esp_err_t loop_stream_start_playback(uint32_t loop_frames,
     s_playing = 0;
     g_resync.store(0, std::memory_order_release);
     g_hold.store(0, std::memory_order_release);
-    char path[64];
+    char path[kPathMax];
     for (int t = 0; t < LOOP_TRACKS; ++t) {
         close_play(t);
         if (((filled >> t) & 1) == 0) continue;
@@ -824,7 +837,7 @@ extern "C" esp_err_t loop_stream_add_track(int t) {
         err = ESP_ERR_INVALID_STATE;
     } else {
         close_play(t);
-        char path[64];
+        char path[kPathMax];
         track_path(path, sizeof(path), t);
         s_play_f[t] = fopen(path, "rb");
         if (s_play_f[t] == nullptr) {
@@ -861,7 +874,7 @@ extern "C" esp_err_t loop_stream_adopt_prearmed(int t) {
     if (s_pre_trk != t || s_pass_bytes == 0) {
         err = ESP_ERR_INVALID_STATE;
     } else {
-        char path[64];
+        char path[kPathMax];
         track_path(path, sizeof(path), t);
         FILE* f = fopen(path, "rb");
         /* Where the staging stopped, not 0: the window already holds
@@ -937,7 +950,7 @@ extern "C" void loop_stream_clear_track(int t) {
     xSemaphoreTake(s_lock, portMAX_DELAY);
     close_play(t);
     s_playing &= (uint8_t)~(1u << t);
-    char path[64];
+    char path[kPathMax];
     track_path(path, sizeof(path), t);
     remove(path);
     xSemaphoreGive(s_lock);
@@ -959,7 +972,7 @@ extern "C" esp_err_t loop_stream_export_read(int t, uint32_t offset,
          * just not here. Nothing to read and nothing to diagnose. */
         err = ESP_ERR_INVALID_STATE;
     } else {
-        char path[64];
+        char path[kPathMax];
         track_path(path, sizeof(path), t);
         FILE* f = fopen(path, "rb");
         if (f == nullptr) {

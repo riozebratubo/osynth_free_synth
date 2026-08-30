@@ -246,6 +246,8 @@ extern "C" esp_err_t loop_store_init(void) {
 
 extern "C" bool loop_store_ready(void) { return s_flash_end != 0; }
 extern "C" const char* loop_store_backend_name(void) { return "flash"; }
+/* No filesystem on this backend; loop_stream is compiled out with it. */
+extern "C" const char* loop_store_dir(void) { return ""; }
 extern "C" int loop_store_slots(void) { return LOOP_STORE_SLOTS_FLASH; }
 extern "C" bool loop_store_needs_stopped(void) { return true; }
 extern "C" bool loop_store_mount(void) { return false; } /* no card here */
@@ -394,9 +396,23 @@ extern "C" esp_err_t loop_store_read_slot_bytes(int slot, int packed_idx,
 #include <cstdio>
 #include <sys/stat.h>
 
+#include "esp_timer.h"
+
+#if defined(SYNTH_TARGET_HOST)
+/* The host build takes this branch rather than the raw-flash one above, and
+ * for the reason the branch names: its file I/O is plain stdio over a mounted
+ * filesystem, which is exactly what a host has. What it does NOT have is the
+ * card underneath -- so the bring-up below (SPI bus, SDSPI, FAT, the LDO rail,
+ * the re-mount backoff) is replaced, and everything from ensure_dir() down is
+ * used unchanged.
+ *
+ * "Mounted" therefore means "the directory exists", and the card is always
+ * present and never lost. */
+#include "host_paths.h"
+#define OSYNTH_SD_LDO 0
+#else
 #include "driver/sdspi_host.h"
 #include "driver/spi_common.h"
-#include "esp_timer.h"
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
 
@@ -406,6 +422,7 @@ extern "C" esp_err_t loop_store_read_slot_bytes(int slot, int packed_idx,
 #else
 #define OSYNTH_SD_LDO 0
 #endif
+#endif /* SYNTH_TARGET_HOST */
 
 /* Card bring-up diagnostics. The sdmmc/sdspi drivers name the failing
  * command and print its R1 byte at DEBUG only — and every one of those lines
@@ -436,13 +453,38 @@ extern "C" esp_err_t loop_store_read_slot_bytes(int slot, int packed_idx,
 
 namespace {
 
+#if defined(SYNTH_TARGET_HOST)
+/* Resolved in loop_store_init(); see host_paths.h for where the root comes
+ * from and why an app must be able to set it. */
+char s_dir[512];
+/* kMount is what esp_vfs_fat_sdspi_mount() is given and esp_vfs_fat_sdcard_
+ * unmount() is given back; neither exists here, so the host branch has no use
+ * for it and only kDir is read. Both names are kept so that the code between
+ * them reads the same on either backend. */
+const char* kDir = s_dir;
+#else
 constexpr const char* kMount = "/sd";
 constexpr const char* kDir = "/sd/osynth";
+#endif
+
+/* Bytes for a slot path. "/sd/osynth/loop0.tmp" needs 21 of the 48 this was
+ * for years; a host data directory is a full user-profile path and blows
+ * straight past it, and since slot_path() builds with snprintf the failure
+ * would be a silently truncated name rather than a crash -- an operation on
+ * the wrong file, or on none. Named here so every buffer below states which
+ * limit it is honouring instead of repeating a literal. */
+#if defined(SYNTH_TARGET_HOST)
+constexpr size_t kPathMax = 640;
+#else
+constexpr size_t kPathMax = 48;
+#endif
 constexpr size_t kChunk = 8192; /* staging for the legacy v1 raw->adpcm
                                  * conversion (2048 frames per pass) */
 
 bool s_bus_up = false;
+#if !defined(SYNTH_TARGET_HOST)
 sdmmc_card_t* s_card = nullptr;
+#endif
 uint8_t* s_chunk = nullptr;
 
 /* Re-mount backoff. A mount attempt against an empty slot costs about a
@@ -453,11 +495,14 @@ uint8_t* s_chunk = nullptr;
  * one succeeds or a card that was working goes away — the case where it is
  * genuinely expected back. Demand paths (save, load, starting a streamed set)
  * ignore the floor entirely: the user is waiting, and a second is worth it. */
+#if !defined(SYNTH_TARGET_HOST)
 constexpr uint32_t kMountFloorMinMs = 2000;
 constexpr uint32_t kMountFloorMaxMs = 30000;
 uint32_t s_mount_floor_ms = kMountFloorMinMs;
 uint32_t s_mount_next_ms = 0;
 int s_mount_fails = 0; /* only the first failure of a run is worth logging */
+#endif /* the backoff belongs to a card that can be absent; a directory
+        * cannot, so the host branch replaced every user of these */
 
 uint32_t now_ms() { return (uint32_t)(esp_timer_get_time() / 1000); }
 
@@ -511,6 +556,27 @@ bool ensure_dir(const char* path) {
     ESP_LOGE(TAG, "cannot create %s (%s)", path, strerror(errno));
     return false;
 }
+
+#if defined(SYNTH_TARGET_HOST)
+
+/* No rail, no bus, no card. "Mounted" is "the directory exists", which
+ * ensure_dir() below already answers -- so these three collapse to it.
+ *
+ * ensure_mounted() is still called on every operation exactly as it is on the
+ * card, and that is deliberate rather than wasteful: it means a data directory
+ * that disappears mid-session (an unmounted network share, a removed SD card
+ * on a phone) is noticed at the same place a pulled card would be, and reported
+ * through the same path the app already understands. */
+void sd_power_up() {}
+
+bool ensure_mounted() {
+    if (s_dir[0] == '\0') return false; /* loop_store_init() never resolved it */
+    return ensure_dir(kDir);
+}
+
+void drop_mount() {}
+
+#else
 
 /* Power the SD rail (P4 boards whose socket hangs off the SDMMC slot-1 pads).
  * See the OSYNTH_SD_PWR_LDO_CHAN help: those pads and the card's VDD are fed
@@ -615,7 +681,28 @@ void drop_mount() {
     }
 }
 
+#endif /* SYNTH_TARGET_HOST */
+
 } // namespace
+
+#if defined(SYNTH_TARGET_HOST)
+
+extern "C" esp_err_t loop_store_init(void) {
+    /* Resolve the directory once. s_bus_up is the "this backend can work at
+     * all" flag every entry point tests, so it follows whether the directory
+     * could be created -- the same meaning it has on the card, where it tracks
+     * the SPI bus rather than the card itself. */
+    s_bus_up = osynth_host_subdir("loops", s_dir, sizeof(s_dir));
+    if (!s_bus_up) {
+        ESP_LOGW(TAG, "no loops directory — save/load disabled");
+        return ESP_OK; /* never fail to boot for storage */
+    }
+    ESP_LOGI(TAG, "file backend: %s, %d slots, save/load work while playing",
+             s_dir, LOOP_STORE_SLOTS_SD);
+    return ESP_OK;
+}
+
+#else
 
 extern "C" esp_err_t loop_store_init(void) {
 #if OSYNTH_SD_VERBOSE
@@ -652,8 +739,11 @@ extern "C" esp_err_t loop_store_init(void) {
     return ESP_OK;
 }
 
+#endif /* SYNTH_TARGET_HOST */
+
 extern "C" bool loop_store_ready(void) { return s_bus_up; }
 extern "C" const char* loop_store_backend_name(void) { return "sd"; }
+extern "C" const char* loop_store_dir(void) { return kDir; }
 extern "C" int loop_store_slots(void) { return LOOP_STORE_SLOTS_SD; }
 extern "C" bool loop_store_needs_stopped(void) { return false; }
 
@@ -666,6 +756,32 @@ extern "C" bool loop_store_mount(void) { return ensure_mounted(); }
 extern "C" bool loop_store_ensure_dir(const char* path) {
     return path != nullptr && ensure_mounted() && ensure_dir(path);
 }
+
+#if defined(SYNTH_TARGET_HOST)
+
+/* A directory is not a card: it does not arrive, and it does not fall out of
+ * the socket. So the CMD13 status check, the re-mount backoff and the removal
+ * handling all go with the hardware they were written for.
+ *
+ * Not hard-wired to OK, though. A data directory really can go away
+ * mid-session -- a network share unmounting, external storage ejected on a
+ * phone -- and ensure_mounted() is what notices. Routing the answer through it
+ * means the looper reacts to that exactly as it reacts to a pulled card, which
+ * is a path the app already understands. */
+extern "C" loop_store_card_t loop_store_poll_card(void) {
+    if (!s_bus_up) return LOOP_STORE_CARD_NONE;
+    return ensure_mounted() ? LOOP_STORE_CARD_OK : LOOP_STORE_CARD_LOST;
+}
+
+/* The serial identifies *which* card is in the slot, so the looper can tell a
+ * swapped card from the same one coming back. There is one directory here and
+ * it cannot be swapped, so a fixed non-zero value says "always the same
+ * volume" -- which is the truth, and is what the callers compare for. */
+extern "C" uint32_t loop_store_card_serial(void) { return s_bus_up ? 1u : 0u; }
+
+extern "C" void loop_store_card_gone(void) {}
+
+#else
 
 extern "C" loop_store_card_t loop_store_poll_card(void) {
     if (!s_bus_up) return LOOP_STORE_CARD_NONE;
@@ -706,13 +822,15 @@ extern "C" void loop_store_card_gone(void) {
     s_mount_fails = 0;
 }
 
+#endif /* SYNTH_TARGET_HOST */
+
 extern "C" esp_err_t loop_store_save(int slot, uint32_t loop_frames,
                                      uint8_t filled,
                                      uint8_t* const bufs[LOOP_TRACKS],
                                      bool mono) {
     if (slot < 0 || slot >= LOOP_STORE_SLOTS_SD) return ESP_ERR_INVALID_ARG;
     if (!ensure_mounted()) return ESP_ERR_INVALID_STATE;
-    char tmp[48], path[48];
+    char tmp[kPathMax], path[kPathMax];
     slot_path(tmp, sizeof(tmp), slot, true);
     slot_path(path, sizeof(path), slot, false);
     FILE* f = fopen(tmp, "wb");
@@ -750,7 +868,7 @@ extern "C" esp_err_t loop_store_probe(int slot, uint32_t* loop_frames,
                                       uint8_t* filled, bool* mono) {
     if (slot < 0 || slot >= LOOP_STORE_SLOTS_SD) return ESP_ERR_INVALID_ARG;
     if (!ensure_mounted()) return ESP_ERR_INVALID_STATE;
-    char path[48];
+    char path[kPathMax];
     slot_path(path, sizeof(path), slot, false);
     FILE* f = fopen(path, "rb");
     if (f == nullptr) return ESP_ERR_NOT_FOUND;
@@ -769,7 +887,7 @@ extern "C" esp_err_t loop_store_read_track(int slot, int packed_idx,
                                            uint32_t loop_frames) {
     if (slot < 0 || slot >= LOOP_STORE_SLOTS_SD) return ESP_ERR_INVALID_ARG;
     if (!ensure_mounted()) return ESP_ERR_INVALID_STATE;
-    char path[48];
+    char path[kPathMax];
     slot_path(path, sizeof(path), slot, false);
     FILE* f = fopen(path, "rb");
     if (f == nullptr) return ESP_ERR_NOT_FOUND;
@@ -815,7 +933,7 @@ extern "C" esp_err_t loop_store_slot_info(int slot, loop_store_info_t* out) {
         return ESP_ERR_INVALID_ARG;
     }
     if (!ensure_mounted()) return ESP_ERR_INVALID_STATE;
-    char path[48];
+    char path[kPathMax];
     slot_path(path, sizeof(path), slot, false);
     FILE* f = fopen(path, "rb");
     if (f == nullptr) return ESP_ERR_NOT_FOUND;
@@ -835,7 +953,7 @@ extern "C" esp_err_t loop_store_read_slot_bytes(int slot, int packed_idx,
     }
     if (len == 0) return ESP_OK;
     if (!ensure_mounted()) return ESP_ERR_INVALID_STATE;
-    char path[48];
+    char path[kPathMax];
     slot_path(path, sizeof(path), slot, false);
     /* Opened and closed per call. An export runs at BLE speed — a couple of
      * kilobytes per round trip — so the directory lookup is noise next to the

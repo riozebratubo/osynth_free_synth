@@ -46,6 +46,15 @@ Item {
     // on, in the Looper or on the Sequencer page, gave you a click you could
     // not turn down or, if the kit had left it at zero, hear at all.
     property int pidClick: -1
+
+    // The theme accent, captured on an item that does not override it. The
+    // record-level meter recolours itself as it approaches clipping, and
+    // reading Material.accent inside its own binding is a self-reference: on
+    // that item the name resolves to the overridden value, so it loops.
+    // Holding the default here gives the binding a source outside itself.
+    // Same idiom, and the same reason, as GraphScreen's cost meter.
+    readonly property color accentColor: Material.accent
+
     ParamValue { id: chokeVal; paramId: root.pidChoke }
 
     // Whether the bound kit accepts recording. The factory kit is flash-mapped
@@ -305,7 +314,8 @@ Item {
                         from: 0; to: 1
                         value: UI.samplerPeak
                         Material.accent: UI.samplerPeak > 0.98 ? "#c62828"
-                                       : (UI.samplerPeak > 0.8 ? "#ef6c00" : Material.accent)
+                                       : (UI.samplerPeak > 0.8 ? "#ef6c00"
+                                                               : root.accentColor)
                     }
 
                     Flow {

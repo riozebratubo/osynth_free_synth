@@ -435,6 +435,11 @@ QString SynthController::engineNameFor(int engine) {
     case ENG_WAVETABLE:   return QStringLiteral("Wavetable");
     case ENG_MODULAR:     return QStringLiteral("Modular");
     case ENG_GRANULAR:    return QStringLiteral("Granular");
+    case ENG_SAMPLER:     return QStringLiteral("Sampler");
+    // Reached only by firmware newer than this app. The picker draws whatever
+    // engine.type's enum declares, so an engine added later shows as "?" here
+    // rather than being hidden -- which is the honest report: it exists and
+    // this build does not know its name.
     default:              return QStringLiteral("?");
   }
 }
@@ -2826,7 +2831,7 @@ QVariantMap SynthController::importPatchesToLibrary(const QString& text) {
     // Unlike a push, which is gone once it lands, a row stays — and Load sends
     // its engine number straight to the synth. A number this build has no
     // engine for is refused rather than stored.
-    if (engine < ENG_SUBTRACTIVE || engine > ENG_GRANULAR) {
+    if (engine < ENG_SUBTRACTIVE || engine > ENG_SAMPLER) {
       ++skipped;
       continue;
     }

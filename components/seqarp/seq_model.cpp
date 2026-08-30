@@ -12,6 +12,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "synth_pack.h"
 
 static const char* TAG = "seqmodel";
 
@@ -193,16 +194,20 @@ esp_err_t seq_model_init(void) {
     s_song[0].pattern = 0;
     s_song[0].repeats = 1;
 
+    /* Hoisted out of the ESP_LOGI() argument list below. A preprocessing
+     * directive inside a macro invocation is undefined behaviour in both C and
+     * C++ (C++20 [cpp.replace]/11); GCC accepts it as an extension and MSVC
+     * rejects it outright, which is how the host port found this one. */
+#if CONFIG_SPIRAM
+    const char* const pool = " PSRAM";
+#else
+    const char* const pool = " internal";
+#endif
     ESP_LOGI(TAG,
              "up: %d patterns x %d tracks x %d steps (%u KB%s), %d p-lock "
              "slots, default length %d",
              SEQ_PATTERNS, SEQ_TRACKS, SEQ_MAX_STEPS,
-             (unsigned)(bytes / 1024),
-#if CONFIG_SPIRAM
-             " PSRAM",
-#else
-             " internal",
-#endif
+             (unsigned)(bytes / 1024), pool,
              SEQ_PLOCKS, SEQ_DEFAULT_STEPS);
     return ESP_OK;
 }
@@ -823,7 +828,8 @@ struct FileHeader {
  * Layout copied from the S12-S22 presets.cpp `SeqFile` (which no longer
  * exists there — the preset system writes whole patterns now); kept
  * byte-identical so sequence slots saved by that firmware still load. */
-struct __attribute__((packed)) LegacyFile {
+OSYNTH_PACK_PUSH
+struct OSYNTH_PACKED LegacyFile {
     uint32_t magic;
     uint8_t version; /* 1 */
     uint8_t count;   /* 0..32 */
@@ -832,6 +838,7 @@ struct __attribute__((packed)) LegacyFile {
     uint8_t vels[32];
 };
 static_assert(sizeof(LegacyFile) == 72, "S12 on-disk layout");
+OSYNTH_PACK_POP
 constexpr uint32_t kLegacyMagic = 0x3151534Fu; /* "OSQ1" */
 
 } // namespace

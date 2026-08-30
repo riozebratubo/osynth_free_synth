@@ -21,6 +21,18 @@
 
 //
 
+#ifdef Q_OS_WINDOWS
+#include <windows.h>  // for the debug terminal window
+
+#include <cstdio>  // for the debug terminal window
+#endif
+
+// The transport. An embedded build compiles neither BLE backend -- and must
+// not even include their headers, since those name Qt Bluetooth and SimpleBLE
+// types that this build does not link.
+#ifdef OSYNTHO_EMBEDDED
+#include "src/embeddedmanager.h"
+#else
 #ifdef Q_OS_LINUX
 #include "src/bluetoothmanager.h"
 #endif
@@ -31,12 +43,9 @@
 #include "src/bluetoothmanager.h"
 #endif
 #ifdef Q_OS_WINDOWS
-#include <windows.h>  // for the debug terminal window
-
-#include <cstdio>  // for the debug terminal window
-
 #include "src/bluetoothmanager2.h"
 #endif
+#endif  // OSYNTHO_EMBEDDED
 
 //
 
@@ -226,7 +235,11 @@ int main(int argc, char* argv[]) {
 
   qDebug() << "App | Finishing...";
 
+#ifdef OSYNTHO_EMBEDDED
+  EmbeddedManager::instance().finish();
+#else
   BluetoothManager::instance().finish();
+#endif
 
   return 0;
 }

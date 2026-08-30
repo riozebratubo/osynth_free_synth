@@ -55,7 +55,11 @@
 #include <cstdlib>
 #include <cstring>
 
+#if defined(SYNTH_TARGET_HOST)
+#include "host_paths.h"
+#else
 #include "esp_littlefs.h"
+#endif
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -70,6 +74,7 @@
 #include "persist.h" /* persist_owns(): the fence around the NVS settings */
 #include "sampler.h" /* SMP_PID_*: the recorder's transport is not patch data */
 #include "seq_model.h"
+#include "synth_pack.h"
 #include "seqarp.h"
 #include "synth_config.h"
 #include "synth_params.h"
@@ -90,8 +95,33 @@ using osynth::ParamType;
 
 namespace {
 
+#if defined(SYNTH_TARGET_HOST)
+/* A directory under the host data root instead of a LittleFS mount point,
+ * resolved once in presets_init(). Every use below is a "%s" argument or an
+ * opendir(), so a pointer serves exactly where the array did -- and the file
+ * layout inside it is unchanged, which is what lets a preset written on a host
+ * be read by the firmware and the other way round. */
+const char* kBasePath = "";
+char s_base_path[512];
+#else
 constexpr char kBasePath[] = "/lfs";
 constexpr char kPartLabel[] = "storage";
+#endif
+
+/* Bytes for a path here.
+ *
+ * "/lfs/p0_048.osp" needs 16 of the 40 these buffers had for years. A host
+ * data directory is a full user-profile path and does not fit at all, and
+ * because every path is built with snprintf the failure is silent: the name is
+ * truncated rather than overflowing, and the write lands on a file whose name
+ * is a prefix of the directory it should have gone into. That is exactly what
+ * happened -- a 32-byte settings blob appeared as a file called "pre" next to
+ * the presets folder -- so this is sized rather than assumed. */
+#if defined(SYNTH_TARGET_HOST)
+constexpr size_t kPathMax = 640;
+#else
+constexpr size_t kPathMax = 48;
+#endif
 constexpr uint32_t kPresetMagic = 0x3150534Fu; /* "OSP1" little-endian */
 constexpr uint32_t kSetMagic = 0x3153534Fu;    /* "OSS1" little-endian */
 constexpr uint16_t kSetVersion = 1;
@@ -154,7 +184,8 @@ constexpr int kSwitchWaitMs = 2000;
  * alone. Identical bytes, opposite meanings, and no way to tell them apart
  * except by asking which firmware wrote them. That is what the version byte
  * now answers, and legacy_fx_enable() is what acts on the answer. */
-struct __attribute__((packed)) PresetHdr {
+OSYNTH_PACK_PUSH
+struct OSYNTH_PACKED PresetHdr {
     uint32_t magic;
     uint8_t version; /* 1, or 2 when a graph blob follows the pairs */
     uint8_t engine;
@@ -162,6 +193,7 @@ struct __attribute__((packed)) PresetHdr {
     char name[PRESETS_NAME_MAX]; /* NUL-padded */
 };
 static_assert(sizeof(PresetHdr) == 32, "on-disk layout");
+OSYNTH_PACK_POP
 constexpr uint8_t kPresetVersionLegacy = 1;
 constexpr uint8_t kPresetVersionLegacyGraph = 2;
 constexpr uint8_t kPresetVersion = 3;
@@ -212,7 +244,8 @@ bool s_legacy_fx = false;
  * entries, then `patterns` pattern blobs each prefixed by its u32 length.
  * The blobs are exactly what a sequence slot stores, so the two formats
  * cannot drift apart. */
-struct __attribute__((packed)) SetHdr {
+OSYNTH_PACK_PUSH
+struct OSYNTH_PACKED SetHdr {
     uint32_t magic;
     uint16_t version; /* 1 */
     uint8_t patterns;
@@ -222,6 +255,7 @@ struct __attribute__((packed)) SetHdr {
     char name[PRESETS_NAME_MAX]; /* NUL-padded */
 };
 static_assert(sizeof(SetHdr) == 36, "on-disk layout");
+OSYNTH_PACK_POP
 
 /* The working state file (S40): the header, then `params` pairs, then a
  * `graph_len`-byte modular graph blob, then `song_len` chain entries, then
@@ -243,7 +277,8 @@ static_assert(sizeof(SetHdr) == 36, "on-disk layout");
  * simply has no section, which is exactly what "no set was stored" should
  * mean, and a pre-S41 firmware reading a new file stops after the patterns
  * and ignores the tail. */
-struct __attribute__((packed)) StateHdr {
+OSYNTH_PACK_PUSH
+struct OSYNTH_PACKED StateHdr {
     uint32_t magic;
     uint16_t version;
     uint8_t engine;
@@ -255,6 +290,7 @@ struct __attribute__((packed)) StateHdr {
     int16_t preset;    /* linear slot last loaded, -1 = none — display only */
 };
 static_assert(sizeof(StateHdr) == 16, "on-disk layout");
+OSYNTH_PACK_POP
 
 enum Op : uint8_t {
     OP_LOAD, OP_SAVE, OP_SEQ_LOAD, OP_SEQ_SAVE, OP_SET_LOAD, OP_SET_SAVE,
@@ -355,7 +391,7 @@ void set_path(char* out, size_t n, int slot) {
  * for anything that is not a preset of this version, so a stray or truncated
  * file never shows up in a listing. */
 bool read_slot_name(int engine, int slot, char name[PRESETS_NAME_MAX]) {
-    char path[40];
+    char path[kPathMax];
     preset_path(path, sizeof(path), engine, slot);
     FILE* fp = fopen(path, "rb");
     if (fp == nullptr) return false;
@@ -697,6 +733,15 @@ int fetch_snapshot(int engine, int slot, char name[PRESETS_NAME_MAX]) {
     s_legacy_fx = false;
     if (slot < kUserFirst) {
         const factory_preset_t* f = &g_factory_presets[engine][slot];
+        /* The tail of a short bank; see presets_slot_info() for how one
+         * arises. Refused rather than loaded as a nameless empty patch --
+         * and refused before strlcpy(), which is where the NULL used to be
+         * dereferenced. */
+        if (f->name == nullptr || f->name[0] == '\0') {
+            ESP_LOGW(TAG, "load %s/%d: no factory preset in that slot",
+                     engine_name(engine), slot);
+            return -1;
+        }
         strlcpy(name, f->name, PRESETS_NAME_MAX);
         int n = f->count < kMaxPairs ? f->count : kMaxPairs;
         if (n > 0) memcpy(s_pairs, f->pairs, (size_t)n * sizeof(preset_pair_t));
@@ -707,7 +752,7 @@ int fetch_snapshot(int engine, int slot, char name[PRESETS_NAME_MAX]) {
                  slot);
         return -1;
     }
-    char path[40];
+    char path[kPathMax];
     preset_path(path, sizeof(path), engine, slot);
     FILE* fp = fopen(path, "rb");
     if (fp == nullptr) {
@@ -1027,7 +1072,7 @@ void do_save(int linear, const char* name_in) {
             snprintf(h.name, sizeof(h.name), "user %d", slot);
         }
 
-        char tmp[40], path[40];
+        char tmp[kPathMax], path[kPathMax];
         snprintf(tmp, sizeof(tmp), "%s/tmp.osp", kBasePath);
         preset_path(path, sizeof(path), engine, slot);
         if (!write_file(tmp, path, &h, sizeof(h), s_pairs,
@@ -1072,7 +1117,7 @@ void do_seq_save(int slot) {
         return;
     }
 
-    char tmp[40], path[40];
+    char tmp[kPathMax], path[kPathMax];
     snprintf(tmp, sizeof(tmp), "%s/tmp.osq", kBasePath);
     seq_path(path, sizeof(path), slot);
     if (write_file(tmp, path, buf, n, nullptr, 0)) {
@@ -1088,7 +1133,7 @@ void do_seq_load(int slot) {
         ESP_LOGW(TAG, "seq load: storage unavailable");
         return;
     }
-    char path[40];
+    char path[kPathMax];
     seq_path(path, sizeof(path), slot);
     FILE* fp = fopen(path, "rb");
     if (fp == nullptr) {
@@ -1202,7 +1247,7 @@ void do_set_save(int slot) {
     h.params = (uint16_t)params;
     snprintf(h.name, sizeof(h.name), "set %d", slot + 1);
 
-    char tmp[40], path[48];
+    char tmp[kPathMax], path[kPathMax];
     snprintf(tmp, sizeof(tmp), "%s/tmp.oss", kBasePath);
     set_path(path, sizeof(path), slot);
 
@@ -1254,7 +1299,7 @@ void do_set_load(int slot) {
         ESP_LOGW(TAG, "set load: storage unavailable");
         return;
     }
-    char path[48];
+    char path[kPathMax];
     set_path(path, sizeof(path), slot);
     FILE* fp = fopen(path, "rb");
     if (fp == nullptr) {
@@ -1505,7 +1550,7 @@ bool do_state_save(const char* why) {
         return true; /* nothing actually moved */
     }
 
-    char tmp[40], path[40];
+    char tmp[kPathMax], path[kPathMax];
     snprintf(tmp, sizeof(tmp), "%s/tmp.osw", kBasePath);
     state_path(path, sizeof(path));
 
@@ -1563,7 +1608,7 @@ void do_state_load(void) {
             ESP_LOGW(TAG, "state: storage unavailable — starting at defaults");
             break;
         }
-        char path[40];
+        char path[kPathMax];
         state_path(path, sizeof(path));
         FILE* fp = fopen(path, "rb");
         if (fp == nullptr) {
@@ -1803,7 +1848,7 @@ void do_state_reset(void) {
     reflect(PRESET_PID_LOAD, 0);
 
     if (s_fs_ok) {
-        char path[40];
+        char path[kPathMax];
         state_path(path, sizeof(path));
         remove(path); /* absent is "never saved" as far as the next boot cares */
     }
@@ -2004,6 +2049,38 @@ void param_listener(uint16_t id, float value, ParamOrigin origin, void*) {
 } // namespace
 
 extern "C" esp_err_t presets_init(void) {
+#if defined(SYNTH_TARGET_HOST)
+    /* No partition to mount and no filesystem to format: a directory either
+     * exists or can be made. Failure is reported the same way a failed mount
+     * is, and has the same consequence -- factory presets only, saving
+     * disabled -- because that is the behaviour every caller downstream is
+     * already written against. */
+    const esp_err_t mnt =
+        osynth_host_subdir("presets", s_base_path, sizeof(s_base_path))
+            ? ESP_OK
+            : ESP_FAIL;
+    if (mnt == ESP_OK) kBasePath = s_base_path;
+    /* Declared for symmetry with the LittleFS branch, which reports them; a
+     * host directory has no fixed size to report against, so the boot line
+     * names the path instead. */
+    size_t total = 0, used = 0;
+    (void)total;
+    (void)used;
+    if (mnt == ESP_OK) {
+        s_fs_ok = true;
+        s_cache = (SlotCache*)calloc(kCacheEntries, sizeof(SlotCache));
+        if (s_cache == nullptr) {
+            ESP_LOGW(TAG, "no room for the %u B directory cache — listings "
+                     "will read every slot",
+                     (unsigned)(kCacheEntries * sizeof(SlotCache)));
+        } else {
+            cache_build();
+        }
+    } else {
+        ESP_LOGW(TAG, "no preset directory — factory presets only, "
+                 "saving disabled");
+    }
+#else
     esp_vfs_littlefs_conf_t conf = {};
     conf.base_path = kBasePath;
     conf.partition_label = kPartLabel;
@@ -2025,6 +2102,7 @@ extern "C" esp_err_t presets_init(void) {
         ESP_LOGW(TAG, "littlefs mount failed (%s) — factory presets only, "
                  "saving disabled", esp_err_to_name(mnt));
     }
+#endif
 
     static const ParamDesc kParams[] = {
         {PRESET_PID_LOAD, "preset.load", ParamType::Int, ParamCurve::Linear,
@@ -2067,6 +2145,20 @@ extern "C" esp_err_t presets_init(void) {
     }
     if (ps.addListener(param_listener, nullptr) < 0) return ESP_FAIL;
 
+    /* The storage line differs because the two backends can honestly report
+     * different things: a LittleFS partition has a fixed size worth showing
+     * against its usage, while a host directory has whatever the volume has
+     * and "0/0 KB used" would be a worse answer than naming the path. */
+#if defined(SYNTH_TARGET_HOST)
+    ESP_LOGI(TAG,
+             "up: %s, %d factory + %d user presets x %d "
+             "engines, %d seq slots, %d set slots, %d saved (cached) "
+             "(preset.load/.save/.seq.*/.seqset.*)",
+             s_fs_ok ? kBasePath : "no storage",
+             PRESETS_FACTORY_SLOTS, PRESETS_PER_ENGINE - PRESETS_FACTORY_SLOTS,
+             SYNTH_ENGINE_COUNT, PRESETS_SEQ_SLOTS, PRESETS_SET_SLOTS,
+             s_cache_count);
+#else
     ESP_LOGI(TAG,
              "up: littlefs %u/%u KB used, %d factory + %d user presets x %d "
              "engines, %d seq slots, %d set slots, %d saved (cached) "
@@ -2075,6 +2167,7 @@ extern "C" esp_err_t presets_init(void) {
              PRESETS_FACTORY_SLOTS, PRESETS_PER_ENGINE - PRESETS_FACTORY_SLOTS,
              SYNTH_ENGINE_COUNT, PRESETS_SEQ_SLOTS, PRESETS_SET_SLOTS,
              s_cache_count);
+#endif
     return ESP_OK;
 }
 
@@ -2157,10 +2250,19 @@ extern "C" bool presets_slot_info(int engine, int slot,
     }
     if (factory != nullptr) *factory = slot < kUserFirst;
     if (slot < kUserFirst) {
-        if (name != nullptr) {
-            strlcpy(name, g_factory_presets[engine][slot].name,
-                    PRESETS_NAME_MAX);
-        }
+        /* A factory bank may be shorter than PRESETS_FACTORY_SLOTS, and the
+         * sampler's deliberately is (7 of 48) -- see the note above its table
+         * in presets_factory.cpp. C++ zero-fills the tail, so those entries
+         * have a NULL name, and this used to hand that straight to strlcpy():
+         * a null dereference reached by nothing more exotic than the app
+         * listing that engine's presets, which it does on every engine
+         * switch.
+         *
+         * An empty entry is an empty slot, which is exactly what `false`
+         * already means to every caller here. */
+        const char* fname = g_factory_presets[engine][slot].name;
+        if (fname == nullptr || fname[0] == '\0') return false;
+        if (name != nullptr) strlcpy(name, fname, PRESETS_NAME_MAX);
         return true;
     }
     if (!s_fs_ok) return false;

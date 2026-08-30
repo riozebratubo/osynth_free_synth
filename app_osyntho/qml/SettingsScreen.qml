@@ -45,7 +45,15 @@ Pane {
             Layout.fillWidth: true
             TabButton { text: Tr.t("General") }
             TabButton { text: Tr.t("Keyboard") }
-            TabButton { text: Tr.t("Bluetooth") }
+            // Hidden in a standalone build: the synth is in this process and
+            // there is no link to configure. The TabButton stays in the bar
+            // rather than being removed, so the StackLayout page indices below
+            // keep lining up with it; invisible, it cannot be reached.
+            TabButton {
+                text: Tr.t("Bluetooth")
+                visible: !App.standalone
+                width: visible ? implicitWidth : 0
+            }
         }
 
         StackLayout {

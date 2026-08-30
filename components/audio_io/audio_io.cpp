@@ -756,7 +756,11 @@ static esp_err_t start_common(void* ctx) {
         ESP_LOGW(TAG, "master.volume not registered; running at unity gain");
     }
 
-#if SYNTH_ENABLE_I2S_DAC
+#if defined(SYNTH_TARGET_HOST)
+    /* First, and unconditionally: on a host there is exactly one output and
+     * none of the peripheral capabilities below exist to choose between. */
+    s_sink = audio_sink_host();
+#elif SYNTH_ENABLE_I2S_DAC
     s_sink = audio_sink_i2s(); /* explicit user choice beats the USB default */
 #elif SYNTH_ENABLE_USB
     s_sink = audio_sink_usb();
@@ -784,6 +788,17 @@ static esp_err_t start_common(void* ctx) {
     bool params_ok = (s_in_route != nullptr && s_in_gain != nullptr);
 
 #if SYNTH_ENABLE_LINE_IN
+#if defined(SYNTH_TARGET_HOST)
+    /* No port to belong to. The capture device is opened by the sink itself --
+     * one duplex device, so playback and capture share a clock the way the I2S
+     * port's two halves do -- and ready() is the whole answer. */
+    s_line_ok = audio_source_i2s_ready();
+    if (s_line_ok) {
+        ESP_LOGI(TAG, "audio input ready (stereo, duplex with the output)");
+    } else {
+        ESP_LOGW(TAG, "audio input inactive: no capture device");
+    }
+#else
     /* The line input belongs to the I2S port, so it only exists if that port
      * is what actually came up. */
     s_line_ok = (s_sink == audio_sink_i2s()) && audio_source_i2s_ready();
@@ -793,6 +808,7 @@ static esp_err_t start_common(void* ctx) {
         ESP_LOGW(TAG, "line input inactive: sink %s, rx %d", s_sink->name,
                  (int)audio_source_i2s_ready());
     }
+#endif
 #endif
 
 #if SYNTH_ENABLE_MIC_IN

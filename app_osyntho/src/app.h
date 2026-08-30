@@ -13,7 +13,9 @@
 #include "src/ibluetoothmanager.h"
 #include "src/theme.h"
 
-#ifdef Q_OS_WINDOWS
+#ifdef OSYNTHO_EMBEDDED
+#include "src/embeddedmanager.h"
+#elif defined(Q_OS_WINDOWS)
 #include "src/bluetoothmanager2.h"
 #else
 #include "src/bluetoothmanager.h"
@@ -34,6 +36,15 @@ class App final : public QObject {
                  fontAwesomeFontNameChanged FINAL)
   Q_PROPERTY(QString fontAwesomeRegularName READ getFontAwesomeRegularFontName WRITE
                  setFontAwesomeRegularFontName NOTIFY fontAwesomeRegularFontNameChanged FINAL)
+  // True when the synth is compiled into this build and reached in process
+  // rather than over BLE (OSYNTHO_EMBEDDED).
+  //
+  // A property and not a QML #ifdef, because QML has no preprocessor: the
+  // screens that only make sense against a real radio -- the device selector,
+  // the connect/disconnect controls, the Bluetooth toggle -- bind their
+  // `visible` to this. CONSTANT because it cannot change while the app runs.
+  Q_PROPERTY(bool standalone READ isStandalone CONSTANT FINAL)
+
   Q_PROPERTY(Theme theme READ getTheme NOTIFY themeChanged FINAL)
   Q_PROPERTY(int themePresetIndex READ getThemePresetIndex NOTIFY themeChanged FINAL)
   Q_PROPERTY(bool bluetoothEnabled READ getBluetoothEnabled WRITE setBluetoothEnabled NOTIFY
@@ -85,6 +96,14 @@ class App final : public QObject {
   Q_INVOKABLE bool isDesktop();
   Q_INVOKABLE bool isMobile();
   Q_INVOKABLE bool isAndroid();
+
+  bool isStandalone() const {
+#ifdef OSYNTHO_EMBEDDED
+    return true;
+#else
+    return false;
+#endif
+  }
   Q_INVOKABLE bool isWindows();
   Q_INVOKABLE bool isLinux();
 
