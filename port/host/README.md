@@ -276,6 +276,31 @@ on macOS that fails Apple's *notarization* unless the app carries the
 allow-unsigned-executable-memory entitlement -- a far worse trade than naming
 three frameworks.
 
+## The protocol has one owner now
+
+`components/ctrl_proto/include/ctrl_proto_wire.h` holds the opcodes and status
+codes. The app still has its own copy in `src/ble/synthprotocol.h`, and has to
+-- a BLE build talks to an instrument over the air and cannot include a
+firmware header.
+
+What the standalone build adds is that both are in one binary, so they can be
+*compared*. `app_osyntho/src/ble/protocolparity.cpp` is 40 `static_assert`s
+doing exactly that, compiled only when `OSYNTHO_EMBEDDED` is on. It emits no
+code.
+
+It exists because care alone had already failed once: the app's engine enum
+stopped at `ENG_GRANULAR = 5` while the firmware had added the sampler at 6.
+The app drew a seventh engine it could not name, and selecting it asked the
+synth for a preset list it then crashed serving. Neither build said a word.
+
+The asserts were verified by breaking them on purpose -- removing
+`ENG_SAMPLER` and renumbering one opcode -- and both were caught by name:
+
+```
+error C2338: static assertion failed: 'SynthCtl drift: OP_KIT_EDIT differs
+             between app and firmware'
+```
+
 ## The path-length trap
 
 Every storage component builds its paths with `snprintf` into a fixed buffer

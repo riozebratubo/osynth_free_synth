@@ -121,7 +121,13 @@ if (OSYNTHO_EMBEDDED)
   # The engine replaces the radio entirely: neither BLE backend is compiled,
   # so an embedded build carries no Bluetooth code at all rather than carrying
   # it unused.
-  set(CONDITIONAL_EMBEDDED_MANAGER src/embeddedmanager.cpp src/embeddedmanager.h)
+  # protocolparity.cpp is compiled only here, and only here can it be: it
+  # includes both the app's copy of the protocol constants and the firmware's,
+  # which share a binary in no other configuration. It emits no code -- it is
+  # entirely static_assert -- and exists so that the two cannot drift again.
+  set(CONDITIONAL_EMBEDDED_MANAGER
+      src/embeddedmanager.cpp src/embeddedmanager.h
+      src/ble/protocolparity.cpp)
 else()
   if (WIN32)
     set(CONDITIONAL_WIN32_BLUETOOTHMANAGER
