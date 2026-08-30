@@ -76,6 +76,7 @@
 #include "seq_model.h"
 #include "synth_pack.h"
 #include "seqarp.h"
+#include "synth_file.h"
 #include "synth_config.h"
 #include "synth_params.h"
 
@@ -999,7 +1000,7 @@ bool write_file(const char* tmp, const char* path, const void* hdr,
      * has nothing to do with it. */
     if (ok && tail_len > 0) ok = fwrite(tail, tail_len, 1, fp) == 1;
     fclose(fp);
-    if (!ok || rename(tmp, path) != 0) {
+    if (!ok || synth_replace_file(tmp, path) != 0) {
         ESP_LOGW(TAG, "write to %s failed (filesystem full?)", path);
         remove(tmp);
         return false;
@@ -1280,7 +1281,7 @@ void do_set_save(int slot) {
     if (fp != nullptr) fclose(fp);
     free(buf);
 
-    if (!ok || rename(tmp, path) != 0) {
+    if (!ok || synth_replace_file(tmp, path) != 0) {
         ESP_LOGW(TAG, "set save: writing slot %d failed (filesystem full?)",
                  slot);
         remove(tmp);
@@ -1569,7 +1570,7 @@ bool do_state_save(const char* why) {
     fclose(fp);
     free(buf);
 
-    if (!built || !w.ok || rename(tmp, path) != 0) {
+    if (!built || !w.ok || synth_replace_file(tmp, path) != 0) {
         ESP_LOGW(TAG, "state save failed (filesystem full?)");
         remove(tmp);
         return false;
@@ -2209,6 +2210,21 @@ extern "C" esp_err_t presets_request_seqset_load(int slot) {
 
 extern "C" esp_err_t presets_state_restore(void) {
     return queue_req(OP_STATE_LOAD, 0, nullptr) ? ESP_OK : ESP_ERR_NO_MEM;
+}
+
+extern "C" esp_err_t presets_state_wait_restored(uint32_t timeout_ms) {
+    /* Polled rather than signalled, because the thing being waited for is a
+     * one-shot at boot and a semaphore would need clearing, draining and a
+     * decision about what a second waiter means. 5 ms is far below the cost of
+     * the file read it is waiting on. */
+    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+    while (!s_state_ready.load(std::memory_order_relaxed)) {
+        if ((int32_t)(xTaskGetTickCount() - deadline) >= 0) {
+            return ESP_ERR_TIMEOUT;
+        }
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    return ESP_OK;
 }
 
 extern "C" esp_err_t presets_state_save_now(void) {

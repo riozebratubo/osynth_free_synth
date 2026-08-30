@@ -149,6 +149,26 @@ esp_err_t presets_request_seqset_save(int slot);
  * the file it had just read. */
 esp_err_t presets_state_restore(void);
 
+/* Blocks until the queued restore has finished, or `timeout_ms` passes.
+ * Returns ESP_OK once it has (including when there was nothing stored),
+ * ESP_ERR_TIMEOUT otherwise.
+ *
+ * presets_state_restore() only *queues* the work, which is right for the
+ * firmware: main.cpp has nothing to do with the parameters between queueing it
+ * and the BLE stack coming up, and by the time a client connects the synth has
+ * settled. A caller that does not have that gap needs this.
+ *
+ * Two reasons to want it. A reader — the standalone app's own discovery —
+ * would otherwise watch the whole parameter set move underneath its first
+ * pass. And a *writer* is worse off still: the restore takes its
+ * change-detection baseline when it finishes, so a parameter set before that
+ * moment is folded into the baseline and never recognised as an edit. It is
+ * then never auto-saved, which looks exactly like the working state being
+ * broken.
+ *
+ * Control tasks only; it sleeps. */
+esp_err_t presets_state_wait_restored(uint32_t timeout_ms);
+
 /* Writes the working state now if anything has moved, ignoring the settle and
  * silence waits. For a caller that knows a stall is acceptable — before a
  * deliberate reboot. Blocking; control tasks only. */

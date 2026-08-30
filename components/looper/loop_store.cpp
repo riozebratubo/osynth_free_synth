@@ -31,6 +31,7 @@
 #include "sdkconfig.h"
 
 #include "loop_adpcm.h"
+#include "synth_file.h"
 #include "synth_config.h"
 
 static const char* TAG = "loop_store";
@@ -856,7 +857,7 @@ extern "C" esp_err_t loop_store_save(int slot, uint32_t loop_frames,
         return ESP_FAIL;
     }
     remove(path); /* FAT rename does not overwrite */
-    if (rename(tmp, path) != 0) {
+    if (synth_replace_file(tmp, path) != 0) {
         remove(tmp);
         drop_mount();
         return ESP_FAIL;

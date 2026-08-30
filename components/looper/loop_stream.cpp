@@ -48,6 +48,7 @@
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
+#include "synth_file.h"
 #include "loop_store.h"
 
 static const char* TAG = "loop_stream";
@@ -764,7 +765,7 @@ extern "C" esp_err_t loop_stream_close_record(int t, bool keep) {
                 s_playing &= (uint8_t)~(1u << t);
             }
             remove(dst); /* FAT rename does not overwrite */
-            if (rename(tmp, dst) != 0) {
+            if (synth_replace_file(tmp, dst) != 0) {
                 ESP_LOGE(TAG, "track %d: rename failed (%s)", t + 1,
                          strerror(errno));
                 remove(tmp);

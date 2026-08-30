@@ -192,17 +192,84 @@ esp_err_t osynth_host_start(const osynth_host_config_t* cfg) {
             ESP_LOGE(TAG, "audio failed to start: %s", esp_err_to_name(err));
             return err;
         }
+        /* The working state -- the patch that was playing when the app last
+         * closed. main.cpp restores it at the same point and for the same
+         * reason: applying it can switch engines, and the S6 switch protocol
+         * hands the voice pool over on two render boundaries, so before the
+         * audio task exists there is no boundary to hand over on and the
+         * switch is refused.
+         *
+         * Not fatal if it fails. A synth that refuses to start because it
+         * could not restore a patch is worse than one that starts at its
+         * defaults -- the same rule persist_init() follows.
+         *
+         * Auto-saving begins when this completes and not before, so nothing
+         * has to be scheduled here: from now on the engine writes the state
+         * out by itself once edits settle and the output falls quiet. */
+        const esp_err_t rerr = presets_state_restore();
+        if (rerr != ESP_OK) {
+            ESP_LOGW(TAG, "working state not restored: %s (starting at "
+                          "defaults)", esp_err_to_name(rerr));
+        } else {
+            /* Waited for, unlike the firmware, and the difference is what the
+             * caller does next. main.cpp queues this and then brings up MIDI
+             * and BLE, so the synth has settled long before a client connects.
+             * An embedding app calls start() and immediately begins reading --
+             * or worse, writing -- parameters, and the restore lands
+             * underneath it: a read sees the whole set move, and a write made
+             * before the restore finishes is folded into its change-detection
+             * baseline and then never auto-saved.
+             *
+             * So start() returns a settled synth. The wait is one small file
+             * read; the timeout is only so that a wedged preset task cannot
+             * stop an app from opening. */
+            const esp_err_t werr = presets_state_wait_restored(3000);
+            if (werr != ESP_OK) {
+                ESP_LOGW(TAG, "working state still restoring after 3 s — "
+                              "continuing, early edits may not be saved");
+            }
+        }
+
         ESP_LOGI(TAG, "up: %u parameters, sink %s", (unsigned)ps.count(),
                  audio_io_sink_name());
     } else {
-        ESP_LOGI(TAG, "up: %u parameters, audio not started",
-                 (unsigned)ps.count());
+        /* No restore without the audio task: the contract in presets.h is
+         * explicit that it has to come after audio_io_start(), because an
+         * engine switch cannot be handed over without render boundaries. A
+         * harness driving the protocol wants a known starting state anyway. */
+        ESP_LOGI(TAG, "up: %u parameters, audio not started (working state "
+                      "not restored)", (unsigned)ps.count());
     }
     return ESP_OK;
 }
 
 void osynth_host_stop(void) {
     if (!g_started.load()) return;
+
+    /* Write the working state before anything else goes.
+     *
+     * The firmware never reaches this: an instrument runs until power is
+     * pulled, which is why the auto-save is built to find a quiet moment
+     * rather than to be asked. An app is *closed*, and that is a moment the
+     * synth never gets -- so the last edits before a close would otherwise be
+     * the ones the settle timer had not yet committed.
+     *
+     * Blocking, and that is acceptable here: the caller is shutting down, and
+     * a stalled render chain has nothing left to disturb. */
+    const esp_err_t serr = presets_state_save_now();
+    if (serr != ESP_OK) {
+        ESP_LOGW(TAG, "working state not saved on shutdown: %s",
+                 esp_err_to_name(serr));
+    } else {
+        /* Logged on success too, which the firmware has no reason to do and
+         * an app does: this is the only evidence that the shutdown path ran
+         * at all. A close that skipped it looks identical from the outside to
+         * one that ran and found nothing changed -- and only one of those is
+         * a bug. (It says "checked", not "written", because the writer skips
+         * the file when nothing has moved since the restore.) */
+        ESP_LOGI(TAG, "working state checked and committed");
+    }
+
     osynth_host_midi_in_stop();
     /* The device only. The control tasks own state the app may still be
      * reading, and the firmware never stops them either -- see the header. */

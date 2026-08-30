@@ -10,7 +10,10 @@ played from your phone (or Windows, Mac, Linux) over Bluetooth.
   16-slot drum kit · 8-track looper max 160s · line + mic in
   USB audio + MIDI · USB MIDI host · BLE app
   everything persists · powers on where you left off
+  …or run the whole thing inside the app, with no board at all
 ```
+
+Again. **Or run the whole thing inside the app, with no board at all.** Like a vst instrument, but a standalone app instead.
 
 ![Osyntho app screenshots](screenshots/screenshots.gif)
 
@@ -243,6 +246,86 @@ parameter at runtime, so it fits whatever firmware you flashed.
 - A patch library stored locally on the app, with the modular graph saved
   alongside the parameters
 - English and Brazilian Portuguese
+
+It can also be built with the synth **inside it** — see below.
+
+---
+
+## 🖥️ Standalone — the whole synth, inside the app
+
+**No board. No cable. The same synth.**
+
+osyntho can now be built with the instrument *inside it*: the engine runs in
+the app's own process, plays through your computer's sound card, and answers
+the app over the very protocol it uses on the air.
+
+```sh
+cmake -S app_osyntho -B build_standalone -DOSYNTHO_EMBEDDED=ON
+cmake --build build_standalone
+```
+
+That flag is the whole of it.
+
+### It is the same code, not a rewrite
+
+**39 source files. 36,004 lines. One copy.** The standalone build compiles the
+*same* `components/` sources the firmware does — not a fork, not a port, not a
+folder of adapted copies. Edit `fx.cpp` and both the instrument and the app
+change, because there is only one `fx.cpp`.
+
+What differs is a shim layer under it: where the firmware calls FreeRTOS, an
+I2S port, NVS and LittleFS, the standalone build calls threads, a sound card,
+a file and a directory. The DSP never learns which it got.
+
+| | on the instrument | in the app |
+| --- | --- | --- |
+| Audio out | I2S DAC / USB / codec | WASAPI · CoreAudio · ALSA · AAudio |
+| Audio in | I2S ADC, sample-locked | the same device, full duplex |
+| MIDI in | USB host · DIN | every port on the machine |
+| Settings | NVS | a file |
+| Presets | LittleFS | a directory |
+| Loop takes | SD card | a directory |
+| Tasks | FreeRTOS | threads |
+
+### Everything, not a demo
+
+All six engines. The 146-parameter FX bus. The 8×256-step sequencer, chord
+mode, the drum kit, the 8-track looper, the modular patch canvas, the presets,
+the audio input, the mod matrix.
+
+Not one line of the app's UI changed for this. Every screen speaks SynthCtl v1
+to an `IBluetoothManager`, and the standalone build simply hands it a different
+one — so a screen cannot tell an engine in its own process from an instrument
+across the room, and does not have to.
+
+Plug a MIDI keyboard in and play it. Sing into the microphone and granulate it.
+Record a loop. Save a preset — **into the same `.osp` file the instrument
+writes**, byte for byte, so a patch made on your laptop loads on the box.
+
+And it remembers: close the app mid-patch, open it tomorrow, and it comes back
+exactly as you left it. Same working-state file the hardware uses.
+
+### Where it runs
+
+| Platform | Engine | Audio out | Audio in | MIDI in |
+| --- | --- | --- | --- | --- |
+| Windows | ✅ | WASAPI | ✅ | ✅ |
+| Android | ✅ | AAudio | ✅ | — |
+| Linux | ✅ | ALSA / PulseAudio | ✅ | ✅ |
+| macOS | ✅ | CoreAudio | ✅ | ✅ |
+| iOS | ✅ | CoreAudio | ✅ | — |
+
+MIDI input is Windows, macOS and Linux: there is no RtMidi backend for Android
+or iOS, where the answer is USB host or BLE MIDI instead.
+
+> Built and run on Windows; built for both Android ABIs. The Linux, macOS and
+> iOS builds share those same code paths but have not been exercised yet.
+
+### The normal app is unchanged
+
+`OSYNTHO_EMBEDDED` is **off** by default, and the default build is exactly the
+controller it has always been — it carries no engine, and a standalone build
+carries no Bluetooth. One app, two shapes, one set of screens.
 
 ---
 

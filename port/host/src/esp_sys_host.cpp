@@ -10,6 +10,7 @@
 #include "esp_rom_crc.h"
 #include "esp_rom_sys.h"
 #include "esp_system.h"
+#include "synth_file.h"
 
 #include <atomic>
 #include <chrono>
@@ -19,6 +20,15 @@
 #include <cstring>
 #include <mutex>
 #include <thread>
+
+#if defined(_MSC_VER)
+/* MoveFileExA, for the rename shim below. WIN32_LEAN_AND_MEAN keeps the rest
+ * of the Windows headers -- and their `min`/`max` macros -- out of a
+ * translation unit that has no use for them. */
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
 
 namespace {
 
@@ -194,6 +204,16 @@ void esp_rom_delay_us(uint32_t us) {
         std::this_thread::yield();
     }
 }
+
+#if defined(_MSC_VER)
+/* See host_compat.h for why this exists. MOVEFILE_REPLACE_EXISTING is the
+ * atomic replace; the return convention is C rename()'s (0 on success), since
+ * that is what every caller tests. */
+int synth_replace_file(const char* tmp, const char* path) {
+    if (tmp == nullptr || path == nullptr) return -1;
+    return MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING) ? 0 : -1;
+}
+#endif
 
 uint32_t esp_rom_crc32_le(uint32_t crc, const uint8_t* buf, uint32_t len) {
     static uint32_t table[256];

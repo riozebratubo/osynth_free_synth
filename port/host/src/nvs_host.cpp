@@ -17,6 +17,7 @@
 
 #include "esp_log.h"
 #include "host_paths.h"
+#include "synth_file.h"
 
 #include <cstdio>
 #include <cstring>
@@ -135,15 +136,11 @@ bool store(const std::filesystem::path& p, const Store& s) {
         return false;
     }
 
-    std::error_code ec;
-    std::filesystem::rename(tmp, p, ec);
-    if (ec) {
-        /* Windows will not rename onto an existing file on every filesystem;
-         * remove and retry rather than fall back to a non-atomic copy. */
-        std::filesystem::remove(p, ec);
-        std::filesystem::rename(tmp, p, ec);
-    }
-    if (ec) {
+    /* The same replace the firmware's five writers use (synth_file.h). An
+     * earlier version here removed the destination first and renamed into the
+     * gap, which works and gives up the atomicity this function exists for. */
+    if (synth_replace_file(tmp.string().c_str(), p.string().c_str()) != 0) {
+        std::error_code ec;
         std::filesystem::remove(tmp, ec);
         return false;
     }

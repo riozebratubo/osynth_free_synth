@@ -106,9 +106,22 @@ int storage_test(bool check) {
     const float kWant = 0.42f;
     const int kSlot = PRESETS_FACTORY_SLOTS; /* the first user slot */
 
+    /* A *patch* parameter, for the working state (state.osw). Deliberately
+     * not another global: master.volume belongs to persist/NVS, and
+     * persist_owns() is the fence that stops the two stores from both
+     * claiming a parameter -- so testing only globals would never touch the
+     * working state at all.
+     *
+     * osc2.semi is engine-owned (0x02xx) and the subtractive engine is what
+     * boots, so it is present, and it is patch data by every definition. */
+    const uint16_t kPid = 0x0204; /* osc2.semi */
+    const float kSemi = 7.0f;
+
     if (!check) {
         std::printf("\n-- writing --\n");
         ps.set(osynth::PID_MASTER_VOLUME, kWant, ParamOrigin::Ble);
+        ps.set(kPid, kSemi, ParamOrigin::Ble);
+        std::printf("  osc2.semi = %.1f\n", (double)ps.get(kPid));
         std::printf("  master.volume = %.2f\n",
                     (double)ps.get(osynth::PID_MASTER_VOLUME));
 
@@ -122,6 +135,12 @@ int storage_test(bool check) {
                     esp_err_to_name(presets_request_save(0, kSlot, "hosttest")));
         /* The preset task does the work; give it a moment to land. */
         std::this_thread::sleep_for(std::chrono::milliseconds(800));
+
+        /* And the working state, which is what osynth_host_stop() writes on a
+         * real shutdown. Called explicitly so the test does not depend on how
+         * this process happens to exit. */
+        std::printf("  presets_state_save_now: %s\n",
+                    esp_err_to_name(presets_state_save_now()));
 
         std::printf("\n  now run:  osynth_host_demo --storage-check\n");
         return 0;
@@ -142,6 +161,15 @@ int storage_test(bool check) {
     std::printf("  preset slot %d: %s\n", kSlot,
                 preset_ok ? name : "MISSING");
     if (!preset_ok) ++bad;
+
+    /* The working state. osynth_host_start() restored it before this ran, so
+     * the value is already in the store and nothing here has to load it --
+     * which is the whole point: the app gets its patch back by starting. */
+    const float semi = ps.get(kPid);
+    const bool semi_ok = semi > kSemi - 0.01f && semi < kSemi + 0.01f;
+    std::printf("  osc2.semi restored: %.1f  %s\n", (double)semi,
+                semi_ok ? "OK" : "FAIL (expected 7.0)");
+    if (!semi_ok) ++bad;
 
     std::printf("\n  %s\n", bad == 0 ? "storage round-trips" : "STORAGE FAULT");
     return bad == 0 ? 0 : 1;
