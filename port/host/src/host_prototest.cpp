@@ -44,6 +44,7 @@ constexpr uint8_t OP_SET_PARAM = 0x01;
 constexpr uint8_t OP_GET_PARAM = 0x02;
 constexpr uint8_t OP_PARAM_INFO = 0x03;
 constexpr uint8_t OP_LIST_PRESETS = 0x07;
+constexpr uint8_t OP_KIT_INFO = 0x37;
 constexpr uint8_t OP_PING = 0x7F;
 constexpr uint8_t ST_OK = 0;
 constexpr uint8_t ST_MORE = 0x80;
@@ -315,6 +316,38 @@ int osynth_host_prototest(void) {
                           "engine %d: LIST_PRESETS answered, %zu slot(s)", eng,
                           rows);
             check(!r.empty() && rows > 0, label);
+        }
+    }
+
+    /* --- KIT_INFO: is there anywhere to save a recorded kit? -------------
+     *
+     * This is what the app's Kit page reads to decide whether to offer a
+     * Save control at all, and it is exactly what was wrong: with sample kits
+     * compiled out the page said "No storage. Kits are lost at power off" and
+     * offered no way to record one.
+     *
+     * The response's fourth prefix byte is the backend -- 0 nowhere, 1 a real
+     * filesystem, 2 the LittleFS partition -- and each record's bit 0 says the
+     * kit can be recorded into. A build that can record needs both. */
+    {
+        uint8_t p[1] = {0}; /* what = 0: the selectable kits */
+        const auto& r = request(OP_KIT_INFO, 0x90, p, sizeof(p));
+        const bool shape = !r.empty() && r[0].size() >= 5 + 4;
+        check(shape, "KIT_INFO answered");
+        if (shape) {
+            const uint8_t backend = r[0][8];
+            const uint8_t kits = r[0][7];
+            size_t recordable = 0;
+            for (const auto& f : r) {
+                if (f.size() < 5 + 4) continue;
+                for (size_t at = 5 + 4; at + 2 <= f.size(); at += 2 + 24) {
+                    if (f[at + 1] & 0x01) ++recordable;
+                }
+            }
+            std::printf("     backend %u, %u kit(s), %zu recordable\n",
+                        backend, kits, recordable);
+            check(backend != 0, "kits have somewhere to be saved");
+            check(recordable > 0, "at least one kit can be recorded into");
         }
     }
 

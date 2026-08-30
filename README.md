@@ -1,19 +1,21 @@
 # osynth
 
-**A full groovebox on a microcontroller.** Six synth engines, a real sampled
-drum kit, an 8-track multitrack sequencer, an 8-track looper and a stereo
-audio input — running on an ESP32-P4, an ESP32-S3 (or a classic ESP32) and
-played from your phone (or Windows, Mac, Linux) over Bluetooth.
+Osynth is **a groovebox on a microcontroller.** It's a synthesizer that runs on a ESP32-P4 (osynth flagship), an SP32-S3 or a classic ESP32 (less features).
 
-```
-  6 engines · 8 voices · 14 effects · 8×256-step sequencer
-  16-slot drum kit · 8-track looper max 160s · line + mic in
-  USB audio + MIDI · USB MIDI host · BLE app
-  everything persists · powers on where you left off
-  …or run the whole thing inside the app, with no board at all
-```
+- 6 engines 
+- 8 voices 
+- 14 effects 
+- 8×256-step sequencer
+- 16-slot drum kit 
+- 8-track looper max 160s (sdcard unlimited) 
+- line + mic in 
+- USB audio + MIDI 
+- USB MIDI host 
+- BLE app to control it (win, lin, mac, android, ios)
+- everything persists 
+- powers on where you left off
 
-Again. **Or run the whole thing inside the app, with no board at all.** Like a vst instrument, but a standalone app instead.
+**Or run the whole thing inside the app, with no board at all.** Like a VST instrument, but a standalone app instead. All the features that are on the app are on the esp32-p4 version and vice-versa.
 
 ![Osyntho app screenshots](screenshots/screenshots.gif)
 
@@ -21,7 +23,7 @@ Again. **Or run the whole thing inside the app, with no board at all.** Like a v
 
 ## What it does
 
-### 🎹 Six synth engines, hot-swappable
+### Six synth engines hot-swappable
 
 | Engine | What it is |
 | --- | --- |
@@ -43,7 +45,7 @@ instead of one per sample, and a **cost budget** prices the patch before you
 hear it — which is why each heavy filter topology is its own node kind
 rather than a `type` knob inside one.
 
-### 🎛️ One filter family, everywhere
+### One filter family
 
 Five topologies — **12 dB SVF**, **24 dB** (Butterworth Q pair, not two
 squared stages), **Moog ladder** with saturated feedback, **dual/spread**
@@ -59,7 +61,7 @@ bus has one too — the only filter here that reaches the drums and the
 looper, which is what makes a whole-track build-up possible. Every one of
 them has an on/off switch that skips the work when it is off.
 
-### 🥁 A drum kit that sounds like drums
+### A drum kit that sounds like drums
 
 16 slots of **real recorded percussion**, converted to mu-law at per-slot
 sample rates and linked into the firmware as `.rodata` — flash-mapped, so the
@@ -70,7 +72,7 @@ from an SD card.
 > Every slot picks its own sample rate from measured bandwidth — a floor tom
 > carries nothing above 360 Hz, a hi-hat reaches 19.7 kHz.
 
-### 🎛 An actual sequencer, not a toy
+### A full-featured sequencer
 
 **8 tracks × 256 steps × 8 patterns**, each track free to target the synth
 engine *or* a drum slot — so one pattern drives both at once.
@@ -89,7 +91,7 @@ so syncing to a DAW keeps every one of those features.
 
 Plus a song chain, Euclidean fills, and a 4-beat count-in.
 
-### 🎼 Chord mode — one finger, whole harmony
+### Chord mode — play chords with one finger
 
 Turn it on and a key stops being a note. It lives in the MIDI router, which is
 the one place every note source meets, so it works the same whether you play
@@ -126,7 +128,7 @@ Chord mode is a *performance* setting, not part of a patch: it survives a
 power cycle and loading a preset never changes it out from under you
 mid-performance.
 
-### 🔁 8-track looper
+### 8-track looper
 
 Records the master bus, complete with its FX print. IMA-ADPCM in PSRAM at
 4:1 — **up to 160 seconds** in mono/4-track mode. Punch-ins land
@@ -137,7 +139,7 @@ A new take can **sync to the sequencer's downbeat** or run a **count-in**
 first — on a clock that free-runs, so it works even with the sequencer
 stopped.
 
-### 🎤 Audio in — line, microphone, or both
+### Audio in — line, microphone, or both
 
 A stereo **line input** on the *same* I2S port as the output. The S3's and
 P4's I2S controllers are full duplex, so a TX and an RX channel from one
@@ -161,7 +163,7 @@ into the looper, be granulated by the granular engine, be patched as a
 `LineIn` node in the modular graph, or go straight out to the computer over
 USB — and the synth playing beside it is untouched either way.
 
-### ✨ Modulation and FX
+### Modulation and FX
 
 - **FX bus:** adaptive noise reduction → noise reduction → vocoder → drive →
   chorus → flanger → phaser → delay → granular delay → reverb → bitcrush →
@@ -210,7 +212,7 @@ USB — and the synth playing beside it is untouched either way.
   the app's Home page is the way back to a blank instrument — it leaves your
   saved presets, your library and your volume and input settings alone.
 
-### 🔌 Connectivity
+### Connectivity
 
 - **USB Audio (UAC2) + USB MIDI** as one composite device — record the synth
   straight into a DAW *(ESP32-S3 and ESP32-P4)*. With a microphone on the
@@ -229,7 +231,7 @@ USB — and the synth playing beside it is untouched either way.
 
 ---
 
-## 📱 Osyntho — the companion app
+## Osyntho — the companion app
 
 A controller app for Android, iOS, Windows, Mac and Linux. It discovers every
 parameter at runtime, so it fits whatever firmware you flashed.
@@ -251,7 +253,7 @@ It can also be built with the synth **inside it** — see below.
 
 ---
 
-## 🖥️ Standalone — the whole synth, inside the app
+## Standalone app — the whole synth inside the app
 
 **No board. No cable. The same synth.**
 
@@ -350,7 +352,7 @@ stay at 0, and in host mode it reports how many controllers the bus found.
 > The kit step is optional: with no image present the build still links and
 > the drum bus is simply silent.
 
-## Three chips, one codebase
+## Three chips with just one codebase
 
 | | ESP32-S3 | ESP32-P4 + C6 | classic ESP32 |
 | --- | --- | --- | --- |

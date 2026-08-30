@@ -86,25 +86,20 @@
 #define CONFIG_OSYNTH_LOOP_PERSIST  1
 #define CONFIG_OSYNTH_LOOP_STORE_SD 1
 
-/* Recordable sample kits (S44) -- STAGED OFF, not cut.
+/* Recordable sample kits (S44).
  *
- * Full parity wants these, and the sampler engine and its parameters are
- * compiled in either way: sampler.cpp gates on `SYNTH_SAMPLE_KITS == 0` at
- * runtime, so the controls exist and refuse takes with a reason rather than
- * going missing. What is off is the storage.
+ * Eight kits sharing a 4 MB pool, eight seconds per take -- the firmware's own
+ * defaults, and the pool comes out of the budget above rather than out of real
+ * PSRAM.
  *
- * The reason is drum_kit.cpp:181, where the user-kit store is behind
- * `#if CONFIG_OSYNTH_DRUM_SD_KITS || SYNTH_SAMPLE_KITS > 0` -- so asking for
- * kits pulls in 880 lines of SDSPI + FAT + sdmmc card bring-up, which is the
- * step-5 storage shim and not something to fake now. With this at 0 that block
- * compiles out to the stubs already written beside it
- * (drum_kit.cpp:1050-1060), and the factory ROM kit still loads.
- *
- * Restore these three to 8 / 4096 / 8 when the storage shim lands. The pool
- * draws from the budget above. */
-#define CONFIG_OSYNTH_SAMPLE_KITS    0
-#define CONFIG_OSYNTH_SAMPLE_POOL_KB 0
-#define CONFIG_OSYNTH_SAMPLE_MAX_SEC 1
+ * These were off while the storage shim was being written, because asking for
+ * kits enables the block at drum_kit.cpp's "SD-card and user kits" guard, and
+ * that block used to be SDSPI, FAT and card bring-up with no host equivalent.
+ * It now has one: the mount is a directory under the data root, and everything
+ * below the mount was always plain stdio. */
+#define CONFIG_OSYNTH_SAMPLE_KITS    8
+#define CONFIG_OSYNTH_SAMPLE_POOL_KB 4096
+#define CONFIG_OSYNTH_SAMPLE_MAX_SEC 8
 
 /* ---- features off -------------------------------------------------------
  *
@@ -128,8 +123,10 @@
  *   CONFIG_OSYNTH_USB_AUDIO_TAP       needs the USB device stack.
  *   CONFIG_OSYNTH_FRONTEND_ES8388     no codec to configure.
  *   CONFIG_OSYNTH_MIC_CODEC_ES8311    likewise.
- *   CONFIG_OSYNTH_DRUM_SD_KITS        the sample-kit store covers this, and
- *                                     it is the one the app's Kit page uses.
+ *   CONFIG_OSYNTH_DRUM_SD_KITS        that option is for loading a *prepared*
+ *                                     kit off a card; the sample-kit store
+ *                                     above already opens the same directory
+ *                                     and is what the app's Kit page drives.
  *   CONFIG_OSYNTH_RENDER_IN_IRAM      there is no IRAM; SYNTH_RENDER_IRAM
  *                                     expands to nothing (esp_attr.h).
  *   CONFIG_OSYNTH_SPLIT_RENDER        the two-core pipeline is a P4 answer to

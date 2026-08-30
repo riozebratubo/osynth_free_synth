@@ -201,6 +201,14 @@ void drum_kit_free_user(drum_kit_t* kit) {
 #include <sys/stat.h>
 #include <unistd.h>
 
+#if defined(SYNTH_TARGET_HOST)
+/* Everything below the mount is plain stdio -- opendir, fopen, mkdir -- and a
+ * host has all of it. What it has no equivalent for is the bring-up: an SPI
+ * bus, an SDSPI device, a FAT mount and a power rail. So those are replaced
+ * and the rest is used unchanged, exactly as the looper's store does it. */
+#include "host_paths.h"
+#define OSYNTH_SD_LDO 0
+#else
 #include "driver/sdspi_host.h"
 #include "driver/spi_common.h"
 #include "esp_vfs_fat.h"
@@ -212,17 +220,47 @@ void drum_kit_free_user(drum_kit_t* kit) {
 #else
 #define OSYNTH_SD_LDO 0
 #endif
+#endif /* SYNTH_TARGET_HOST */
 
 namespace {
 
+#if defined(SYNTH_TARGET_HOST)
+/* Resolved once in drum_kit_storage_init(). kMount has no meaning without a
+ * filesystem to mount, so only kKitDir is read. */
+char s_kit_dir[512];
+const char* kKitDir = s_kit_dir;
+#else
 constexpr const char* kMount = "/sd";
 constexpr const char* kKitDir = "/sd/osynth/kits";
+#endif
+
+/* Bytes for a kit path. "/sd/osynth/kits/" plus a 120-character name fits the
+ * 192 these buffers had; a host data directory is a full user-profile path and
+ * does not. Every path here is built with snprintf, so the failure would be a
+ * silently truncated name -- a kit written to, or looked for, in the wrong
+ * place. The looper's store carries the same constant for the same reason. */
+#if defined(SYNTH_TARGET_HOST)
+constexpr size_t kKitPathMax = 768;
+#else
+constexpr size_t kKitPathMax = 192;
+#endif
 /* PSRAM ceiling for one loaded kit. Generous for mu-law .okit images (the
  * factory kit is ~240 KB) and enough for a folder of WAVs, while leaving the
  * looper the bulk of the pool. */
 constexpr size_t kMaxKitBytes = 2 * 1024 * 1024;
 
+#if !defined(SYNTH_TARGET_HOST)
 sdmmc_card_t* s_card = nullptr;
+#endif
+
+#if defined(SYNTH_TARGET_HOST)
+
+/* No rail, no bus, no card: "mounted" is "the directory exists", and
+ * drum_kit_storage_init() below is what creates it. Kept as a function so the
+ * call sites read the same on both backends. */
+bool ensure_mounted() { return s_kit_dir[0] != '\0'; }
+
+#else
 
 /* The SD rail's on-chip LDO — the looper's copy of this in loop_store.cpp
  * carries the reasoning. Duplicated rather than shared because these two
@@ -284,6 +322,8 @@ bool ensure_mounted() {
     }
     return true;
 }
+
+#endif /* SYNTH_TARGET_HOST */
 
 bool has_ext(const char* name, const char* ext) {
     const size_t n = strlen(name), e = strlen(ext);
@@ -516,7 +556,7 @@ esp_err_t load_wav_dir(const char* dir, const char* kit_name,
          * directory entry is char[256], so an unbounded "%s/%s" cannot be
          * proven to fit and -Wformat-truncation rejects it — and a long
          * filename really would truncate. */
-        char path[192];
+        char path[kKitPathMax];
         snprintf(path, sizeof(path), "%.100s/%.63s", dir, files[i]);
         FILE* f = fopen(path, "rb");
         if (f == nullptr) continue;
@@ -592,7 +632,7 @@ int drum_kit_scan_sd(char names[][DRUM_KIT_NAME_MAX], int max) {
     struct dirent* e;
     while ((e = readdir(d)) != nullptr && n < max) {
         if (e->d_name[0] == '.') continue;
-        char path[192];
+        char path[kKitPathMax];
         snprintf(path, sizeof(path), "%s/%.120s", kKitDir, e->d_name);
         struct stat st;
         if (stat(path, &st) != 0) continue;
@@ -616,7 +656,7 @@ esp_err_t drum_kit_load_sd(const char* name, drum_kit_t* out) {
     if (name == nullptr || out == nullptr) return ESP_ERR_INVALID_ARG;
     if (!ensure_mounted()) return ESP_ERR_NOT_FOUND;
 
-    char path[192];
+    char path[kKitPathMax];
     snprintf(path, sizeof(path), "%s/%.100s.okit", kKitDir, name);
     FILE* f = fopen(path, "rb");
     if (f == nullptr) { /* not an image — try a folder of WAVs */
@@ -769,8 +809,8 @@ bool write_wav(const char* path, const int16_t* data, uint32_t frames) {
 }
 
 bool read_sidecar(int index, drum_kit_t* kit) {
-    char dir[128];
-    char path[160];
+    char dir[kKitPathMax];
+    char path[kKitPathMax];
     kit_dir(index, dir, sizeof(dir));
     snprintf(path, sizeof(path), "%.120s/%.16s", dir, kSidecarName);
     FILE* f = fopen(path, "rb");
@@ -814,8 +854,8 @@ bool read_sidecar(int index, drum_kit_t* kit) {
 }
 
 bool write_sidecar(int index, const drum_kit_t* kit) {
-    char dir[128];
-    char path[160];
+    char dir[kKitPathMax];
+    char path[kKitPathMax];
     kit_dir(index, dir, sizeof(dir));
     snprintf(path, sizeof(path), "%.120s/%.16s", dir, kSidecarName);
     FILE* f = fopen(path, "wb");
@@ -854,6 +894,25 @@ bool write_sidecar(int index, const drum_kit_t* kit) {
 void drum_kit_storage_init(void) {
     if (SYNTH_SAMPLE_KITS == 0) return;
 
+#if defined(SYNTH_TARGET_HOST)
+    /* One place to put them, and it is neither an SD card nor a flash
+     * partition -- so neither of the two backends below applies, and neither
+     * does the choice between them. STORE_SD is the label because it is the
+     * one that means "a real filesystem with room": the app reports it as the
+     * storage name, and everything it implies here is true -- kits are
+     * plentiful, saving does not stall the render chain, and a person can put
+     * their own samples in the folder from the machine they are sitting at. */
+    if (osynth_host_subdir("kits", s_kit_dir, sizeof(s_kit_dir))) {
+        s_store = STORE_SD;
+        ESP_LOGI(TAG, "user kits: %s", kKitDir);
+    } else {
+        s_store = STORE_NONE;
+        ESP_LOGW(TAG, "user kits: no directory — recording works, but "
+                      "nothing survives a restart");
+    }
+    return;
+#else
+
     /* SD first, always: it is bigger by three orders of magnitude, it is the
      * only backend a person can load samples into from a computer, and writing
      * to it does not stall the render chain the way a flash write does. */
@@ -887,6 +946,7 @@ void drum_kit_storage_init(void) {
     s_store = STORE_NONE;
     ESP_LOGW(TAG, "user kits: nowhere to save — recording works, but nothing "
                   "survives a power cycle");
+#endif /* SYNTH_TARGET_HOST */
 }
 
 const char* drum_kit_storage_name(void) {
@@ -901,7 +961,7 @@ esp_err_t drum_kit_load_user(int index, drum_kit_t* out) {
     if (out == nullptr) return ESP_ERR_INVALID_ARG;
     if (s_store == STORE_NONE) return ESP_ERR_NOT_SUPPORTED;
 
-    char dir[128];
+    char dir[kKitPathMax];
     kit_dir(index, dir, sizeof(dir));
     DIR* d = opendir(dir);
     /* No folder yet is the normal state of a kit nobody has recorded into. The
@@ -925,7 +985,7 @@ esp_err_t drum_kit_load_user(int index, drum_kit_t* out) {
         if (slot < 0 || slot >= DRUM_SLOTS) continue;
         if (out->slots[slot].data != nullptr) continue;
 
-        char path[192];
+        char path[kKitPathMax];
         snprintf(path, sizeof(path), "%.120s/%.63s", dir, e->d_name);
         FILE* f = fopen(path, "rb");
         if (f == nullptr) continue;
@@ -999,7 +1059,7 @@ esp_err_t drum_kit_save_user(int index, const drum_kit_t* kit) {
     if (s_store == STORE_NONE) return ESP_ERR_NOT_SUPPORTED;
     if (!kit->dirty) return ESP_OK;
 
-    char dir[128];
+    char dir[kKitPathMax];
     kit_dir(index, dir, sizeof(dir));
     if (mkdir(dir, 0777) != 0 && errno != EEXIST) {
         ESP_LOGE(TAG, "kit %d: cannot create %s", index, dir);
@@ -1023,7 +1083,7 @@ esp_err_t drum_kit_save_user(int index, const drum_kit_t* kit) {
         char nm[32];
         safe_name(s.name[0] ? s.name : "pad", nm, sizeof(nm));
         snprintf(written[i], sizeof(written[i]), "%02d_%.24s.wav", i, nm);
-        char path[192];
+        char path[kKitPathMax];
         snprintf(path, sizeof(path), "%.120s/%.63s", dir, written[i]);
         if (!write_wav(path, (const int16_t*)s.data, s.frames)) {
             ESP_LOGE(TAG, "kit %d pad %d: write failed (%s)", index, i + 1,
@@ -1044,7 +1104,7 @@ esp_err_t drum_kit_save_user(int index, const drum_kit_t* kit) {
             const int slot = slot_prefix(e->d_name);
             if (slot < 0 || slot >= DRUM_SLOTS) continue;
             if (strcasecmp(e->d_name, written[slot]) == 0) continue;
-            char path[192];
+            char path[kKitPathMax];
             snprintf(path, sizeof(path), "%.120s/%.63s", dir, e->d_name);
             unlink(path);
         }

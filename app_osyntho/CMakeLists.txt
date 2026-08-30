@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.7)
 
-set(APP_VERSION 0.1.7)
+set(APP_VERSION 0.2.0)
 set(APP_ID "org.osynth.osyntho")
 
 # those are defaults

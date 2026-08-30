@@ -64,6 +64,16 @@ typedef struct {
      * connected keyboard plays the synth. See osynth_host_midi.h: it opens
      * every port it finds, and does nothing on a platform with no backend. */
     bool start_midi_in;
+
+    /* Period of the "alive |" status line, in milliseconds; 0 silences it.
+     *
+     * It is the firmware's health check -- README points at it for exactly
+     * that -- and it does one thing besides reporting: it drains the render
+     * path's deferred warnings. Those cannot be logged from the audio thread
+     * (see synth_warn.h), so they are queued and printed by a control task,
+     * and with no heartbeat nobody ever prints them. A vocoder with no input
+     * or a sink that stopped accepting blocks would then say nothing at all. */
+    unsigned heartbeat_ms;
 } osynth_host_config_t;
 
 /* Fills `out` with the defaults. */

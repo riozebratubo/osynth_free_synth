@@ -5,8 +5,12 @@
 #include "osynth_host_midi.h"
 
 #include <atomic>
+#include <chrono>
+#include <cstdio>
 #include <cstring>
+#include <thread>
 
+#include "esp_cpu.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "sdkconfig.h"
@@ -29,6 +33,7 @@
 #include "synth_mod.h"
 #include "synth_params.h"
 #include "synth_voice.h"
+#include "synth_warn.h"
 
 using osynth::ParamCurve;
 using osynth::ParamDesc;
@@ -101,22 +106,79 @@ const uint16_t kPersisted[] = {
 #endif
 };
 
+/* The status line, and the drain that has to go with it.
+ *
+ * main.cpp runs this on the task that ran app_main(); here it is a thread of
+ * its own, because osynth_host_start() returns to a caller with its own work
+ * to do. Same period, same numbers, minus the segments that describe hardware
+ * this build has none of -- USB, BLE, the two-core pipeline's stalls.
+ *
+ * render_warn_drain() is the part that is not optional. The render path cannot
+ * log (synth_warn.h explains why: a console write from the audio thread is a
+ * dropout), so it queues static strings for a control task to print. Without
+ * this loop nothing ever drains that queue, and every warning the DSP raises
+ * is discarded unseen. */
+void heartbeat_thread(unsigned period_ms) {
+    audio_io_stats_t st{};
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(period_ms));
+        osynth::dsp::render_warn_drain();
+        audio_io_get_stats(&st);
+
+        char sink_seg[64] = "";
+        if (st.sink_errors != 0) {
+            std::snprintf(sink_seg, sizeof(sink_seg), " | SINK ERR %u (%s)",
+                          (unsigned)st.sink_errors,
+                          esp_err_to_name((esp_err_t)st.sink_last_err));
+        }
+        char in_seg[64] = "";
+#if SYNTH_ENABLE_AUDIO_IN
+        std::snprintf(in_seg, sizeof(in_seg), " | in %.2f/%.2f route %u",
+                      (double)st.in_peak_l[0], (double)st.in_peak_r[0],
+                      (unsigned)st.in_route);
+#endif
+        const synth_engine_t* eng = engines_get(engines_active_type());
+        ESP_LOGI(TAG,
+                 "alive | audio blocks %u, underruns %u, dsp %.1f%% "
+                 "(pk %.1f%%) [voi %.1f fx %.1f loop %.1f] | out pk %.2f, "
+                 "sat %u | voices %u/%d (+%d drum) | engine %s%s%s",
+                 (unsigned)st.blocks_rendered, (unsigned)st.underruns,
+                 st.dsp_load_pct, st.dsp_load_peak_pct, st.stage_voices_pct,
+                 st.stage_fx_pct, st.stage_loop_pct, st.out_peak,
+                 (unsigned)st.soft_clips,
+                 (unsigned)voice_manager_active_voices(), SYNTH_VOICES,
+                 drums_active_voices(), eng != nullptr ? eng->name : "none",
+                 in_seg, sink_seg);
+    }
+}
+
 /* The render chain. Identical to render_chain() in main/main.cpp, stage for
  * stage and in the same order -- see there for why each stage sits where it
  * does, particularly the looper's record tap and the metronome after it.
  * The three line-in stages compile to nothing without an audio input. */
 void SYNTH_RENDER_IRAM render_chain(float* out_l, float* out_r, size_t frames,
                                     void* ctx) {
+    /* The three cycle reads are not decoration, and leaving them out is what
+     * made the heartbeat report "[voi 0.0 fx 0.0 loop 0.0]" until they were
+     * put back. They are what attributes the load to a stage: voices, drums
+     * and the input mix behave nothing like the FX bus, which behaves nothing
+     * like the looper, and one total number cannot say which of them is over
+     * budget. main.cpp's copy carries the full reasoning. */
+    const uint32_t c0 = esp_cpu_get_cycle_count();
     voice_manager_render(out_l, out_r, frames, ctx);
     drums_pre_fx(out_l, out_r, frames);
     audio_io_line_in_fx(out_l, out_r, frames);
+    const uint32_t c1 = esp_cpu_get_cycle_count();
     fx_process(out_l, out_r, frames);
+    const uint32_t c2 = esp_cpu_get_cycle_count();
     drums_post_fx(out_l, out_r, frames);
     audio_io_line_in_dry(out_l, out_r, frames);
     looper_process(out_l, out_r, frames);
     audio_io_line_in_mon(out_l, out_r, frames);
     sampler_capture(out_l, out_r, frames);
     drums_render_click(out_l, out_r, frames);
+    const uint32_t c3 = esp_cpu_get_cycle_count();
+    audio_io_report_stages(c1 - c0, c2 - c1, c3 - c2);
 }
 
 }  // namespace
@@ -128,6 +190,7 @@ void osynth_host_config_default(osynth_host_config_t* out) {
     out->internal_budget = OSYNTH_HOST_INTERNAL_BUDGET_BYTES;
     out->start_audio = true;
     out->start_midi_in = true;
+    out->heartbeat_ms = SYNTH_HEARTBEAT_MS;
 }
 
 esp_err_t osynth_host_start(const osynth_host_config_t* cfg) {
@@ -228,6 +291,14 @@ esp_err_t osynth_host_start(const osynth_host_config_t* cfg) {
                 ESP_LOGW(TAG, "working state still restoring after 3 s — "
                               "continuing, early edits may not be saved");
             }
+        }
+
+        if (c.heartbeat_ms > 0) {
+            /* Detached: it runs for the life of the process, exactly as the
+             * firmware's does, and there is no shutdown it has to participate
+             * in -- osynth_host_stop() takes the device away and this loop
+             * simply reports a synth that has stopped rendering. */
+            std::thread(heartbeat_thread, c.heartbeat_ms).detach();
         }
 
         ESP_LOGI(TAG, "up: %u parameters, sink %s", (unsigned)ps.count(),

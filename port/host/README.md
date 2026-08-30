@@ -317,9 +317,8 @@ All three components now size their buffers from a named `kPathMax` that
 differs per target. Port another component that builds a path, and size its
 buffers the same way.
 
-**Still to audit:** `drum_kit.cpp` uses 160-192 byte buffers on its SD-kit
-paths. They are compiled out here (`CONFIG_OSYNTH_SAMPLE_KITS 0`) and need the
-same treatment when sample kits are turned on.
+`drum_kit.cpp` got the same treatment when sample kits were turned on -- its
+kit paths were 128 to 192 bytes, sized for `/sd/osynth/kits`.
 
 ## Embedding it in the app
 

@@ -1218,11 +1218,16 @@ esp_err_t sampler_init(void) {
         return ESP_OK;
     }
 
+    /* No storage field here, and that is a correction rather than an
+     * omission: this runs inside drums_init(), and the backend is not chosen
+     * until drum_kit_storage_init() -- which drums_kits_load() calls later,
+     * after the filesystem is mounted. So it always printed "none", on every
+     * target, whatever the board actually had. drum_kit logs the real answer
+     * ("user kits: ...") once it knows it. */
     ESP_LOGI(TAG,
              "up: %d kits x %d pads, %u KB pool, %u s max take, %u ms "
-             "pre-roll, storage %s",
+             "pre-roll",
              SYNTH_SAMPLE_KITS, DRUM_SLOTS, (unsigned)(kPoolTotal / 1024),
-             (unsigned)SYNTH_SAMPLE_MAX_SEC, (unsigned)kPrerollMs,
-             drum_kit_storage_name());
+             (unsigned)SYNTH_SAMPLE_MAX_SEC, (unsigned)kPrerollMs);
     return ESP_OK;
 }

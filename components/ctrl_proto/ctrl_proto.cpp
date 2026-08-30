@@ -487,6 +487,20 @@ void handle_usb_status(uint8_t seq) {
  * ble_cmd task, so it stalls nothing that matters, and the synth is a
  * quarter-second from gone in any case. */
 void handle_reboot(uint8_t seq) {
+#if defined(SYNTH_TARGET_HOST)
+    /* Refused rather than answered with ST_OK and then not done.
+     *
+     * The engine is a library inside an application here; there is no image to
+     * restart, and esp_restart() logs and returns. Reporting success for a
+     * restart that cannot happen would leave a client waiting for a
+     * reconnection that never comes -- and the one reason to ask is to apply a
+     * boot-time USB role, which this build has no USB to have.
+     *
+     * The app never sends it: its USB panel is gated on usbHostSupported,
+     * which this build reports false. This is for anything else that might. */
+    send_status(OP_REBOOT, seq, ST_UNSUPPORTED);
+    return;
+#else
     send_status(OP_REBOOT, seq, ST_OK);
     const esp_err_t err = persist_save_now();
     if (err != ESP_OK) {
@@ -506,6 +520,7 @@ void handle_reboot(uint8_t seq) {
     ESP_LOGI(TAG, "restarting on app request");
     vTaskDelay(pdMS_TO_TICKS(250));
     esp_restart();
+#endif /* SYNTH_TARGET_HOST */
 }
 
 void handle_transport(uint8_t seq, const uint8_t* p, uint16_t plen) {

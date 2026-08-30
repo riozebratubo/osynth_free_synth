@@ -117,6 +117,15 @@ int storage_test(bool check) {
     const uint16_t kPid = 0x0204; /* osc2.semi */
     const float kSemi = 7.0f;
 
+    /* Both passes pin the engine. The working state now restores it, so a
+     * previous run would otherwise decide which engine is bound -- and a
+     * preset saved into the subtractive bank is refused while the sampler is
+     * active, which is the firmware being right and this test being
+     * order-dependent. */
+    ps.set(osynth::PID_ENGINE_TYPE, (float)SYNTH_ENGINE_SUBTRACTIVE,
+           ParamOrigin::Ble);
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+
     if (!check) {
         std::printf("\n-- writing --\n");
         ps.set(osynth::PID_MASTER_VOLUME, kWant, ParamOrigin::Ble);
@@ -141,6 +150,13 @@ int storage_test(bool check) {
          * this process happens to exit. */
         std::printf("  presets_state_save_now: %s\n",
                     esp_err_to_name(presets_state_save_now()));
+
+        /* No kit save here. Triggering smp.save on a kit nothing has been
+         * recorded into writes nothing at all -- drum_kit_save_user() returns
+         * early on `!kit->dirty`, which is correct -- so it would be a test
+         * that passes whether or not kit storage works. What KIT_INFO reports
+         * is checked in host_prototest.cpp instead, and that is the same thing
+         * the app's Kit page reads. */
 
         std::printf("\n  now run:  osynth_host_demo --storage-check\n");
         return 0;
