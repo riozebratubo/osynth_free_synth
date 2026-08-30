@@ -92,6 +92,25 @@ const ParamDesc kGlobals[] = {
      * exponential curve needs min > 0 -- and 0 here has to mean silent. */
     {osynth::PID_LINE_IN_GAIN, "in.gain", ParamType::Float, ParamCurve::Linear,
      0.0f, 4.0f, 1.0f, nullptr, 0},
+    /* The capture trim, and the one control the firmware gates on having two
+     * input devices while this build needs it with one.
+     *
+     * `in.gain` above is the *monitor* trim: it scales the three positions
+     * `in.route` chooses between, and audio_io_in_mono() deliberately does not
+     * apply it, so that a granular patch sounds the same whatever the monitor
+     * path is doing. That leaves the two consumers which read the capture
+     * directly -- the vocoder's modulator and the granular engine's ring --
+     * with no gain control at all on a one-device build, and this is a
+     * one-device build with no selector to point somewhere better: the capture
+     * is whatever the host OS calls its default input. A quiet desktop
+     * microphone therefore went into fx.voc.gate's downward expansion at
+     * whatever level it happened to arrive at, and got buried.
+     *
+     * Same id, range, curve and default as main.cpp's, so the app draws the
+     * same control and a persisted value means the same thing on both. It is
+     * applied at the capture (audio_io.cpp), ahead of every reader. */
+    {osynth::PID_LINE_IN_MICGAIN, "in.micgain", ParamType::Float,
+     ParamCurve::Linear, 0.0f, 4.0f, 1.0f, nullptr, 0},
 #endif
 };
 
@@ -103,6 +122,10 @@ const uint16_t kPersisted[] = {
 #if SYNTH_ENABLE_AUDIO_IN
     osynth::PID_LINE_IN_ROUTE,
     osynth::PID_LINE_IN_GAIN,
+    /* How much this machine's input needs lifting is a property of the machine
+     * and its microphone, not of the patch -- the same reason main.cpp
+     * persists it. Presets skip it, so a value set once stays set. */
+    osynth::PID_LINE_IN_MICGAIN,
 #endif
 };
 

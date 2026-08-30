@@ -75,6 +75,8 @@ Needs CMake ≥ 3.16, a C++20 compiler and Python 3 (for `tools/gen_wavetables.p
 python tools/check_host_includes.py         # every include resolves
 python tools/check_host_includes.py --all   # the same over all of components/
 python tools/check_host_symbols.py          # what the library still leaves open
+python tools/check_android_symbols.py      # the same, for an NDK build
+python tools/check_android_symbols.py --abi armeabi-v7a
 
 build_host/Release/osynth_host_demo            # play a figure; render stats
 build_host/Release/osynth_host_demo --proto    # SynthCtl round trip, 15 checks
@@ -111,6 +113,24 @@ about completeness. Reading dumpbin's UNDEF column alone does not answer it
 either -- a cross-object reference inside one library shows as UNDEF -- so the
 script subtracts the defined set and splits the remainder into osynth symbols
 and toolchain noise.
+
+`check_android_symbols.py` is the same check under the NDK, and it exists
+because that gap was not hypothetical. The drum kit ROM is declared two ways --
+the objcopy symbols `_binary_drumkit_bin_start`/`_end` for the firmware, plain
+identifiers for the host, which generates the array with `tools/bin2c.py`. The
+`#if` choosing between them keyed on `_MSC_VER`, so it was right on Windows and
+wrong everywhere else: Android builds with Clang, took the objcopy branch, and
+referenced two symbols no one defines. `libosynth_core.a` archived cleanly
+anyway. The failure surfaced only when the app linked it into
+`libosyntho_arm64-v8a.so`, several steps and one platform later. The condition
+now keys on `SYNTH_TARGET_HOST`, which is what actually decides, and this script
+answers the question at the archive.
+
+It resolves against the NDK sysroot *and* compiler-rt, which is not optional
+bookkeeping: `libclang_rt.builtins` holds the ARM64 outline atomics that every
+`std::atomic` goes through and the `__aeabi_` helpers 32-bit ARM needs for
+integer division. Omitting them reported 35 ordinary builtins as findings and
+buried the two that were real.
 
 ## State
 
@@ -353,6 +373,20 @@ an ordinary-priority thread happened once or twice a run.
 Four device periods is ~40 ms. Getting below that means raising the render
 thread's priority or asking for an exclusive-mode device: both per-platform,
 neither belonging in a first-sound port.
+
+That the ring absorbs the scheduler is also what lets the **render block stay
+the firmware's 64 frames**. The port ran at 256 for a while on the theory that
+a general-purpose OS cannot meet a 1.33 ms deadline — but the render thread
+has no per-block deadline here; it blocks on a ring several device periods
+deep and simply produces four small blocks where it produced one large one.
+Same work, same slack, four times the wakeups. What 256 *did* cost was parity:
+`kParamSlew`, `kMixSlew` and `kTimeSlew` are one-pole coefficients **per
+block**, and the compressor's gain, the FX LFOs, the phaser's coefficients,
+the granular delay's grain spawns and every ADSR stage boundary all land on
+the **block grid** — so the standalone build's effects smoothed four times
+slower and stepped four times coarser than the instrument's. Two numbers are
+therefore deliberately separate: `SYNTH_BLOCK_SIZE` is the renderer's, and
+`kDevicePeriodFrames` (256) is what the device is asked for.
 
 The device is also started by the render chain's **first block**, not by
 `sink_start()`. At `sink_start()` the render task does not exist yet —

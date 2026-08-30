@@ -78,10 +78,22 @@ constexpr size_t kChannels = 2;
  * with an ordinary-priority thread happens a couple of times a run. That is
  * exactly what the residual starve count was.
  *
- * So the depth that matters is measured in device periods, and the block size
- * is only a floor. */
-constexpr size_t kRingBlocks = 4;    /* floor, in render blocks */
-constexpr size_t kDevicePeriods = 4; /* depth, in device periods */
+ * So the depth that matters is measured in device periods, and the floor is
+ * only a floor.
+ *
+ * That floor used to be counted in render blocks. It cannot be: the render
+ * block became the firmware's 64 (see port/host/include/sdkconfig.h), and four
+ * of those is 256 frames -- 5.3 ms against the ~40 ms the measurement above
+ * says a general-purpose scheduler needs, so the safety net
+ * would have quietly dissolved along with the block size. How deep the ring has
+ * to be is a property of the host's scheduler, not of how the renderer chops
+ * its work up, so it is written in frames. */
+constexpr size_t kRingMinFrames = 1024; /* ~21 ms at 48 kHz */
+constexpr size_t kDevicePeriods = 4;    /* depth, in device periods */
+
+/* What sink_start() asks the device for; see the note at that assignment for
+ * why it is not SYNTH_BLOCK_SIZE. */
+constexpr size_t kDevicePeriodFrames = 256; /* ~5.3 ms at 48 kHz */
 
 /* How long write() waits for room before giving up on a block.
  *
@@ -91,8 +103,8 @@ constexpr size_t kDevicePeriods = 4; /* depth, in device periods */
  * the heartbeat; blocking forever would take the whole synth down silently and
  * leave the app connected to something that never answers again.
  *
- * Generously longer than a block period (5.3 ms at the host's size), so a
- * scheduling hiccup never trips it. */
+ * Generously longer than a block period (1.33 ms at 64 frames) and than a
+ * device period with it, so a scheduling hiccup never trips it. */
 constexpr int kWriteTimeoutMs = 250;
 
 ma_device g_device;
@@ -112,8 +124,11 @@ size_t g_count = 0; /* frames queued */
  *
  * The two ends do not agree on a block size and cannot be made to. WASAPI
  * hands over 480-frame periods whatever is asked of it; the render chain
- * consumes SYNTH_BLOCK_SIZE (256) at a time. So each device callback delivers
- * roughly 1.9 render blocks, and the leftover has to be kept somewhere.
+ * consumes SYNTH_BLOCK_SIZE (64) at a time. So each device callback delivers
+ * 7.5 render blocks, and the leftover has to be kept somewhere. The ratio grew
+ * when the block came down to the firmware's 64 -- it was 1.9 at 256 -- which
+ * changes nothing here: a ring is what makes the ratio irrelevant, and it is
+ * never a whole number either way.
  *
  * An earlier version kept a single block and truncated each callback to it.
  * That looked correct and metered correctly -- real audio arrived, peaks moved
@@ -249,12 +264,24 @@ esp_err_t sink_start(void) {
     cfg.playback.format = ma_format_s16;
     cfg.playback.channels = (ma_uint32)kChannels;
     cfg.sampleRate = SYNTH_SAMPLE_RATE;
-    /* Ask the device for our own block size. miniaudio treats it as a hint and
-     * the backend may round it; nothing here depends on getting it, because
-     * the ring decouples the two sides. Asking anyway keeps the device's
-     * wakeup rate near the render rate, which is where the latency budget is
-     * cheapest. */
-    cfg.periodSizeInFrames = (ma_uint32)SYNTH_BLOCK_SIZE;
+    /* What we ask the device for, and deliberately NOT SYNTH_BLOCK_SIZE.
+     *
+     * It used to be the block size, back when that was 256 and the two numbers
+     * happened to agree. They no longer do -- the render block is the
+     * firmware's 64 now, for the parity reasons in port/host/include/
+     * sdkconfig.h -- and passing 64 here would be asking a host audio device
+     * to wake 750 times a second. WASAPI shared mode would round it away, but
+     * CoreAudio, ALSA and AAudio can all honour a period that small, and
+     * granting it would shrink the ring below with it: the ring's depth is
+     * kDevicePeriods *of whatever the device settles on*, so a 64-frame period
+     * would leave 5.3 ms of slack where the measurement that set kDevicePeriods
+     * said 40 ms was the honest number for a general-purpose scheduler.
+     *
+     * So this is the device's number and SYNTH_BLOCK_SIZE is the renderer's,
+     * and the ring is the thing between them that lets them differ -- which is
+     * what it was built for. Still a hint: the backend may round it either
+     * way, and nothing here depends on getting it. */
+    cfg.periodSizeInFrames = (ma_uint32)kDevicePeriodFrames;
     cfg.dataCallback = data_callback;
 
     /* NULL context: miniaudio picks the platform's default backend and the
@@ -282,12 +309,11 @@ esp_err_t sink_start(void) {
      * the same level simply starts there instead of climbing to it, and the
      * latency is the ring's depth either way. */
     {
-        const size_t by_block = (size_t)SYNTH_BLOCK_SIZE * kRingBlocks;
         const size_t by_period =
             (size_t)g_device.playback.internalPeriodSizeInFrames * kDevicePeriods;
 
         std::lock_guard<std::mutex> lk(g_mutex);
-        g_ring_frames = by_block > by_period ? by_block : by_period;
+        g_ring_frames = kRingMinFrames > by_period ? kRingMinFrames : by_period;
         g_ring.assign(g_ring_frames * kChannels, 0);
         g_read = 0;
         g_count = g_ring_frames;

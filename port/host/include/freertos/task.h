@@ -7,10 +7,15 @@
  * "Tasks and cores" table, audio at max-2 on core 1) is a statement about a
  * two-core RTOS. A host OS decides for itself.
  *
- * What that costs is real but bounded: the render thread is not guaranteed the
- * CPU, so a host build wants a larger block size than the firmware's 64 frames
- * -- see OSYNTH_BLOCK_SIZE in sdkconfig.h. Raising the render thread's
- * priority is a per-platform call and belongs in the sink, not here.
+ * What that costs is real but bounded, and the answer is NOT a larger render
+ * block -- that is what this note used to say, and it cost the standalone
+ * build its parity with the instrument (see OSYNTH_BLOCK_SIZE in sdkconfig.h
+ * for what a 256-frame block did to the FX bus). The slack lives in
+ * sink_miniaudio's ring instead, which is sized in device periods: the render
+ * thread is paced by a blocking write against several periods' depth, so it
+ * absorbs a scheduling delay whatever size it chops its work into. Raising the
+ * render thread's priority is a per-platform call and belongs in the sink, not
+ * here.
  *
  * Stack size is ignored too: these are host threads with host stacks, and the
  * firmware's figures (6144 for audio, 8192 for drum_ctl) describe a different

@@ -4,9 +4,17 @@ import QtQuick.Controls.Material
 import org.osynth.osyntho
 
 // What is feeding the synth from outside: the input trio (in.route / in.gain /
-// in.pga) and, on a build with a microphone, in.source and in.micgain as well
-// — the source picks line, mic or both, and the micgain is the mic's own trim
-// so "both" is usable.
+// in.pga), plus in.source on a build with two capture devices — it picks line,
+// mic or both.
+//
+// in.micgain appears on more builds than in.source does, and the difference is
+// worth knowing when reading this page. It is the trim applied *at the
+// capture*, ahead of every reader; in.gain is the monitor trim and scales only
+// the three positions in.route selects between. The two consumers that read the
+// capture directly — the vocoder's modulator and the granular engine's ring —
+// see in.micgain and never in.gain, so on the standalone build, whose one
+// device is whatever the OS calls its default input, this is the only control
+// that can lift a quiet microphone before the vocoder's gate gets to it.
 //
 // A page of its own because the same `in.` group used to be drawn twice, on
 // the FX page and on the old osynth page. They were one set of controls with

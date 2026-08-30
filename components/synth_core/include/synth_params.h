@@ -88,8 +88,21 @@ constexpr uint16_t PID_LINE_IN_SOURCE = 0x000D;
  * source arrives at whatever the ADC was set up to take, a MEMS mic at
  * conversational distance arrives far below full scale, and one shared
  * `in.gain` across the pair is a control that is wrong for one of them
- * whichever way it is set. Registered on the same condition as the selector,
- * since with one device `in.gain` already is the trim. */
+ * whichever way it is set.
+ *
+ * It used to say here that one-device builds need no such trim because
+ * `in.gain` already is one. That is true only of the *mix* path. `in.gain`
+ * scales the three positions `in.route` selects between, and the two engine
+ * consumers that read the capture directly -- audio_io_in_mono(), which feeds
+ * the vocoder's modulator and the granular engine's capture ring --
+ * deliberately do not apply it, so that a granular patch sounds the same
+ * whatever the monitor path is set to. On a two-device build this trim covers
+ * them; on a one-device build nothing did, and the standalone port's capture
+ * (whatever the host OS calls its default input, with no selector to point
+ * elsewhere) had no gain control anywhere ahead of the band analysis. So it is
+ * now registered wherever a build has something to say about its capture
+ * level: with the selector on the firmware, and unconditionally on the host.
+ * A build that registers neither reads the trim as unity, exactly as before. */
 constexpr uint16_t PID_LINE_IN_MICGAIN = 0x000E;
 /* 0x000F is `state.reset`, the last of the 0x00xx globals in use — it belongs
  * to the preset system like the six triggers above it (PRESET_PID_STATE_RESET

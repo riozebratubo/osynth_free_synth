@@ -16,21 +16,28 @@
 
 static const char* TAG = "drumkit";
 
-/* The factory image, embedded by CMake (target_add_binary_data). The symbol
- * names are derived from the file name — keep them in sync with the
- * add_custom_command output in CMakeLists.txt.
+/* The factory image, and the two builds reach it by different routes.
  *
- * The asm() label is how GCC and Clang reach a linker symbol whose name is not
- * a valid C identifier, which is what the objcopy-style `_binary_<file>_start`
- * is. MSVC has no equivalent, so the host build generates a C file defining
- * these two as ordinary identifiers instead (tools/bin2c.py, driven from
- * port/host/CMakeLists.txt) and declares them plainly here. Same bytes, same
- * names in this translation unit; only the route to the linker differs. */
-#if defined(_MSC_VER)
+ * ESP-IDF embeds it with target_add_binary_data, which runs objcopy and
+ * produces linker symbols named `_binary_<file>_start` / `_end`. Those are not
+ * valid C identifiers, so the asm() label below is how GCC reaches them.
+ *
+ * The host build has no objcopy in its toolchain, so it generates an ordinary
+ * C array instead (tools/bin2c.py, driven from port/host/CMakeLists.txt) and
+ * declares the two as plain identifiers.
+ *
+ * The condition is SYNTH_TARGET_HOST and NOT _MSC_VER, which is what it used
+ * to be and was wrong: the choice is made by the *build*, not the compiler.
+ * Every host build uses bin2c whatever compiles it, so on Android -- Clang,
+ * not MSVC -- the old test took the objcopy branch and the app failed to link
+ * with two undefined `_binary_*` symbols. It went unnoticed because
+ * osynth_core is a static library, and an archive with unresolved symbols
+ * builds perfectly happily; only the executable that links it complains. */
+#if defined(SYNTH_TARGET_HOST)
 /* Pointers rather than arrays, because the generated file cannot portably
- * place a second array symbol exactly one past the end of the first. The two
- * uses below -- the pointer difference on line 146 and passing _start as a
- * const uint8_t* on 147 -- read identically either way. */
+ * place a second array symbol exactly one past the end of the first. Both uses
+ * below -- the pointer difference, and passing _start as a const uint8_t* --
+ * read identically either way. */
 extern "C" const uint8_t* const drumkit_bin_start;
 extern "C" const uint8_t* const drumkit_bin_end;
 #else

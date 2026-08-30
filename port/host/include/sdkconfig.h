@@ -41,18 +41,71 @@
 
 /* ---- audio engine -------------------------------------------------------
  *
- * The block is 256 frames rather than the firmware's 64. That is the one
- * number this port most needs to differ on: 64 frames is 1.33 ms, which an
- * RTOS with a pinned max-priority task meets and a general-purpose OS does
- * not reliably. 256 gives the render thread 5.33 ms of slack per block at the
- * cost of the same in output latency, which is still below the threshold
- * where playing an instrument feels wrong.
+ * The block is 64 frames, the firmware's own. It was 256 here, and the reason
+ * given was the render deadline: 64 frames is 1.33 ms, which an RTOS with a
+ * pinned max-priority task meets and a general-purpose OS does not reliably.
+ * That reasoning was about the wrong thing. The render thread does not have a
+ * 1.33 ms deadline on this port -- sink_miniaudio's ring is sized in *device
+ * periods*, not in render blocks, so the thread is paced by a blocking write
+ * against a ring several periods deep and simply produces four small blocks
+ * where it used to produce one large one. Same work, same slack; what changes
+ * is the wakeup rate, 750/s instead of 187/s, and on a host that is cheap.
  *
- * Voices go to 16 because the ceiling on hardware was CPU and IRAM, and
- * neither is the binding constraint here. */
+ * What 256 cost was the sound. The engine is full of quantities that are per
+ * *block* rather than per second, so quadrupling the block quadrupled them
+ * all, and the standalone build stopped being the same instrument:
+ *
+ *   - kParamSlew (synth_smooth.h) and kMixSlew (fx.cpp) are one-pole
+ *     coefficients per block. Both are documented against "750 blocks/s";
+ *     at 187 every smoothed parameter and every FX bypass crossfade took
+ *     360 ms to settle instead of 90.
+ *   - kTimeSlew (fx.cpp): the delay's tape glide, 110 ms -> 440 ms.
+ *   - The compressor computes its gain once per block from that block's peak.
+ *     fx.comp.attack has a 1 ms floor precisely because the floor is the
+ *     block period; at 5.33 ms the control was lying over most of its range.
+ *   - The FX LFOs, the phaser's coefficients and the granular delay's grain
+ *     spawns all land on the block grid. An LFO near its 20 Hz ceiling had
+ *     under four steps per cycle, and grain onsets clumped at 187 Hz instead
+ *     of 750 -- audible as a pitch, not as a texture.
+ *   - adsr_block() lands stage boundaries on block edges, so a 1 ms attack
+ *     really was 5.33 ms and every pluck arrived soft.
+ *
+ * None of that is reachable by retuning constants: four of the six are grids,
+ * not coefficients. Matching the firmware's block is what makes the two builds
+ * one instrument, and it takes 4 ms off the output latency as a side effect.
+ *
+ * Voices are the firmware's 8, and this is a parity number rather than a
+ * capacity one. It was 16 -- the hardware ceiling was CPU and IRAM, and
+ * neither binds here -- until it turned out that the voice count is not only a
+ * polyphony setting. synth_voice.cpp stages every voice at
+ *
+ *     kVoiceGain = 1.0f / SYNTH_VOICES
+ *
+ * so that a full-polyphony chord sums to 1.0, and graph_render.cpp stages the
+ * modular engine's rows the same way. Doubling the voices therefore halves the
+ * level of every single note: the standalone build ran 6.02 dB under the
+ * instrument on every patch of every engine, and that is not a volume trim,
+ * because most of what it feeds is calibrated in absolute dBFS --
+ *
+ *   - the drum bus is NOT staged this way, so the synth sat 6 dB under the
+ *     drums here and nowhere else;
+ *   - fx.comp's threshold, fx.lim's -2 dBFS ceiling, the NR/ANR thresholds and
+ *     the voice-bus soft_clip() (whose "nominal full polyphony sums to 1.0"
+ *     was simply false at 16) all moved relative to the signal;
+ *   - the wetreverb algorithm quantises its wet output through a fixed-scale
+ *     12-bit gain-ranged stage at about -78 dBFS (fx_reverb_wet.cpp, the
+ *     Lexicon 224 trick). Its step does not scale with the signal, so 6 dB of
+ *     input loss is 6 dB less room above the dither and the tail audibly
+ *     coarsens. It is the algorithm this showed up in first.
+ *
+ * Keeping 16 would have meant referencing the headroom to a fixed 8 and
+ * letting the bus clip past eight notes -- trading a level error for a
+ * distortion the instrument cannot produce. Matching the count instead makes
+ * the two builds identical for the same input, which is the whole point of
+ * compiling the same sources. */
 #define CONFIG_OSYNTH_SAMPLE_RATE 48000
-#define CONFIG_OSYNTH_BLOCK_SIZE  256
-#define CONFIG_OSYNTH_VOICES      16
+#define CONFIG_OSYNTH_BLOCK_SIZE  64
+#define CONFIG_OSYNTH_VOICES      8
 #define CONFIG_OSYNTH_HEARTBEAT_MS 5000
 
 /* ---- memory -------------------------------------------------------------

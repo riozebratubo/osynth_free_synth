@@ -189,9 +189,27 @@ inline int SYNTH_RENDER_IRAM in_slot(void) { return 0; }
 #endif
 const std::atomic<float>* s_in_route = nullptr;
 const std::atomic<float>* s_in_gain = nullptr;
+/* The capture-side device trim, applied before anything reads the block — so
+ * unlike `in.gain` it reaches audio_io_in_mono(), and therefore the vocoder's
+ * modulator and the granular engine's capture ring.
+ *
+ * Optional, which is why it lives out here rather than inside the selector
+ * block it used to share. Two-device builds register it with the selector
+ * (main.cpp) because a line input and a MEMS mic do not arrive anywhere near
+ * each other; the host registers it with one device because that device is
+ * whatever the OS calls its default input and nothing else in the chain can
+ * lift it. A build that registers neither leaves this null, and the read below
+ * is unity — what those builds did before the trim existed. */
+const std::atomic<float>* s_in_micgain = nullptr;
+
+/* The trim, or unity where no build registered one. Read once per block. */
+inline float in_dev_trim(void) {
+    return (s_in_micgain != nullptr)
+               ? s_in_micgain->load(std::memory_order_relaxed)
+               : 1.0f;
+}
 #if SYNTH_ENABLE_IN_SOURCE_SEL
 const std::atomic<float>* s_in_source = nullptr;
-const std::atomic<float>* s_in_micgain = nullptr;
 /* `in.source` values. `both` is last so the two single-device values keep the
  * numbers they were persisted and preset-defaulted with. */
 enum { kSelLine = 0, kSelMic = 1, kSelBoth = 2 };
@@ -378,7 +396,7 @@ void SYNTH_RENDER_IRAM audio_in_capture(int pipe) {
      * reason `in.micgain` exists, and why it is registered only where there
      * are two devices for it to sit between. */
     const int sel = (int)(s_in_source->load(std::memory_order_relaxed) + 0.5f);
-    const float micg = s_in_micgain->load(std::memory_order_relaxed);
+    const float micg = in_dev_trim();
     const bool line_on = (sel == kSelLine || sel == kSelBoth);
     const bool mic_on = (sel == kSelMic || sel == kSelBoth);
     s_dev_g[pipe][kSlotLine] =
@@ -386,9 +404,16 @@ void SYNTH_RENDER_IRAM audio_in_capture(int pipe) {
     s_dev_g[pipe][kSlotMic] =
         osynth::dsp::smooth_lin(s_dev_sm[kSlotMic], mic_on ? micg : 0.0f);
 #else
-    /* One device compiled in: it is the source, always, and its gain is a
-     * constant the compiler folds into the mix below. */
-    s_dev_g[pipe][0] = 1.0f;
+    /* One device compiled in: it is the source, always, and its trim is
+     * `in.micgain` where the build registered one -- the host does, since its
+     * capture is whatever the OS hands over and audio_io_in_mono() applies
+     * nothing else. Smoothed for the same reason the two-device gains above
+     * are: this multiplies every sample, so a slider drag would zipper.
+     *
+     * Where nothing registered the trim in_dev_trim() answers 1.0 and the
+     * smoother settles there on the first block, which is exactly the constant
+     * this line used to be. */
+    s_dev_g[pipe][0] = osynth::dsp::smooth_lin(s_dev_sm[0], in_dev_trim());
 #endif
 
     /* Published for the heartbeat, from here rather than by reading the
@@ -785,6 +810,11 @@ static esp_err_t start_common(void* ctx) {
      * than a control that vanishes depending on how boot went. */
     s_in_route = osynth::ParamStore::instance().valuePtr(osynth::PID_LINE_IN_ROUTE);
     s_in_gain = osynth::ParamStore::instance().valuePtr(osynth::PID_LINE_IN_GAIN);
+    /* Optional here, and required below where the selector needs it -- see the
+     * declaration. Fetched once for both cases so there is one place that says
+     * where this pointer comes from. */
+    s_in_micgain =
+        osynth::ParamStore::instance().valuePtr(osynth::PID_LINE_IN_MICGAIN);
     bool params_ok = (s_in_route != nullptr && s_in_gain != nullptr);
 
 #if SYNTH_ENABLE_LINE_IN
@@ -825,8 +855,6 @@ static esp_err_t start_common(void* ctx) {
 #if SYNTH_ENABLE_IN_SOURCE_SEL
     s_in_source =
         osynth::ParamStore::instance().valuePtr(osynth::PID_LINE_IN_SOURCE);
-    s_in_micgain =
-        osynth::ParamStore::instance().valuePtr(osynth::PID_LINE_IN_MICGAIN);
     /* Both are required together: the capture reads them unconditionally on
      * every block, and half a selector is worse than none. Missing either
      * leaves the input off rather than dereferencing a null in the audio
