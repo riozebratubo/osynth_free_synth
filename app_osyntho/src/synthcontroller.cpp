@@ -3755,6 +3755,29 @@ int SynthController::graphNodeParamId(int slot, int index) const {
   return 0x0200 + slot * m_graphParamsPerNode + index;
 }
 
+// Source slot patched into `port` of `slot`. -1 covers every way there is no
+// answer: an unpatched port, a port this slot has no entry for, a slot outside
+// the model.
+//
+// This exists because QML must not subscript graphSlot.sources with a function
+// *parameter*. qmlcachegen boxes an int-annotated parameter into a QVariant
+// when the function takes more than one -- tapOutput(slot: int) compiles to a
+// real int, tapInput(slot: int, port: int) does not -- and then emits
+// QList<int>::at(QVariant) for the subscript, which is not a function that
+// exists. It broke the MSVC build the day this page was typed.
+//
+// Bindings are unaffected: the delegate's `patched` reads .sources[index]
+// straight off the model and compiles, which matters because it has to depend
+// on graphNodes to repaint when the wiring changes, and an invokable would
+// give it nothing to re-evaluate on. So only the click path comes through
+// here -- which also puts the bounds check somewhere it is written once.
+int SynthController::graphSource(int slot, int port) const {
+  if (slot < 0 || slot >= m_graphNodes.size()) return -1;
+  const QList<int>& src = m_graphNodes.at(slot).sources;
+  if (port < 0 || port >= src.size()) return -1;
+  return src.at(port);
+}
+
 GraphKindDesc SynthController::graphKind(int kind) const {
   if (kind < 0 || kind >= m_graphKinds.size()) return GraphKindDesc();
   return m_graphKinds.at(kind);

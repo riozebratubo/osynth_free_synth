@@ -430,6 +430,11 @@ class SynthController final : public QObject, public DatabaseClient {
   // (0x0200 + 16*slot + index). Exposed rather than recomputed in QML so the
   // layout constant lives in exactly one place on this side too.
   Q_INVOKABLE int graphNodeParamId(int slot, int index) const;
+  // Source slot patched into `port` of `slot`, or -1 when nothing is.
+  // Deliberately not left to QML as graphNodes[slot].sources[port]: see the
+  // definition for the codegen trap that forces it, and for why the two jack
+  // *bindings* still read .sources directly.
+  Q_INVOKABLE int graphSource(int slot, int port) const;
   // Kind descriptor by index. Returns an invalid one for a kind outside the
   // table rather than nothing, so the canvas can read .name and .inputs off
   // the answer unconditionally.

@@ -100,7 +100,9 @@ Item {
         if (pendingSource < 0) {
             // Nothing armed: a tap on a patched jack unpatches it. This is the
             // only way to remove a cable, and it mirrors pulling one out.
-            if (n.sources[port] >= 0) Synth.graphConnect(slot, port, -1)
+            if (Synth.graphSource(slot, port) >= 0) {
+                Synth.graphConnect(slot, port, -1)
+            }
             return
         }
         Synth.graphConnect(slot, port, pendingSource)
