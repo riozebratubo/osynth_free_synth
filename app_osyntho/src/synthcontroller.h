@@ -19,6 +19,7 @@
 #include "src/business/databaseclient.h"
 #include "src/loopwav.h"
 #include "src/chordtypes.h"
+#include "src/graphtypes.h"
 #include "src/paramtypes.h"
 #include "src/seqtypes.h"
 
@@ -127,10 +128,12 @@ class SynthController final : public QObject, public DatabaseClient {
   Q_PROPERTY(int graphEngineIndex READ graphEngineIndex NOTIFY graphInfoChanged FINAL)
   Q_PROPERTY(int graphCost READ graphCost NOTIFY graphCostChanged FINAL)
   Q_PROPERTY(int graphCostBudget READ graphCostBudget NOTIFY graphInfoChanged FINAL)
-  // [{kind,name,rate,cost,inputs:[..],params:[..]}], indexed by kind
-  Q_PROPERTY(QVariantList graphKinds READ graphKinds NOTIFY graphKindsChanged FINAL)
-  // [{slot,kind,in:[..],x,y}] — one entry per slot, empty slots included
-  Q_PROPERTY(QVariantList graphNodes READ graphNodes NOTIFY graphChanged FINAL)
+  // The kind table, indexed by kind — see src/graphtypes.h. Grown to stay
+  // indexable, so entries the synth has not answered for yet are present and
+  // invalid rather than absent.
+  Q_PROPERTY(QList<GraphKindDesc> graphKinds READ graphKinds NOTIFY graphKindsChanged FINAL)
+  // One entry per slot, empty slots included, so graphNodes[slot] is the slot.
+  Q_PROPERTY(QList<GraphSlot> graphNodes READ graphNodes NOTIFY graphChanged FINAL)
   Q_PROPERTY(QString graphError READ graphError NOTIFY graphErrorChanged FINAL)
 
   // ---- loop track download (S33) ----
@@ -409,8 +412,8 @@ class SynthController final : public QObject, public DatabaseClient {
   int graphEngineIndex() const { return m_graphEngineIndex; }
   int graphCost() const { return m_graphCost; }
   int graphCostBudget() const { return m_graphCostBudget; }
-  QVariantList graphKinds() const { return m_graphKinds; }
-  QVariantList graphNodes() const { return m_graphNodes; }
+  QList<GraphKindDesc> graphKinds() const { return m_graphKinds; }
+  QList<GraphSlot> graphNodes() const { return m_graphNodes; }
   QString graphError() const { return m_graphError; }
 
   // Probes GRAPH_INFO, then the kind table (once per connection — it is
@@ -427,8 +430,10 @@ class SynthController final : public QObject, public DatabaseClient {
   // (0x0200 + 16*slot + index). Exposed rather than recomputed in QML so the
   // layout constant lives in exactly one place on this side too.
   Q_INVOKABLE int graphNodeParamId(int slot, int index) const;
-  // Kind descriptor by index, or an empty map. Convenience for the canvas.
-  Q_INVOKABLE QVariantMap graphKind(int kind) const;
+  // Kind descriptor by index. Returns an invalid one for a kind outside the
+  // table rather than nothing, so the canvas can read .name and .inputs off
+  // the answer unconditionally.
+  Q_INVOKABLE GraphKindDesc graphKind(int kind) const;
   // Lowest empty slot, or -1 when the graph is full — what "add node" uses.
   Q_INVOKABLE int graphFreeSlot() const;
   Q_INVOKABLE void clearGraphError();
@@ -1013,8 +1018,8 @@ class SynthController final : public QObject, public DatabaseClient {
   int m_graphCostBudget = 0;
   int m_graphRevision = -1;
   int m_graphKindCount = 0;
-  QVariantList m_graphKinds;
-  QVariantList m_graphNodes;
+  QList<GraphKindDesc> m_graphKinds;
+  QList<GraphSlot> m_graphNodes;
   QString m_graphError;
   // DRUM_TRIG (0x38) is newer than the rest of the drum bus, so a device may
   // be running firmware that has the kit but not the opcode. Assume it works,

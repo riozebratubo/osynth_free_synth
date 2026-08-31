@@ -266,7 +266,10 @@ cmake -S app_osyntho -B build_standalone -DOSYNTHO_EMBEDDED=ON
 cmake --build build_standalone
 ```
 
-That flag is the whole of it.
+That flag is the whole of it. On Linux, MIDI input compiles against the ALSA
+headers, so `libasound2-dev` (Debian/Ubuntu), `alsa-lib-devel` (Fedora) or
+`alsa-lib` (Arch) has to be installed first — audio needs nothing, it dlopens
+what it finds.
 
 ### It is the same code, not a rewrite
 

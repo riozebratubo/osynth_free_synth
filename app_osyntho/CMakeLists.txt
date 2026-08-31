@@ -263,6 +263,7 @@ qt_add_qml_module(
     SOURCES src/paramtypes.h
     SOURCES src/seqtypes.h
     SOURCES src/chordtypes.h
+    SOURCES src/graphtypes.h
     SOURCES src/loopwav.h src/loopwav.cpp
 
     # Phase 3 — synth control UI

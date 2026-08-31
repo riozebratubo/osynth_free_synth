@@ -2338,15 +2338,18 @@ QString SynthController::graphJson() const {
   if (!m_graphAvailable || m_engine != m_graphEngineIndex) return QString();
   if (m_graphNodes.isEmpty()) return QString();
   QJsonArray arr;
-  for (const QVariant& v : m_graphNodes) {
-    const QVariantMap n = v.toMap();
+  // The key stays "in" even though the value type calls the field `sources`:
+  // this is the stored form of every patch already in the library, and
+  // graphFromJson() below reads it back. Renaming it here would quietly orphan
+  // the wiring of every saved patch.
+  for (const GraphSlot& n : m_graphNodes) {
     QJsonObject o;
-    o["kind"] = n.value("kind").toInt();
+    o["kind"] = n.kind;
     QJsonArray ins;
-    for (const QVariant& src : n.value("in").toList()) ins.append(src.toInt());
+    for (int src : n.sources) ins.append(src);
     o["in"] = ins;
-    o["x"] = n.value("x").toInt();
-    o["y"] = n.value("y").toInt();
+    o["x"] = n.x;
+    o["y"] = n.y;
     arr.append(o);
   }
   return QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact));
@@ -3569,17 +3572,20 @@ void SynthController::handleGraphInfo(const QByteArray& payload) {
 void SynthController::handleGraphKind(const QByteArray& payload) {
   const GraphKind k = parseGraphKind(payload);
   if (!k.valid) return;
-  QVariantMap m;
-  m["kind"] = k.kind;
-  m["name"] = k.name;
-  m["rate"] = k.rate;
-  m["cost"] = k.cost;
-  m["inputs"] = QVariant(k.inputs);
-  m["params"] = QVariant(k.params);
+  GraphKindDesc d;
+  d.valid = true;
+  d.kind = k.kind;
+  d.name = k.name;
+  d.rate = k.rate;
+  d.cost = k.cost;
+  d.inputs = k.inputs;
+  d.params = k.params;
   // Responses can arrive out of order; index by kind rather than appending,
-  // so the list is always addressable as graphKinds[kind].
-  while (m_graphKinds.size() <= k.kind) m_graphKinds.append(QVariantMap());
-  m_graphKinds[k.kind] = m;
+  // so the list is always addressable as graphKinds[kind]. The entries that
+  // padding leaves behind are default-constructed, which is to say invalid —
+  // the state graphKindDesc.valid exists to describe.
+  while (m_graphKinds.size() <= k.kind) m_graphKinds.append(GraphKindDesc());
+  m_graphKinds[k.kind] = d;
   emit graphKindsChanged();
   // syncGraphParamInfo() needs a kind's parameter count to know how many ids
   // that slot actually uses, so a model read that arrived before the kind table
@@ -3599,27 +3605,27 @@ void SynthController::rebuildGraphNodes(const GraphModel& gm) {
   // syncGraphParamInfo() below fetch it again.
   QList<int> prevKinds;
   prevKinds.reserve(m_graphNodes.size());
-  for (const QVariant& v : std::as_const(m_graphNodes)) {
-    prevKinds.append(v.toMap().value("kind").toInt());
+  for (const GraphSlot& prev : std::as_const(m_graphNodes)) {
+    prevKinds.append(prev.kind);
   }
 
   m_graphNodes.clear();
+  m_graphNodes.reserve(gm.nodes.size());
   for (int i = 0; i < gm.nodes.size(); ++i) {
     const GraphNode& n = gm.nodes[i];
-    QVariantMap m;
-    m["slot"] = i;
-    m["kind"] = n.kind;
-    QVariantList ins;
-    for (int v : n.in) ins.append(v);
-    m["in"] = ins;
-    m["x"] = n.x;
-    m["y"] = n.y;
-    m_graphNodes.append(m);
+    GraphSlot node;
+    node.valid = true;
+    node.slot = i;
+    node.kind = n.kind;
+    node.sources = n.in;
+    node.x = n.x;
+    node.y = n.y;
+    m_graphNodes.append(node);
   }
   bool forgot = false;
   for (int slot = 0; slot < prevKinds.size() && slot < m_graphNodes.size();
        ++slot) {
-    const int now = m_graphNodes.at(slot).toMap().value("kind").toInt();
+    const int now = m_graphNodes.at(slot).kind;
     if (now == prevKinds.at(slot)) continue;
     forgetNodeParamInfo(slot);
     forgot = true;
@@ -3668,13 +3674,13 @@ void SynthController::syncGraphParamInfo() {
 
   QList<quint16> missing;
   for (int slot = 0; slot < m_graphNodes.size(); ++slot) {
-    const int kind = m_graphNodes.at(slot).toMap().value("kind").toInt();
+    const int kind = m_graphNodes.at(slot).kind;
     if (kind == 0) continue;  // empty slot: registers nothing
     // Only the ids the *kind* declares. A slot owns paramsPerNode ids whatever
     // is in it, but a kind uses as many as it has parameters — asking for the
     // rest would earn a BAD_ARG apiece on every model read. Zero while the kind
     // table is still arriving, which is why handleGraphKind() calls back here.
-    const int nparams = graphKind(kind).value("params").toList().size();
+    const int nparams = graphKind(kind).params.size();
     for (int p = 0; p < nparams; ++p) {
       const int id = graphNodeParamId(slot, p);
       if (id < 0) continue;
@@ -3749,16 +3755,15 @@ int SynthController::graphNodeParamId(int slot, int index) const {
   return 0x0200 + slot * m_graphParamsPerNode + index;
 }
 
-QVariantMap SynthController::graphKind(int kind) const {
-  if (kind < 0 || kind >= m_graphKinds.size()) return QVariantMap();
-  return m_graphKinds[kind].toMap();
+GraphKindDesc SynthController::graphKind(int kind) const {
+  if (kind < 0 || kind >= m_graphKinds.size()) return GraphKindDesc();
+  return m_graphKinds.at(kind);
 }
 
 int SynthController::graphFreeSlot() const {
   for (int i = 0; i < m_graphNodes.size(); ++i) {
-    const QVariantMap m = m_graphNodes[i].toMap();
     if (i == m_graphOutSlot) continue;  // pinned to the output node
-    if (m.value("kind").toInt() == 0) return i;
+    if (m_graphNodes.at(i).kind == 0) return i;
   }
   return -1;
 }
@@ -3784,10 +3789,8 @@ void SynthController::graphSetNodePos(int slot, int x, int y) {
   // app is the authority on layout; the firmware only stores it. Without
   // this the cable painter keeps reading the old coordinates and every wire
   // stays where the node used to be.
-  QVariantMap m = m_graphNodes[slot].toMap();
-  m["x"] = x;
-  m["y"] = y;
-  m_graphNodes[slot] = m;
+  m_graphNodes[slot].x = x;
+  m_graphNodes[slot].y = y;
   emit graphChanged();
 }
 

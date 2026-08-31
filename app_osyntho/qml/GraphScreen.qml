@@ -44,6 +44,13 @@ Item {
     property int pendingSource: -1   // slot whose output jack is armed, or -1
     property int selectedSlot: -1    // node whose parameter panel is open
 
+    // The "no such slot" answer nodeAt() hands back, and the only reason it
+    // exists: a graphSlot is a value type, so it cannot be null, and a
+    // default-constructed one already *is* the not-a-slot state — valid false,
+    // kind 0, no sources. Never assigned; not readonly only because a
+    // read-only property has to be initialised and the default is the point.
+    property graphSlot emptySlot
+
     // The theme accent, captured on an item that does not override it. The
     // cost meter recolours itself near the budget, and reading Material.accent
     // inside its own binding is a self-reference: on that item the name now
@@ -55,20 +62,20 @@ Item {
 
     // --- geometry helpers, shared by the delegates and the cable painter ---
 
-    function nodeAt(slot: int): var {
+    function nodeAt(slot: int): graphSlot {
         var list = Synth.graphNodes
-        return (slot >= 0 && slot < list.length) ? list[slot] : null
+        return (slot >= 0 && slot < list.length) ? list[slot] : screen.emptySlot
     }
     function outJackPos(slot: int): var {
         var n = nodeAt(slot)
-        if (!n) return null
+        if (!n.valid) return null
         return { x: n.x + nodeW, y: n.y + nodeH / 2 }
     }
     function inJackPos(slot: int, port: int): var {
         var n = nodeAt(slot)
-        if (!n) return null
+        if (!n.valid) return null
         var k = Synth.graphKind(n.kind)
-        var count = k.inputs ? k.inputs.length : 0
+        var count = k.inputs.length
         if (count <= 0) return null
         // Ports spread down the node's left edge, centred on it.
         var step = nodeH / (count + 1)
@@ -77,11 +84,10 @@ Item {
 
     function kindName(kind: int): string {
         var k = Synth.graphKind(kind)
-        return k && k.name ? k.name : "—"
+        return k.name.length > 0 ? k.name : "—"
     }
     function isAudio(kind: int): bool {
-        var k = Synth.graphKind(kind)
-        return k && k.rate === 1
+        return Synth.graphKind(kind).rate === 1
     }
 
     function tapOutput(slot: int): void {
@@ -90,11 +96,11 @@ Item {
     }
     function tapInput(slot: int, port: int): void {
         var n = nodeAt(slot)
-        if (!n) return
+        if (!n.valid) return
         if (pendingSource < 0) {
             // Nothing armed: a tap on a patched jack unpatches it. This is the
             // only way to remove a cable, and it mirrors pulling one out.
-            if (n.in[port] >= 0) Synth.graphConnect(slot, port, -1)
+            if (n.sources[port] >= 0) Synth.graphConnect(slot, port, -1)
             return
         }
         Synth.graphConnect(slot, port, pendingSource)
@@ -260,10 +266,15 @@ Item {
                         var n = nodes[dst]
                         if (n.kind === 0) continue
                         var k = Synth.graphKind(n.kind)
-                        var nin = k.inputs ? k.inputs.length : 0
+                        // The kind declares the ports and the slot carries a
+                        // source for each one it knows about; a kind table that
+                        // landed before the model can name more of them than
+                        // the slot has entries for, which used to be what the
+                        // `undefined` test here was standing in for.
+                        var nin = Math.min(k.inputs.length, n.sources.length)
                         for (var port = 0; port < nin; ++port) {
-                            var src = n.in[port]
-                            if (src === undefined || src < 0) continue
+                            var src = n.sources[port]
+                            if (src < 0) continue
                             var a = screen.outJackPos(src)
                             var b = screen.inJackPos(dst, port)
                             if (!a || !b) continue
@@ -289,10 +300,11 @@ Item {
                 model: Synth.graphNodes
                 delegate: Rectangle {
                     id: node
-                    required property var modelData
+                    required property graphSlot modelData
                     required property int index
 
-                    readonly property var kindDesc: Synth.graphKind(modelData.kind)
+                    readonly property graphKindDesc kindDesc:
+                        Synth.graphKind(modelData.kind)
                     readonly property bool empty: modelData.kind === 0
                     readonly property bool isOut: index === Synth.graphOutSlot
 
@@ -313,7 +325,8 @@ Item {
                         spacing: 1
                         Label {
                             anchors.horizontalCenter: parent.horizontalCenter
-                            text: node.kindDesc.name ? node.kindDesc.name : "?"
+                            text: node.kindDesc.name.length > 0
+                                  ? node.kindDesc.name : "?"
                             font.pointSize: UI.fontSize * 0.8
                             font.bold: true
                         }
@@ -373,14 +386,14 @@ Item {
 
                     // Input jacks, one per declared port.
                     Repeater {
-                        model: node.kindDesc.inputs ? node.kindDesc.inputs : []
+                        model: node.kindDesc.inputs
                         delegate: Item {
-                            required property var modelData
+                            required property string modelData
                             required property int index
                             readonly property var pos:
                                 screen.inJackPos(node.index, index)
                             readonly property bool patched:
-                                node.modelData.in[index] >= 0
+                                node.modelData.sources[index] >= 0
 
                             x: -screen.jackR
                             y: (pos ? pos.y - node.modelData.y : 0) - screen.jackR
@@ -469,11 +482,10 @@ Item {
                     // declares; ParamControl picks the widget from the
                     // discovered type exactly as on every other page.
                     model: {
-                        if (screen.selectedSlot < 0) return []
+                        if (screen.selectedSlot < 0) return 0
                         var n = screen.nodeAt(screen.selectedSlot)
-                        if (!n) return []
-                        var k = Synth.graphKind(n.kind)
-                        return k.params ? k.params.length : 0
+                        if (!n.valid) return 0
+                        return Synth.graphKind(n.kind).params.length
                     }
                     delegate: ParamControl {
                         required property int index
@@ -500,14 +512,14 @@ Item {
             clip: true
             model: Synth.graphKinds
             delegate: ItemDelegate {
-                required property var modelData
+                required property graphKindDesc modelData
                 required property int index
                 width: ListView.view.width
                 // Kind 0 is "empty" and the out node is pinned to slot 0, so
                 // neither is something to add.
                 visible: index > 0 && modelData.name !== "out"
                 height: visible ? implicitHeight : 0
-                text: (modelData.name ? modelData.name : "?")
+                text: (modelData.name.length > 0 ? modelData.name : "?")
                       + "   ·   " + (modelData.rate === 1 ? Tr.t("audio") : Tr.t("control"))
                       + "   ·   " + modelData.cost
                 onClicked: {
