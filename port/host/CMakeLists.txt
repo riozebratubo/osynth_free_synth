@@ -376,9 +376,22 @@ elseif(APPLE)
     target_compile_definitions(osynth_core PRIVATE __MACOSX_CORE__)
     target_link_libraries(osynth_core PUBLIC "-framework CoreMIDI")
 elseif(UNIX)
+    # The one spot in the host build that needs a *development* package.
+    # miniaudio dlopens ALSA for audio (the backend block below says so), but
+    # RtMidi includes <alsa/asoundlib.h>, so here the headers have to be on
+    # disk when it compiles. Naming the package at configure time beats a
+    # fatal error a hundred files into the build.
+    find_package(ALSA)
+    if(NOT ALSA_FOUND)
+        message(FATAL_ERROR
+            "MIDI input needs the ALSA development headers: install "
+            "libasound2-dev (Debian/Ubuntu), alsa-lib-devel (Fedora) or "
+            "alsa-lib (Arch).")
+    endif()
     set(OSYNTH_MIDI 1)
     target_compile_definitions(osynth_core PRIVATE __LINUX_ALSA__)
-    target_link_libraries(osynth_core PUBLIC asound)
+    target_include_directories(osynth_core PRIVATE ${ALSA_INCLUDE_DIRS})
+    target_link_libraries(osynth_core PUBLIC ${ALSA_LIBRARIES})
 else()
     set(OSYNTH_MIDI 0)
 endif()

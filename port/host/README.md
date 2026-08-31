@@ -69,6 +69,12 @@ ignores `CMAKE_BUILD_TYPE` and wants `--config` at build time.
 Needs CMake ≥ 3.16, a C++20 compiler and Python 3 (for `tools/gen_wavetables.py`, which generates
 `factory_wavetables.h` exactly as the firmware build does).
 
+On Linux, also the ALSA development headers — `libasound2-dev` (Debian/Ubuntu),
+`alsa-lib-devel` (Fedora), `alsa-lib` (Arch). They are RtMidi's, not
+miniaudio's: audio dlopens ALSA and PulseAudio at run time and needs no
+package, MIDI input `#include`s `<alsa/asoundlib.h>` and does. CMake checks for
+them and says so by name rather than letting the compile fail.
+
 ## Checks
 
 ```sh
