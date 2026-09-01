@@ -21,6 +21,14 @@
 #include <mutex>
 #include <thread>
 
+#if defined(__ANDROID__)
+/* Android closes stderr, so every line the log shim writes would otherwise be
+ * formatted and thrown away -- which is exactly what happened to "no audio
+ * device could be opened" while the standalone app sat silent on a phone and
+ * said nothing about it anywhere. logcat is where a phone's diagnostics live. */
+#include <android/log.h>
+#endif
+
 #if defined(_MSC_VER)
 /* MoveFileExA, for the rename shim below. WIN32_LEAN_AND_MEAN keeps the rest
  * of the Windows headers -- and their `min`/`max` macros -- out of a
@@ -66,6 +74,20 @@ std::mutex g_log_mutex;
 TagLevel g_tag_levels[kMaxTagLevels];
 int g_tag_level_count = 0;
 esp_log_level_t g_default_level = ESP_LOG_INFO;
+
+#if defined(__ANDROID__)
+/* IDF's levels onto Android's. The same order, different numbers, and no
+ * arithmetic relationship between the two worth relying on. */
+int android_priority(esp_log_level_t l) {
+    switch (l) {
+        case ESP_LOG_ERROR: return ANDROID_LOG_ERROR;
+        case ESP_LOG_WARN: return ANDROID_LOG_WARN;
+        case ESP_LOG_INFO: return ANDROID_LOG_INFO;
+        case ESP_LOG_DEBUG: return ANDROID_LOG_DEBUG;
+        default: return ANDROID_LOG_VERBOSE;
+    }
+}
+#endif
 
 const char* level_letter(esp_log_level_t l) {
     switch (l) {
@@ -129,9 +151,20 @@ void esp_log_write_host(esp_log_level_t level, const char* tag, const char* fmt,
 
     const long ms = (long)(elapsed_us() / 1000);
     std::lock_guard<std::mutex> lk(g_log_mutex);
+#if defined(__ANDROID__)
+    /* The tag becomes logcat's tag rather than part of the message, so
+     * `adb logcat -s sink_ma audio_io osynth_host` filters these the way it
+     * filters any other Android component. The level letter and the
+     * boot-relative milliseconds stay in the text: that is the IDF shape, and
+     * keeping it is what lets a phone log and a serial log be read side by
+     * side. */
+    __android_log_print(android_priority(level), tag != nullptr ? tag : "?",
+                        "%s (%ld) %s", level_letter(level), ms, msg);
+#else
     std::fprintf(stderr, "%s (%ld) %s: %s\n", level_letter(level), ms,
                  tag != nullptr ? tag : "?", msg);
     std::fflush(stderr);
+#endif
 }
 
 /* ---- errors ------------------------------------------------------------- */
@@ -162,9 +195,9 @@ const char* esp_err_to_name(esp_err_t code) {
 
 void esp_error_check_failed(esp_err_t rc, const char* file, int line,
                             const char* expr) {
-    std::fprintf(stderr, "ESP_ERROR_CHECK failed: %s (0x%x) at %s:%d\n  %s\n",
-                 esp_err_to_name(rc), (unsigned)rc, file, line, expr);
-    std::fflush(stderr);
+    esp_log_write_host(ESP_LOG_ERROR, "ESP_ERROR_CHECK",
+                       "failed: %s (0x%x) at %s:%d -- %s", esp_err_to_name(rc),
+                       (unsigned)rc, file, line, expr);
     std::abort();
 }
 
@@ -175,8 +208,8 @@ void esp_restart(void) {
      * returning leaves the app running, which is the honest outcome -- and
      * ctrl_proto should refuse the opcode on a host build rather than report
      * a reboot that did not happen. */
-    std::fprintf(stderr, "W (host) esp_restart(): ignored, no firmware to restart\n");
-    std::fflush(stderr);
+    esp_log_write_host(ESP_LOG_WARN, "host",
+                       "esp_restart(): ignored, no firmware to restart");
 }
 
 /* ---- cycle counter and ROM helpers -------------------------------------- */

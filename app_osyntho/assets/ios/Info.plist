@@ -2,12 +2,23 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <!-- Substituted by CMake from the target's MACOSX_BUNDLE_GUI_IDENTIFIER /
+         MACOSX_BUNDLE_BUNDLE_NAME, i.e. APP_ID and APP_DISPLAY_NAME:
+         org.osynth.osyntho / "Osyntho" for the controller build,
+         org.osynth.osyntho.standalone / "Osyntho Standalone" for the embedded
+         one. iOS keys an installed app off the bundle id alone, so a fixed
+         value here is what would stop the two being installed together.
+
+         These three read "org.poproaster.caramel" / "Caramel 2" until
+         2026-09: this file started as a copy from another project. The
+         NS*UsageDescription strings below still carry that project's wording
+         and need rewriting for Osyntho before any iOS submission. -->
     <key>CFBundleIdentifier</key>
-    <string>org.poproaster.caramel</string>
+    <string>@MACOSX_BUNDLE_GUI_IDENTIFIER@</string>
     <key>CFBundleName</key>
-    <string>Caramel 2</string>
+    <string>@MACOSX_BUNDLE_BUNDLE_NAME@</string>
     <key>CFBundleDisplayName</key>
-    <string>Caramel 2</string>
+    <string>@MACOSX_BUNDLE_BUNDLE_NAME@</string>
     <key>CFBundleShortVersionString</key>
     <string>@MACOSX_BUNDLE_SHORT_VERSION_STRING@</string>
     <key>CFBundleVersion</key>
@@ -26,6 +37,12 @@
     <string>Caramel 2 uses location to scan for nearby Bluetooth roaster devices.</string>
     <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
     <string>Caramel 2 uses location to scan for nearby Bluetooth roaster devices.</string>
+    <!-- Required, not optional: App::startEmbeddedEngine() requests the
+         microphone permission on the standalone build, and iOS terminates a
+         process that requests a permission with no usage string here. Written
+         for Osyntho, unlike the strings around it. -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Osyntho uses the audio input as a sound source: the line input, the vocoder and the granular engine all read from it.</string>
     <key>NSCameraUsageDescription</key>
     <string>Caramel 2 uses the camera to take pictures of your roast.</string>
     <key>NSPhotoLibraryUsageDescription</key>

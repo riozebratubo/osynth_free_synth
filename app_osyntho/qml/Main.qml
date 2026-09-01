@@ -15,7 +15,10 @@ ApplicationWindow {
     width: App.isDesktop() ? 1024 : 360
     height: 720
     visible: true
-    title: "Osyntho"
+    // Per build variant, so that with the controller and the standalone app both
+    // installed and both running, the window and its task-list entry say which is
+    // which. See APP_DISPLAY_NAME in CMakeLists.txt.
+    title: App.appName
 
     // Declared, deliberately, and not assigned from Component.onCompleted.
     //

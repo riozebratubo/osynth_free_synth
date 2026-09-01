@@ -45,6 +45,14 @@ class App final : public QObject {
   // `visible` to this. CONSTANT because it cannot change while the app runs.
   Q_PROPERTY(bool standalone READ isStandalone CONSTANT FINAL)
 
+  // What this build calls itself: "Osyntho", or "Osyntho Standalone" for the
+  // embedded one. Bound by Main.qml as the window title, so that with both
+  // installed and both running the task list says which is which. The string
+  // comes from APP_DISPLAY_NAME in CMakeLists.txt -- the same one that names the
+  // Android label, the macOS bundle and the app data directory -- rather than
+  // being written out again here.
+  Q_PROPERTY(QString appName READ appName CONSTANT FINAL)
+
   Q_PROPERTY(Theme theme READ getTheme NOTIFY themeChanged FINAL)
   Q_PROPERTY(int themePresetIndex READ getThemePresetIndex NOTIFY themeChanged FINAL)
   Q_PROPERTY(bool bluetoothEnabled READ getBluetoothEnabled WRITE setBluetoothEnabled NOTIFY
@@ -96,6 +104,8 @@ class App final : public QObject {
   Q_INVOKABLE bool isDesktop();
   Q_INVOKABLE bool isMobile();
   Q_INVOKABLE bool isAndroid();
+
+  QString appName() const { return QStringLiteral(APP_DISPLAY_NAME); }
 
   bool isStandalone() const {
 #ifdef OSYNTHO_EMBEDDED
@@ -231,6 +241,10 @@ class App final : public QObject {
   App();
 
   void requestPermissions();
+  // Standalone builds only: brings the in-process engine up, once the
+  // microphone permission has been resolved on the platforms that have one.
+  // Compiles to nothing in the controller build.
+  void startEmbeddedEngine();
   void deleteTemporaryAppFiles();
 
   QString m_fontAwesomeName;

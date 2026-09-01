@@ -449,7 +449,14 @@ elseif(APPLE)
             PROPERTIES COMPILE_OPTIONS "-x;objective-c")
     endif()
 elseif(ANDROID)
-    # Nothing to link. AAudio is the preferred backend and is resolved at run
+    # liblog, for __android_log_print: src/esp_sys_host.cpp sends every ESP_LOGx
+    # line to logcat on Android, because the runtime closes stderr and the
+    # engine's whole boot log -- including the reason the audio device did not
+    # open -- was being written into nothing. It is part of the NDK sysroot, so
+    # there is no package to install and nothing to resolve at run time.
+    target_link_libraries(osynth_core PUBLIC log)
+
+    # Nothing to link for audio. AAudio is the preferred backend and is resolved at run
     # time, with OpenSL|ES as the fallback for Android 7 and older -- also
     # resolved at run time. Naming -lOpenSLES here is only needed alongside
     # MA_NO_RUNTIME_LINKING, and adding it otherwise makes a hard dependency

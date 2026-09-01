@@ -14,3 +14,12 @@ __pycache__/
 /schematics
 /.cache
 /app_osyntho/20*.txt
+
+build_host/
+build_regress_p4/
+/app_osyntho/build_embedded/
+build_android64/
+build_android32/
+
+# Windows static-Qt builds drop osyntho.exe here (app_osyntho/CMakeLists.txt).
+/current/

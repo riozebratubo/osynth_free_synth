@@ -2,15 +2,21 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <!-- Keep CFBundleIdentifier in sync with APP_ID in CMakeLists.txt: it is
-         also the single-instance lock name, and deploy_macos_multi.sh checks
-         the built bundle against it. -->
+    <!-- Substituted by CMake from the target's MACOSX_BUNDLE_GUI_IDENTIFIER,
+         i.e. APP_ID: org.osynth.osyntho for the controller build,
+         org.osynth.osyntho.standalone for the embedded one. It is also the
+         single-instance lock name, which is what lets the two run at once, so
+         do not hard-code it back: a fixed value here would make the second
+         app launched exit into the first one's window. (No double hyphens in
+         these comments; XML reads one as the start of the closing bracket.)
+         deploy_macos_multi.sh checks the built bundle against the variant it
+         detects in the build tree. -->
     <key>CFBundleIdentifier</key>
-    <string>org.osynth.osyntho</string>
+    <string>@MACOSX_BUNDLE_GUI_IDENTIFIER@</string>
     <key>CFBundleName</key>
-    <string>Osyntho</string>
+    <string>@MACOSX_BUNDLE_BUNDLE_NAME@</string>
     <key>CFBundleDisplayName</key>
-    <string>Osyntho</string>
+    <string>@MACOSX_BUNDLE_BUNDLE_NAME@</string>
     <key>CFBundleShortVersionString</key>
     <string>@MACOSX_BUNDLE_SHORT_VERSION_STRING@</string>
     <key>CFBundleVersion</key>
@@ -32,6 +38,12 @@
     <string>Osyntho uses Bluetooth to connect to your Osynth synthesizer.</string>
     <key>NSBluetoothPeripheralUsageDescription</key>
     <string>Osyntho uses Bluetooth to connect to your Osynth synthesizer.</string>
+    <!-- Required, not optional: App::startEmbeddedEngine() requests the
+         microphone permission on the standalone build, and macOS terminates a
+         process that requests a permission with no usage string here. The
+         controller build never asks, and an unused string costs it nothing. -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Osyntho uses the audio input as a sound source: the line input, the vocoder and the granular engine all read from it.</string>
     <!-- Matches CMAKE_OSX_DEPLOYMENT_TARGET in CMakeLists.txt. Declaring an
          older floor here than the toolchain built for lets the app launch on
          systems where it then dies on a missing symbol. -->

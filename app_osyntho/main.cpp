@@ -89,13 +89,32 @@ int main(int argc, char* argv[]) {
 
   QGuiApplication app(argc, argv);
 
-  app.setApplicationName("Osyntho");
+  // Not a literal: APP_DISPLAY_NAME is per build variant (CMakeLists.txt), and
+  // applicationName is the second half of what keeps the controller and the
+  // standalone build apart. APP_ID separates their single-instance locks so both
+  // can run; this separates AppDataLocation (<org>/<app>) so that when they do,
+  // they are not two processes writing one SQLite file.
+  app.setApplicationName(APP_DISPLAY_NAME);
 
   app.setOrganizationName("Osynth");
   app.setOrganizationDomain("osynth.org");
 
   app.setApplicationVersion(APP_VERSION);
   app.setWindowIcon(QIcon(":/assets/assets/graph.svg"));
+
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
+  // Names the .desktop entry deploy_linux.sh installs (<APP_ID>.desktop), which
+  // is how a Wayland compositor maps this window to its launcher -- app_id comes
+  // straight from here. Without it both variants fall back to the executable
+  // base name, which is "osyntho" for both, and whichever entry the compositor
+  // picks first wins the icon for both windows.
+  //
+  // On X11 it is the .desktop file's StartupWMClass that has to match instead,
+  // and there Qt builds WM_CLASS as <argv[0] basename> NUL <applicationName> --
+  // the second field is the one that differs between the variants, so that is
+  // what the entry declares.
+  QGuiApplication::setDesktopFileName(APP_ID);
+#endif
 
   // prevents many instances of the app to be launched. Must run BEFORE the
   // first App::instance() call below: constructing App opens the database and

@@ -1,7 +1,10 @@
 cmake_minimum_required(VERSION 3.7)
 
 set(APP_VERSION 0.2.0)
-set(APP_ID "org.osynth.osyntho")
+# The controller build's identity, and the base the standalone one is derived
+# from. Do not use it directly -- APP_ID / APP_DISPLAY_NAME are set per variant
+# further down, once OSYNTHO_EMBEDDED is known.
+set(APP_ID_BASE "org.osynth.osyntho")
 
 # those are defaults
 option(GIT_REVISION "Append the current git revision to the app's version string" ON)
@@ -17,7 +20,7 @@ option(BLE_DIRECT_CONNECT "Skip BLE scan and connect directly by address on Wind
 # Off by default: the normal osyntho is a controller for the instrument, and
 # that is the build most people want. Configure with -DOSYNTHO_EMBEDDED=ON for
 # the standalone one.
-option(OSYNTHO_EMBEDDED "Embed the synth engine and run standalone" OFF)
+option(OSYNTHO_EMBEDDED "Embed the synth engine and run standalone" ON)
 
 # change the values here
 # NOTE: intentional — these normal-variable set()s shadow the cache options
@@ -25,6 +28,39 @@ option(OSYNTHO_EMBEDDED "Embed the synth engine and run standalone" OFF)
 # Edit the values here to change a flag.
 set(GIT_REVISION true)
 set(BLE_DIRECT_CONNECT true)
+
+# --- Variant identity --------------------------------------------------------
+# The controller and the standalone build are two different applications as far
+# as every OS is concerned, and each OS keys an installed app off exactly one
+# string: the Android package name, the macOS/iOS bundle id, the .desktop and
+# icon basename on Linux, and -- on all of them -- the QLocalServer name the
+# single-instance guard claims. Share that string and the two cannot coexist:
+# Android refuses to install the second package, and on the desktop the second
+# one launched finds the first's socket, raises its window and exits.
+#
+# So the standalone build gets a suffix of its own. The controller keeps the
+# plain id -- it is the one already published, and changing it would strand
+# existing installs on a package no update ever matches again.
+#
+# APP_DISPLAY_NAME is also per variant, and it is not only cosmetic: main.cpp
+# passes it to QCoreApplication::setApplicationName(), which is what makes
+# AppDataLocation (<org>/<app>) differ between the two. Without that split the
+# guard's own warning comes true from the other direction -- two processes on
+# one SQLite file, now by design instead of by accident. Keep them together.
+#
+# APP_VARIANT is the same choice as a bare word, for places that need a path
+# segment rather than a name: the Windows static-Qt drop at the bottom of this
+# file writes to <repo>/current/${APP_VARIANT}/.
+if (OSYNTHO_EMBEDDED)
+  set(APP_ID "${APP_ID_BASE}.standalone")
+  set(APP_DISPLAY_NAME "Osyntho Standalone")
+  set(APP_VARIANT "standalone")
+else()
+  set(APP_ID "${APP_ID_BASE}")
+  set(APP_DISPLAY_NAME "Osyntho")
+  set(APP_VARIANT "controller")
+endif()
+message(STATUS "osyntho: app id '${APP_ID}', display name '${APP_DISPLAY_NAME}'")
 
 if (APPLE AND NOT IOS)
   set(CMAKE_OSX_ARCHITECTURES "x86_64" CACHE STRING "Target architecture: arm64, x86_64, or x86_64;arm64")
@@ -167,6 +203,9 @@ target_compile_definitions(
   PUBLIC APP_VERSION_NUMBER="${PROJECT_VERSION}"
   PUBLIC APP_VERSION="${PROJECT_VERSION}${GIT_REV}"
   PUBLIC APP_ID="${APP_ID}"
+  # Every user-visible name and every per-variant path in the app comes from
+  # here, so that "which build is this?" has one answer and not four.
+  PUBLIC APP_DISPLAY_NAME="${APP_DISPLAY_NAME}"
 )
 
 list(APPEND QML_IMPORT_PATH "/qml")
@@ -319,6 +358,11 @@ include_directories(src)
 # explicit, fixed bundle identifier manually though.
 set_target_properties(${PROJECT_NAME} PROPERTIES
     MACOSX_BUNDLE_GUI_IDENTIFIER ${APP_ID}
+    # Substituted into assets/{macos,ios}/Info.plist as CFBundleName /
+    # CFBundleDisplayName, next to the identifier above. Both plists take these
+    # from CMake rather than spelling them out, so a variant cannot ship under
+    # the other one's name.
+    MACOSX_BUNDLE_BUNDLE_NAME "${APP_DISPLAY_NAME}"
     MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}
     MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}
     MACOSX_BUNDLE TRUE
@@ -365,9 +409,38 @@ if (IOS)
 endif()
 
 # Sets the manifest, app icon and res/ (incl. the FileProvider paths) on Android.
+#
+# The manifest is generated rather than shipped ready-made: it names the package
+# in four places (package=, the FileProvider and androidx-startup authorities,
+# and the dynamic-receiver permission) and all four must carry this variant's
+# APP_ID for the two APKs to install side by side. So assets/android-build/ is
+# copied into the build tree, AndroidManifest.xml.in is configured into the copy,
+# and androiddeployqt is pointed there.
+#
+# file(COPY) runs at configure time, so an edit under assets/android-build/res/
+# reaches the APK only after a re-configure. The template itself is fine --
+# configure_file() registers it as a configure dependency automatically.
 if (ANDROID)
+  set(OSYNTHO_ANDROID_PACKAGE_DIR "${CMAKE_CURRENT_BINARY_DIR}/android-package-source")
+  file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/assets/android-build/"
+       DESTINATION "${OSYNTHO_ANDROID_PACKAGE_DIR}"
+       PATTERN "AndroidManifest.xml.in" EXCLUDE)
+  # @ANDROID_EXTRA_PERMISSIONS@ in the template. See the comment beside it
+  # there for why the microphone is asked for at all, and why only here: the
+  # controller build embeds no engine, so it opens no capture device.
+  if (OSYNTHO_EMBEDDED)
+    set(ANDROID_EXTRA_PERMISSIONS
+        "<uses-permission android:name=\"android.permission.RECORD_AUDIO\" />")
+  else()
+    set(ANDROID_EXTRA_PERMISSIONS "")
+  endif()
+
+  configure_file(
+      "${CMAKE_CURRENT_SOURCE_DIR}/assets/android-build/AndroidManifest.xml.in"
+      "${OSYNTHO_ANDROID_PACKAGE_DIR}/AndroidManifest.xml"
+      @ONLY)
   set_target_properties(${PROJECT_NAME} PROPERTIES
-      QT_ANDROID_PACKAGE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/assets/android-build"
+      QT_ANDROID_PACKAGE_SOURCE_DIR "${OSYNTHO_ANDROID_PACKAGE_DIR}"
   )
 endif()
 
@@ -394,10 +467,11 @@ if (ANDROID)
        "${APP_VERSION_MAJOR} * 1000000 + ${APP_VERSION_MINOR} * 10000 + ${APP_VERSION_PATCH} * 100 + ${APP_VERSION_TWEAK}")
 
   set_target_properties(${PROJECT_NAME} PROPERTIES
-      # Also declared as package= in assets/android-build/AndroidManifest.xml;
-      # keep the two in sync. (QT_ANDROID_PACKAGE_NAME needs Qt >= 6.8; on
-      # older Qt it is an inert custom property and the manifest value rules.)
-      QT_ANDROID_PACKAGE_NAME "org.osynth.osyntho"
+      # Same value the generated manifest carries as package= -- both come from
+      # APP_ID, so they cannot drift. (QT_ANDROID_PACKAGE_NAME needs Qt >= 6.8;
+      # on older Qt it is an inert custom property and the manifest value rules,
+      # which is why the manifest is templated rather than left to this.)
+      QT_ANDROID_PACKAGE_NAME "${APP_ID}"
       QT_ANDROID_VERSION_NAME "${APP_VERSION}"
       QT_ANDROID_VERSION_CODE ${ANDROID_VERSION_CODE}
   )
@@ -542,6 +616,50 @@ add_custom_command(
         ${CMAKE_SOURCE_DIR}/assets/qmldir
         ${CMAKE_CURRENT_BINARY_DIR}/org/osynth/qmldir
 )
+
+# --- Windows static-Qt drop --------------------------------------------------
+# A static Qt is the one configuration whose osyntho.exe stands on its own: no
+# Qt DLLs beside it, no windeployqt pass, nothing to assemble before it runs.
+# That makes it the only build worth lifting straight out of the build tree, so
+# it also lands at <repo>/current/<variant>/ -- a fixed path per variant to run
+# from or hand to someone, instead of a build directory whose name encodes the
+# kit and the configuration. The build tree keeps its own copy either way; this
+# is a copy, not a relocation.
+#
+# The two variants get their own subdirectory for the same reason they get their
+# own app id: both executables are called osyntho.exe, so one directory would
+# mean each build silently replacing the other.
+#
+# Static vs shared is read off Qt6::Core's imported target type. Qt's own
+# QT_BUILD_SHARED_LIBS is set by Qt6BuildInternalsExtra.cmake, which an
+# application project never loads, so it is not available here -- whereas the
+# imported library is STATIC_LIBRARY or SHARED_LIBRARY in every Qt 6 kit.
+if (WIN32 AND TARGET Qt6::Core)
+  get_target_property(OSYNTHO_QT_CORE_TYPE Qt6::Core TYPE)
+  if (OSYNTHO_QT_CORE_TYPE STREQUAL "STATIC_LIBRARY")
+    # ../ is the repository root -- the same assumption add_subdirectory() makes
+    # for port/host above.
+    get_filename_component(OSYNTHO_REPO_DIR "${CMAKE_SOURCE_DIR}/.." ABSOLUTE)
+    set(OSYNTHO_CURRENT_DIR "${OSYNTHO_REPO_DIR}/current/${APP_VARIANT}")
+    message(STATUS
+        "osyntho: static Qt kit -- the .exe will also be copied to ${OSYNTHO_CURRENT_DIR}")
+
+    # copy_if_different rather than copy: a rebuild that produced the same bytes
+    # leaves the file alone, so a copy someone is running from is not replaced
+    # underneath them (Windows refuses that anyway, and the build would fail).
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${OSYNTHO_CURRENT_DIR}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:${PROJECT_NAME}>"
+                "${OSYNTHO_CURRENT_DIR}/$<TARGET_FILE_NAME:${PROJECT_NAME}>"
+        COMMENT "Copying the static build to current/${APP_VARIANT}/"
+        VERBATIM)
+  else()
+    message(STATUS
+        "osyntho: shared Qt kit -- not copying to current/${APP_VARIANT} "
+        "(the .exe there would need the Qt DLLs beside it)")
+  endif()
+endif()
 
 get_target_property(MY_DEPENDENCIES ${PROJECT_NAME} "MANUALLY_ADDED_DEPENDENCIES")
 message(MY_DEPENDENCIES="${MY_DEPENDENCIES}")

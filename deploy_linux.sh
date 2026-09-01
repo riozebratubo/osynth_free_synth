@@ -37,10 +37,13 @@ APP_NAME="osyntho"
 # Store/display name: the label users actually see (Android label, macOS
 # CFBundleDisplayName, .desktop Name). APP_FILE_BASE is the same identity
 # without spaces, for artifact filenames.
+# Defaults for the controller build; the standalone one overrides all three
+# below, once $BUILD_DIR has been resolved and can be asked which it is.
 APP_DISPLAY_NAME="Osyntho"
 APP_FILE_BASE="Osyntho"
 # Must match APP_ID in app_osyntho/CMakeLists.txt: it is the single-instance
-# lock name, the macOS bundle id and the .desktop/icon basename here.
+# lock name, the macOS bundle id, the Wayland app_id the app sets on itself,
+# and the .desktop/icon basename here.
 APP_ID="org.osynth.osyntho"
 # Read from CMakeLists.txt rather than repeated here: a hard-coded copy drifts
 # from the app within a release or two, and then every artifact this script
@@ -63,6 +66,29 @@ OUTPUT_DIR="${2:-$SCRIPT_DIR/dist-linux}"
 [ -n "$BUILD_DIR" ] || die "Usage: $0 <build_dir> [output_dir]\nExample: $0 ~/build/osyntho-release ~/dist"
 [ -d "$BUILD_DIR" ] || die "Build directory not found: $BUILD_DIR"
 BUILD_DIR="$(realpath "$BUILD_DIR")"
+
+# -- Which of the two builds is this? -----------------------------------------
+# The controller and the standalone app are separate applications: separate
+# .desktop and icon basenames, separate single-instance lock, separate data
+# directory. Packaging one under the other's identity produces an AppImage that
+# claims the wrong launcher entry and refuses to run while its sibling is up.
+#
+# CMakeCache.txt is the honest source: OSYNTHO_EMBEDDED is a cache option and the
+# build tree records it nowhere else. An unreadable cache leaves the controller
+# defaults in place, which is what this script always assumed.
+OSYNTHO_EMBEDDED="$(awk -F= '/^OSYNTHO_EMBEDDED:BOOL=/{print $2; exit}' \
+                    "$BUILD_DIR/CMakeCache.txt" 2>/dev/null || true)"
+case "${OSYNTHO_EMBEDDED:-}" in
+    ON|on|1|TRUE|true|YES|yes)
+        APP_ID="org.osynth.osyntho.standalone"
+        APP_DISPLAY_NAME="Osyntho Standalone"
+        APP_FILE_BASE="Osyntho-Standalone"
+        VARIANT="standalone (embedded synth engine)"
+        ;;
+    *)
+        VARIANT="controller (BLE)"
+        ;;
+esac
 
 # Resolve OUTPUT_DIR to an absolute path now, before any cd calls change the
 # working directory and make relative paths resolve to the wrong location.
@@ -88,6 +114,8 @@ EXE_DIR="$(dirname "$EXE")"
 
 ARCH="$(uname -m)"
 info "App          : $APP_DISPLAY_NAME $APP_VERSION"
+info "Variant      : $VARIANT"
+info "App id       : $APP_ID"
 info "Architecture : $ARCH"
 info "App source   : $APP_SRC_DIR"
 info "Build dir    : $BUILD_DIR"
@@ -329,9 +357,13 @@ fi
 
 # ── Desktop entry ─────────────────────────────────────────────────────────────
 DESKTOP_FILE="$APPDIR/usr/share/applications/$APP_ID.desktop"
-# StartupWMClass: Qt sets WM_CLASS from the executable name, so without this
-# line the running window does not associate with this .desktop entry and the
-# taskbar shows a generic icon next to the launcher's real one.
+# StartupWMClass is the X11 half of associating the running window with this
+# entry; without it the taskbar shows a generic icon next to the launcher's
+# real one. Qt sets WM_CLASS to <argv[0] basename> NUL <applicationName>, and the
+# executable is called "osyntho" in both builds -- so the class (the second
+# field, i.e. applicationName = APP_DISPLAY_NAME) is the only part that tells
+# the two apart, and it is what goes here. Wayland does not use it: the app
+# calls setDesktopFileName(APP_ID) and the compositor matches this file by name.
 cat > "$DESKTOP_FILE" << EOF
 [Desktop Entry]
 Type=Application
@@ -341,7 +373,7 @@ Icon=$APP_ID
 Categories=AudioVideo;Audio;Music;
 Comment=Companion app for the Osynth synthesizer
 Keywords=synth;synthesizer;midi;bluetooth;osynth;
-StartupWMClass=$APP_NAME
+StartupWMClass=$APP_DISPLAY_NAME
 EOF
 info "Created .desktop file"
 

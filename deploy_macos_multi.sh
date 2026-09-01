@@ -55,10 +55,12 @@ APP_NAME="osyntho"
 # Store/display name: the label users actually see (Android label, macOS
 # CFBundleDisplayName). APP_FILE_BASE is the same identity without spaces, for
 # artifact filenames — and here also for the .app bundle directory name.
+# Defaults for the controller build; the standalone one overrides all three
+# below, once $BUILD_DIR has been resolved and can be asked which it is.
 APP_DISPLAY_NAME="Osyntho"
 APP_FILE_BASE="Osyntho"
-# Must match APP_ID in app_osyntho/CMakeLists.txt and CFBundleIdentifier in
-# assets/macos/Info.plist.
+# Must match APP_ID in app_osyntho/CMakeLists.txt, which is what CMake
+# substitutes into assets/macos/Info.plist as CFBundleIdentifier.
 APP_ID="org.osynth.osyntho"
 # Fallback only — overridden from the built bundle's Info.plist below.
 # Read from CMakeLists.txt rather than repeated here: a hard-coded copy drifts
@@ -97,6 +99,30 @@ OUTPUT_DIR="${2:-$SCRIPT_DIR/dist-macos}"
 [ -n "$BUILD_DIR" ] || die "Usage: $0 <build_dir> [output_dir]\nExample: $0 ~/build/Qt_6_11_0_for_macOS-Release ~/dist"
 [ -d "$BUILD_DIR" ] || die "Build directory not found: $BUILD_DIR"
 BUILD_DIR="$(cd "$BUILD_DIR" && pwd)"
+
+# -- Which of the two builds is this? -----------------------------------------
+# The controller and the standalone app are separate applications: separate
+# bundle ids, separate single-instance lock, separate Application Support
+# directory. Naming the .dmg and the .app after the wrong one is how a user ends
+# up replacing the app they meant to keep.
+#
+# CMakeCache.txt is the honest source: OSYNTHO_EMBEDDED is a cache option and the
+# build tree records it nowhere else. An unreadable cache leaves the controller
+# defaults in place, which is what this script always assumed -- and the
+# Info.plist check further down catches the mismatch if that guess is wrong.
+OSYNTHO_EMBEDDED="$(awk -F= '/^OSYNTHO_EMBEDDED:BOOL=/{print $2; exit}' \
+                    "$BUILD_DIR/CMakeCache.txt" 2>/dev/null || true)"
+case "${OSYNTHO_EMBEDDED:-}" in
+    ON|on|1|TRUE|true|YES|yes)
+        APP_ID="org.osynth.osyntho.standalone"
+        APP_DISPLAY_NAME="Osyntho Standalone"
+        APP_FILE_BASE="Osyntho-Standalone"
+        VARIANT="standalone (embedded synth engine)"
+        ;;
+    *)
+        VARIANT="controller (BLE)"
+        ;;
+esac
 
 mkdir -p "$OUTPUT_DIR"
 OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
@@ -143,14 +169,16 @@ else
     VERSION_SOURCE="default (Info.plist had no version)"
 fi
 
-# Identity check: assets/macos/Info.plist is a hand-maintained template, so it
-# is the one file that can silently ship the wrong app identity (it started life
-# as a copy from another project). Catch that here rather than in the App Store
-# / on a user's machine.
+# Identity check. CFBundleIdentifier now comes from CMake (APP_ID) rather than
+# being written into assets/macos/Info.plist, so a mismatch here means the
+# variant guessed from CMakeCache.txt above is not the variant that was built --
+# a stale bundle left in the build dir from the other configuration, usually.
+# Catch that here rather than in the App Store / on a user's machine.
 DETECTED_ID="$(plist_value CFBundleIdentifier "$INFO_PLIST")"
 if [ -n "$DETECTED_ID" ] && [ "$DETECTED_ID" != "$APP_ID" ]; then
     warn "Bundle identifier is '$DETECTED_ID', expected '$APP_ID'."
-    warn "  Fix CFBundleIdentifier in app_osyntho/assets/macos/Info.plist and rebuild."
+    warn "  The .app in $BUILD_DIR was probably built with the other"
+    warn "  OSYNTHO_EMBEDDED setting than the cache now records. Rebuild it."
 fi
 
 ARCH="$(uname -m)"
@@ -178,6 +206,8 @@ fi
 [ -n "$ARCH_LABEL" ] || ARCH_LABEL="$ARCH"
 
 info "App          : $APP_DISPLAY_NAME"
+info "Variant      : $VARIANT"
+info "Bundle id    : $APP_ID"
 info "Host arch    : $ARCH"
 if [ "$UNIVERSAL" = 1 ]; then
     info "App archs    : $APP_ARCHS  (universal)"

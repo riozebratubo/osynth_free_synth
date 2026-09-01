@@ -1,9 +1,26 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- versionCode/versionName here are only a fallback: the Android build
+<!-- TEMPLATE. CMake configures this into
+     <build>/android-package-source/AndroidManifest.xml and points
+     QT_ANDROID_PACKAGE_SOURCE_DIR at that copy; androiddeployqt never reads
+     this file. Edit here, not there.
+
+     @APP_ID@ is org.osynth.osyntho for the controller build and
+     org.osynth.osyntho.standalone for the embedded one (see CMakeLists.txt).
+     It appears four times below, and all four have to move together: Android
+     rejects an install whose provider authority or custom permission name is
+     already taken by another package, so a second APK that merely renamed
+     package= would still be refused, with an error naming the provider rather
+     than the package, which is a long way from the cause.
+
+     (Keep the double hyphen out of these comments: XML reads it as the start
+     of the closing bracket, and androiddeployqt dies on the generated file
+     with "Expected '>', but got ' '".)
+
+     versionCode/versionName here are only a fallback: the Android build
      derives both from APP_VERSION in CMakeLists.txt (QT_ANDROID_VERSION_CODE /
      QT_ANDROID_VERSION_NAME), which override these at deploy time. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="org.osynth.osyntho"
+    package="@APP_ID@"
     android:installLocation="auto"
     android:versionCode="100"
     android:versionName="0.1.0" >
@@ -17,6 +34,19 @@
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
+    <!-- RECORD_AUDIO, and only on the standalone build: CMake expands this to
+         nothing for the controller, which embeds no engine and opens no
+         capture device. Asking for a microphone in an app that never opens one
+         is a review flag and a lie to the user.
+
+         What it buys is the INPUT, not the sound. The engine opens one duplex
+         device (playback and capture share a clock, as the S3's two I2S halves
+         do) and miniaudio opens the capture stream first, so being refused it
+         used to fail the whole device and leave the synth silent. The sink now
+         retries output-only, so without this permission the app still plays;
+         what it loses is the line input, the vocoder and granular capture. -->
+    @ANDROID_EXTRA_PERMISSIONS@
+
     <supports-screens
         android:anyDensity="true"
         android:largeScreens="true"
@@ -24,10 +54,10 @@
         android:smallScreens="true" />
 
     <permission
-        android:name="org.osynth.osyntho.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+        android:name="@APP_ID@.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
         android:protectionLevel="signature" />
 
-    <uses-permission android:name="org.osynth.osyntho.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION" />
+    <uses-permission android:name="@APP_ID@.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION" />
 
     <!-- Debugging: add android:debuggable="true" to the <application> tag below
          when a debuggable build is needed. NEVER ship a release with it. Left
@@ -38,7 +68,7 @@
         android:appComponentFactory="androidx.core.app.CoreComponentFactory"
         android:fullBackupOnly="false"
         android:hardwareAccelerated="true"
-        android:label="Osyntho"
+        android:label="@APP_DISPLAY_NAME@"
         android:icon="@mipmap/ic_launcher"
         android:requestLegacyExternalStorage="true"
         android:enableOnBackInvokedCallback="false">
@@ -64,7 +94,7 @@
 
         <provider
             android:name="androidx.core.content.FileProvider"
-            android:authorities="org.osynth.osyntho.qtprovider"
+            android:authorities="@APP_ID@.qtprovider"
             android:exported="false"
             android:grantUriPermissions="true" >
             <meta-data
@@ -73,7 +103,7 @@
         </provider>
         <provider
             android:name="androidx.startup.InitializationProvider"
-            android:authorities="org.osynth.osyntho.androidx-startup"
+            android:authorities="@APP_ID@.androidx-startup"
             android:exported="false" >
             <meta-data
                 android:name="androidx.profileinstaller.ProfileInstallerInitializer"

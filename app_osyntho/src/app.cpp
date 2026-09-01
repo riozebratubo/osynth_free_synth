@@ -29,8 +29,11 @@
 #include <QtCore/private/qandroidextras_p.h>
 #include <QtCore/qjniobject.h>
 
-// FileProvider authority — must match assets/android-build/AndroidManifest.xml.
-static constexpr const char* kFileProviderAuthority = "org.osynth.osyntho.qtprovider";
+// FileProvider authority. Built from APP_ID rather than written out, because the
+// generated manifest builds its android:authorities the same way, and the two
+// halves of a mismatch fail far apart: the APK installs fine, and only sharing
+// a file throws IllegalArgumentException from deep inside FileProvider.
+static constexpr const char* kFileProviderAuthority = APP_ID ".qtprovider";
 
 static QString mimeTypeForExtension(const QString& ext) {
   if (ext == "zip") return "application/zip";
@@ -147,13 +150,63 @@ App::App(IDatabase& db, IBluetoothManager& btm, ISettings& st)
 
   deleteTemporaryAppFiles();
 
-#ifdef OSYNTHO_EMBEDDED
   // Last, and inside the constructor rather than in main(): every connect()
   // above is already made, so the manager's startup signals -- infoRead and
   // connectedChanged -- have somewhere to land. Both are emitted queued, so
   // they are delivered after this returns and the object is fully built.
-  EmbeddedManager::instance().start();
+  startEmbeddedEngine();
+}
+
+void App::startEmbeddedEngine() {
+#ifdef OSYNTHO_EMBEDDED
+  auto start = [] { EmbeddedManager::instance().start(); };
+
+#if QT_CONFIG(permissions)
+  // The microphone is asked for BEFORE the engine starts, and that order is
+  // the whole reason this function exists.
+  //
+  // The engine opens a single duplex audio device inside start(): the capture
+  // half is claimed by the same call that claims the output. Android and iOS
+  // both refuse a capture stream to an app that has not been granted the
+  // permission, and both answer asynchronously -- so asking afterwards would
+  // hand the answer to a device that is already open, and the input would only
+  // begin working on the *next* launch.
+  //
+  // Denied is not a failure and stops nothing. The sink retries output-only
+  // (port/host/src/sink_miniaudio.cpp), so the synth plays; what a refusal
+  // costs is the line input, the vocoder's modulator and the granular capture.
+  // Which is why every branch below starts the engine.
+  //
+  // Apple terminates a process that requests a permission whose Info.plist has
+  // no usage string, so assets/macos/Info.plist and assets/ios/Info.plist both
+  // carry NSMicrophoneUsageDescription. Do not remove one without the other.
+  if (qApp == nullptr) {
+    start();  // DI/test construction: no application object to ask through.
+    return;
+  }
+
+  QMicrophonePermission microphonePermission;
+  switch (qApp->checkPermission(microphonePermission)) {
+    case Qt::PermissionStatus::Undetermined:
+      // Delivered on the event loop, i.e. once main() reaches exec(). Nothing
+      // in the UI depends on the engine being up before then: the manager
+      // announces itself with the same queued infoRead/connectedChanged a BLE
+      // link does, and the app is already written to treat those as late.
+      qApp->requestPermission(microphonePermission, this,
+                              [start](const QPermission&) { start(); });
+      break;
+    case Qt::PermissionStatus::Denied:
+    case Qt::PermissionStatus::Granted:
+      // Every run after the first answers synchronously, so the engine starts
+      // here with no delay at all.
+      start();
+      break;
+  }
+#else
+  // Windows and Linux: nothing stands in front of the audio device.
+  start();
 #endif
+#endif  // OSYNTHO_EMBEDDED
 }
 
 void App::deleteTemporaryAppFiles() {

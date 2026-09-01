@@ -12,6 +12,15 @@
  * given the two independent clocks -- and a slow drift between them that the
  * looper and the vocoder would eventually show.
  *
+ * One duplex device does mean the output's fate is tied to the input's, and
+ * sink_start() unties it deliberately: a refused capture device is retried as
+ * output-only. That is not defensiveness. The capture half is what a phone
+ * gates behind a permission and what a desktop loses when a jack is pulled,
+ * and neither is a reason for an instrument to stop making sound. See the two
+ * long comments at the ma_device_init_ex() calls -- they are the record of the
+ * Android silence that made this necessary, including why "the device opened"
+ * was not the same question as "the device makes a sound".
+ *
  * ---------------------------------------------------------------------------
  * The impedance mismatch this file exists to solve
  *
@@ -284,11 +293,81 @@ esp_err_t sink_start(void) {
     cfg.periodSizeInFrames = (ma_uint32)kDevicePeriodFrames;
     cfg.dataCallback = data_callback;
 
-    /* NULL context: miniaudio picks the platform's default backend and the
-     * default output device. Choosing a device is a setting the app should
-     * own, not something to bake in here. */
-    if (ma_device_init(nullptr, &cfg, &g_device) != MA_SUCCESS) {
-        ESP_LOGE(TAG, "no audio device could be opened");
+    /* Every backend miniaudio was compiled with EXCEPT the null one, and that
+     * exclusion is the entire reason this list is built by hand.
+     *
+     * ma_device_init() with a null context calls ma_device_init_ex(), which
+     * walks the backends in priority order and keeps the first that opens the
+     * device. ma_backend_null is the last entry in that walk, and it is a
+     * device in every respect this code can test: it opens, it honours the
+     * sample rate, it calls the data callback on a timer, and it throws every
+     * frame away.
+     *
+     * That is what the standalone app got on Android. AAudio was refused the
+     * capture stream (no RECORD_AUDIO), OpenSL|ES was refused it for the same
+     * reason, and miniaudio returned MA_SUCCESS holding a silent device. Every
+     * layer above reported success -- audio_io never reached its own null-sink
+     * fallback, because nothing had failed -- and the synth rendered into
+     * nothing for as long as the app was open.
+     *
+     * Named backends turn that into an error the retry below can act on. Where
+     * there genuinely is no audio hardware, sink_start() now returns ESP_FAIL
+     * and audio_io installs its OWN null sink: the same silence, chosen and
+     * logged in the one place that knows to say so.
+     *
+     * Built rather than written out, because it has to track whatever this
+     * miniaudio was compiled with; ma_backend_null is documented as the last
+     * enumerator, so counting up to it is exactly "all the real ones". The
+     * default *device* is still miniaudio's to pick -- which output to use is
+     * a setting the app should own, not something to bake in here. */
+    ma_backend backends[ma_backend_null];
+    for (ma_uint32 i = 0; i < (ma_uint32)ma_backend_null; ++i) {
+        backends[i] = (ma_backend)i;
+    }
+
+    ma_result mr = ma_device_init_ex(backends, (ma_uint32)ma_backend_null,
+                                     nullptr, &cfg, &g_device);
+
+#if SYNTH_ENABLE_LINE_IN
+    /* Whether the device that opened has a capture half, and the whole reason
+     * there are two attempts here rather than one.
+     *
+     * A refused input must never cost the synth its output. On Android an app
+     * without RECORD_AUDIO is refused the capture stream, and miniaudio's
+     * AAudio backend opens the capture half of a duplex device FIRST -- so the
+     * playback stream is never even attempted and the whole device is refused.
+     * A working DAC would go silent behind a permission the synth does not
+     * need in order to make a sound. The same shape appears on macOS with the
+     * microphone refused in Settings, and on any machine whose default input
+     * was unplugged between boot and here.
+     *
+     * Note that this only became a *visible* refusal with the named backend
+     * list above. Before it, the walk carried on past the two real backends
+     * and handed back a null device, so nothing here ever ran.
+     *
+     * So: ask for both, and if that is refused ask for the output alone. What
+     * is lost is the line input, the vocoder's modulator and the granular
+     * capture -- audio_source_i2s_ready() answers false below and audio_io
+     * leaves `in.route` and `in.gain` registered and inert, which is already
+     * its behaviour for a device that was refused. Everything else plays. */
+    bool capture_up = (mr == MA_SUCCESS);
+    if (!capture_up) {
+        ESP_LOGW(TAG,
+                 "no capture device (%s); opening the output alone -- line "
+                 "input, vocoder and granular capture are off",
+                 ma_result_description(mr));
+        /* Reusing cfg: the init reads deviceType out of it, and every other
+         * field is the same request. The capture.* fields left set are ignored
+         * for a playback device. */
+        cfg.deviceType = ma_device_type_playback;
+        mr = ma_device_init_ex(backends, (ma_uint32)ma_backend_null, nullptr,
+                               &cfg, &g_device);
+    }
+#endif
+
+    if (mr != MA_SUCCESS) {
+        ESP_LOGE(TAG, "no audio device could be opened (%s)",
+                 ma_result_description(mr));
         return ESP_FAIL;
     }
 
@@ -322,9 +401,12 @@ esp_err_t sink_start(void) {
         /* Sized from the same two numbers, and starting EMPTY -- the opposite
          * of the playback ring, which starts primed. Nothing has been captured
          * yet, and priming this with silence would hand the renderer a block of
-         * nothing and call it input. */
+         * nothing and call it input.
+         *
+         * Zero frames where the capture half was refused above, which is what
+         * data_callback tests before it touches this at all. */
         std::lock_guard<std::mutex> cl(g_cap_mutex);
-        g_cap_frames = g_ring_frames;
+        g_cap_frames = capture_up ? g_ring_frames : 0;
         g_cap.assign(g_cap_frames * kChannels, 0);
         g_cap_read = 0;
         g_cap_count = 0;
@@ -334,8 +416,10 @@ esp_err_t sink_start(void) {
     g_device_up = true;
 #if SYNTH_ENABLE_LINE_IN
     /* Only now: a reader that arrived between init and here would find the
-     * buffer empty and count a starve for no reason. */
-    g_cap_open = true;
+     * buffer empty and count a starve for no reason. And never at all where
+     * the device that opened has no capture half -- audio_io reads this to
+     * decide whether the input exists. */
+    g_cap_open = capture_up;
 #endif
 
     /* The device's *actual* rate, which is not necessarily the one asked for:

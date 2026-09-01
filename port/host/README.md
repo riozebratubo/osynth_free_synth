@@ -267,8 +267,8 @@ the call — behaviour-identical everywhere.
 | Platform | Engine | Audio out | Audio in | MIDI in | Verified how |
 | --- | --- | --- | --- | --- | --- |
 | Windows x64 | yes | WASAPI | yes | WinMM | **built and run** |
-| Android arm64-v8a | yes | AAudio | yes | — | **built** (NDK 27, Clang) |
-| Android armeabi-v7a | yes | AAudio | yes | — | **built** (NDK 27, Clang) |
+| Android arm64-v8a | yes | AAudio | with `RECORD_AUDIO` | — | **built** (NDK 27, Clang) |
+| Android armeabi-v7a | yes | AAudio | with `RECORD_AUDIO` | — | **built** (NDK 27, Clang) |
 | Linux x64 | yes | ALSA/Pulse | yes | ALSA seq | not built here |
 | macOS | yes | CoreAudio | yes | CoreMIDI | not built here |
 | iOS | yes | CoreAudio | yes | — | not built here |
@@ -283,6 +283,39 @@ What is still unproven for Linux, macOS and iOS is the platform glue that has
 no Android equivalent -- the CoreAudio and ALSA link lines, and the iOS
 Objective-C requirement below. Those are written from miniaudio's own build
 notes rather than tested.
+
+**The sink names its backends, and never the null one.** `ma_device_init()` with
+a null context walks miniaudio's backends in priority order and keeps the first
+that opens the device -- and `ma_backend_null` is the last entry in that walk.
+It opens, it honours the sample rate, it calls the data callback on a timer, and
+it discards every frame. So a device that no real backend could open came back
+as `MA_SUCCESS`, `sink_start()` succeeded, `audio_io` never reached its own
+null-sink fallback because nothing had failed, and the engine rendered into
+nothing. `sink_start()` now passes an explicit list of every backend except that
+one, so "no device" is an error again and `audio_io` chooses -- and logs -- the
+silence itself.
+
+**Android needs `RECORD_AUDIO`, and must not need it to make a sound.** The
+engine opens one duplex device, and miniaudio's AAudio backend opens the capture
+half *first*, so an app without the permission is refused the whole device
+before the playback stream is ever attempted. That was the standalone APK: no
+permission declared, both real backends refused, and (see above) a null device
+handed back in their place. `sink_start()` now retries output-only when the
+duplex device is refused; the APK declares the permission and
+`App::startEmbeddedEngine()` requests it *before* the device is opened, because
+the answer arrives asynchronously and one that lands after `start()` would only
+take effect on the next launch. Refused, the app still plays: what is lost is
+the line input, the vocoder's modulator and the granular capture.
+
+**Android logging goes to logcat.** The runtime closes stderr, so the whole boot
+log -- including the line above about the device -- used to be formatted and
+discarded, which is why a silent app was also a silent diagnosis.
+`esp_sys_host.cpp` calls `__android_log_print` instead and keeps the IDF shape
+in the message, so:
+
+```
+adb logcat -s sink_ma audio_io osynth_host
+```
 
 **MIDI is Windows, macOS and Linux only.** RtMidi has no Android or iOS
 backend, so `OSYNTH_HOST_MIDI_IN` is 0 there and `midi_in_host.cpp` compiles to

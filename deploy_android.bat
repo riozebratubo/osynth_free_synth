@@ -43,6 +43,12 @@
 ::                     variable IS set, so this flag is about failing loudly
 ::                     rather than shipping an unsigned artifact by accident.
 ::   --aab             Also build the Play Store bundle (.aab).
+::   --standalone      Build the standalone app (OSYNTHO_EMBEDDED=ON): the synth
+::                     engine compiled in, no BLE. Its own package name
+::                     (org.osynth.osyntho.standalone), so it installs alongside
+::                     the controller instead of replacing it.
+::   --controller      Build the BLE controller (OSYNTHO_EMBEDDED=OFF),
+::                     package org.osynth.osyntho. This is the DEFAULT.
 ::   --check           Resolve and print the toolchain, then stop. Nothing is
 ::                     configured, built or deleted - use it to find out whether
 ::                     a machine can build the APK at all.
@@ -77,10 +83,13 @@ setlocal EnableExtensions EnableDelayedExpansion
 
 :: -- App identity -----------------------------------------------------------
 :: APP_NAME is the CMake project()/target name, and also android.app.lib_name in
-:: assets/android-build/AndroidManifest.xml. APP_FILE_BASE is the display-name
+:: assets/android-build/AndroidManifest.xml.in. APP_FILE_BASE is the display-name
 :: identity without spaces, used for artifact filenames (same as the Linux and
 :: macOS scripts, so releases line up).
 set "APP_NAME=osyntho"
+:: Defaults for the controller build. --standalone rewrites the last three
+:: below, once the arguments have been parsed: the two are separate Android
+:: packages precisely so that installing one does not remove the other.
 set "APP_DISPLAY_NAME=Osyntho"
 set "APP_FILE_BASE=Osyntho"
 set "APP_ID=org.osynth.osyntho"
@@ -110,6 +119,11 @@ if not defined QT_ANDROID_ABIS (
 :: so the artifact installs. A Release build without a keystore is unsigned and
 :: Android refuses it, which is a poor thing for a bare invocation to produce.
 set "BUILD_TYPE=Debug"
+:: OFF matches the CMake default: the controller is the build most people want,
+:: and it is the package already published. Passed explicitly all the same, so
+:: that the package name this script prints is the one the APK actually gets
+:: even when the build dir was last configured the other way round.
+set "EMBEDDED=OFF"
 set "DO_CHECK=0"
 set "DO_CLEAN=0"
 set "DO_AAB=0"
@@ -128,6 +142,8 @@ if /i "%~1"=="--clean"     ( set "DO_CLEAN=1"        & shift & goto :parse_args 
 if /i "%~1"=="--debug"     ( set "BUILD_TYPE=Debug"   & shift & goto :parse_args )
 if /i "%~1"=="--release"   ( set "BUILD_TYPE=Release" & shift & goto :parse_args )
 if /i "%~1"=="--aab"       ( set "DO_AAB=1"          & shift & goto :parse_args )
+if /i "%~1"=="--standalone" ( set "EMBEDDED=ON"      & shift & goto :parse_args )
+if /i "%~1"=="--controller" ( set "EMBEDDED=OFF"     & shift & goto :parse_args )
 if /i "%~1"=="--sign"      ( set "REQUIRE_SIGN=1"    & shift & goto :parse_args )
 if /i "%~1"=="--abis"      ( set "ABIS=%~2"          & shift & shift & goto :parse_args )
 if /i "%~1"=="--build-dir" ( set "BUILD_DIR=%~2"     & shift & shift & goto :parse_args )
@@ -140,6 +156,20 @@ goto :parse_args
 :args_done
 
 if not defined ABIS ( call :die "--abis was given an empty list" & exit /b 1 )
+
+:: -- Variant identity -------------------------------------------------------
+:: Mirrors the APP_ID / APP_DISPLAY_NAME derivation in
+:: app_osyntho\CMakeLists.txt. Kept in step with it by hand; the values are
+:: printed below, so a drift shows up before the build rather than as an
+:: install that refuses with a conflicting-provider error.
+if /i "!EMBEDDED!"=="ON" (
+    set "APP_ID=org.osynth.osyntho.standalone"
+    set "APP_DISPLAY_NAME=Osyntho Standalone"
+    set "APP_FILE_BASE=Osyntho-Standalone"
+    set "VARIANT=standalone - embedded synth engine"
+) else (
+    set "VARIANT=controller - BLE"
+)
 
 :: The first ABI selects the primary Qt kit, so it is the one that decides which
 :: android_* directory we configure against.
@@ -171,7 +201,13 @@ if not defined APP_VERSION set "APP_VERSION=0.0.0"
 :: Set at this point in the script, not with the other defaults, because
 :: APP_VERSION is only known once CMakeLists.txt has been read just above.
 if not defined OUTPUT_DIR set "OUTPUT_DIR=%SCRIPT_DIR%\private_releases\app!APP_VERSION!"
-if not defined BUILD_DIR  set "BUILD_DIR=%APP_SRC_DIR%\build\android-!ABI_TAG!-!BUILD_TYPE!"
+:: The variant is part of the default path. The two configurations differ in
+:: far more than a define -- one links Qt Bluetooth, the other compiles the
+:: whole synth engine -- so sharing a cache between them buys nothing and
+:: costs a package name silently left over from the previous run.
+set "VARIANT_TAG="
+if /i "!EMBEDDED!"=="ON" set "VARIANT_TAG=-standalone"
+if not defined BUILD_DIR  set "BUILD_DIR=%APP_SRC_DIR%\build\android-!ABI_TAG!-!BUILD_TYPE!!VARIANT_TAG!"
 
 :: Create it now rather than after the build: an unwritable output dir should
 :: cost a second, not a full multi-ABI compile. --check is exempt so that it
@@ -186,6 +222,7 @@ for %%i in ("!BUILD_DIR!")  do set "BUILD_DIR=%%~fi"
 
 call :step "Osyntho Android build"
 call :info "App          : !APP_DISPLAY_NAME! !APP_VERSION!"
+call :info "Variant      : !VARIANT!"
 call :info "Package      : !APP_ID!"
 call :info "ABIs         : !ABIS!   [primary: !PRIMARY_ABI!]"
 call :info "Build type   : !BUILD_TYPE!"
@@ -421,6 +458,10 @@ if defined QT_ANDROID_KEYSTORE_PATH (
 set "EXTRA_ARGS="
 if defined ANDROID_PLATFORM set "EXTRA_ARGS=!EXTRA_ARGS! "-DANDROID_PLATFORM=!ANDROID_PLATFORM!""
 if defined SDK_BUILD_TOOLS  set "EXTRA_ARGS=!EXTRA_ARGS! "-DQT_ANDROID_SDK_BUILD_TOOLS_REVISION=!SDK_BUILD_TOOLS!""
+:: Always passed, never left to the CMake default: an existing build dir would
+:: otherwise keep whatever OSYNTHO_EMBEDDED its cache already holds, and the
+:: package name reported above would be a guess.
+set "EXTRA_ARGS=!EXTRA_ARGS! "-DOSYNTHO_EMBEDDED=!EMBEDDED!""
 
 :: -- --check: stop before touching anything ---------------------------------
 :: Everything above only reads. Stopping here answers "is this machine set up to
@@ -635,6 +676,8 @@ echo   --debug           Debug build - debug-signed, installs directly [DEFAULT]
 echo   --release         Release build - unsigned unless a keystore is configured
 echo   --sign            Fail unless QT_ANDROID_KEYSTORE_PATH ^& co. are set
 echo   --aab             Also build the Play Store .aab bundle
+echo   --standalone      Embedded synth engine, package org.osynth.osyntho.standalone
+echo   --controller      BLE controller, package org.osynth.osyntho [DEFAULT]
 echo   --check           Print the resolved toolchain and stop - builds nothing
 echo   --clean           Wipe the build dir first
 echo   --build-dir DIR   Build tree location
