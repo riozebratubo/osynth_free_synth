@@ -393,8 +393,18 @@ Item {
                             Material.background: strip.armed
                                     ? (UI.samplerRecording ? "#c62828" : "#ef6c00")
                                     : undefined
+                            // Whether THIS press opened a take. Local, like
+                            // the pad strip's recPoint, and for the same
+                            // reason: UI.samplerRecording mirrors smp.state
+                            // telemetry, which lags the press by a BLE round
+                            // trip — gating the stop on it meant a tap
+                            // quicker than that round trip started a take
+                            // the release then failed to stop, and the
+                            // recorder ran to its smp.maxsec ceiling.
+                            property bool recordingHere: false
                             onPressed: {
                                 if (UI.padAction === "record") {
+                                    recordingHere = true
                                     UI.startRecordInto(strip.slot)
                                 } else if (UI.padAction === "erase") {
                                     UI.erasePad(strip.slot)
@@ -403,8 +413,23 @@ Item {
                                 }
                             }
                             onReleased: {
-                                if (UI.samplerRecording && strip.armed) UI.stopRecord()
-                                else if (strip.filled) Synth.releaseDrum(strip.slot)
+                                if (recordingHere) {
+                                    recordingHere = false
+                                    UI.stopRecord()
+                                } else if (strip.filled) {
+                                    Synth.releaseDrum(strip.slot)
+                                }
+                            }
+                            // A drag off the button ends the gesture too —
+                            // without this, a take opened here ran to the
+                            // ceiling, and a held gate pad stayed sounding.
+                            onCanceled: {
+                                if (recordingHere) {
+                                    recordingHere = false
+                                    UI.stopRecord()
+                                } else if (strip.filled) {
+                                    Synth.releaseDrum(strip.slot)
+                                }
                             }
                             contentItem: Column {
                                 spacing: 0

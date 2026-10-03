@@ -450,10 +450,19 @@ Rectangle {
                 // recording follows the button, not the position.
                 if (p.pointId === mpta.recPoint) continue
                 const slot = mpta.padAt(p.x, p.y)
+                const prev = mpta.pointSlots[p.pointId]
+                // A point that left its pad lets go of it — crossing into
+                // another pad or sliding off the grid alike. On a one-shot
+                // this is a firmware no-op, but a gate or loop pad (S44)
+                // sustains until released, and this used to be dropped on
+                // both paths: the roll fired the new pad and left the old
+                // one sounding forever, and onReleased could not catch it
+                // because the slot was already gone from pointSlots.
+                if (prev !== undefined && prev !== slot) Synth.releaseDrum(prev)
                 if (slot < 0) continue
                 m[p.pointId] = slot
                 // Only fire when a point crosses into a different pad.
-                if (mpta.pointSlots[p.pointId] !== slot) {
+                if (prev !== slot) {
                     root.hit(slot, root.velocityAt(mpta.fractionInPad(p.y)))
                 }
             }
@@ -509,6 +518,13 @@ Rectangle {
         target: App
         function onComputerDrumPadPressed(pad: int): void {
             root.hit(pad, root.baseVelocity)
+        }
+        // The key-up. A gate or loop pad (S44 play modes) sustains until this
+        // arrives — without it a pad fired from the keys played forever. Sent
+        // unconditionally: on a one-shot, or a pad the hit above skipped as
+        // empty, releaseDrum is a firmware no-op.
+        function onComputerDrumPadReleased(pad: int): void {
+            Synth.releaseDrum(pad)
         }
     }
 }

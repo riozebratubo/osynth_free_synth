@@ -738,7 +738,15 @@ bool App::eventFilter(QObject* watched, QEvent* event) {
       // filter both sounded a note and swallowed the shortcut app-wide.
       // Shift is deliberately let through: it is not a shortcut on its own,
       // and holding it while playing must not go silent.
-      if (ke->modifiers() & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier))
+      //
+      // Presses only. A release can only ever END a note or a pad, and
+      // dropping it is what stranded one: press C, press Ctrl, release C
+      // left the note sounding with the shortcut untouched (the shortcut
+      // acted on its own press). The release of a key whose press went
+      // through as a shortcut sends a note-off nothing answers to, which is
+      // harmless.
+      if (t == QEvent::KeyPress and
+          (ke->modifiers() & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier)))
         return QObject::eventFilter(watched, event);
       // Checked first, and it fully shadows the upper octave's keys: with the
       // setting on, Q..I and the number row must not also emit semitones.
@@ -746,9 +754,14 @@ bool App::eventFilter(QObject* watched, QEvent* event) {
         const int pad = drumPadForKey(ke->key());
         if (pad >= 0) {
           if (not ke->isAutoRepeat()) {
-            // A drum is a one-shot: there is no release to send. Auto-repeat
-            // is dropped rather than machine-gunning the pad.
+            // Auto-repeat is dropped rather than machine-gunning the pad —
+            // and on X11, where a held key autorepeats as release/press
+            // pairs, dropping the repeat RELEASE is what keeps a held gate
+            // pad held. The real release goes out since S44: a gate or loop
+            // pad sustains until it is let go (see the signal's comment in
+            // app.h), and on a one-shot it is a firmware no-op.
             if (t == QEvent::KeyPress) emit computerDrumPadPressed(pad);
+            else emit computerDrumPadReleased(pad);
           }
           return true;
         }

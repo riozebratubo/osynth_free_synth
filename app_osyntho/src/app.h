@@ -226,8 +226,13 @@ class App final : public QObject {
   void computerKeyPressed(int semitone);
   void computerKeyReleased(int semitone);
   // A top-row key mapped to a drum pad (0..15), when keyboard_top_row_drums
-  // is on. One-shot: there is no matching release.
+  // is on. The release matters since S44: a pad whose play mode is gate or
+  // loop sustains until it is let go (drums.cpp holds env_coef at 1.0 until
+  // drums_release()), so a press with no matching release left it sounding
+  // forever. On the one-shot pads that made "a drum has no note-off" true,
+  // the release is a firmware no-op, so it is always sent.
   void computerDrumPadPressed(int pad);
+  void computerDrumPadReleased(int pad);
   // Focus moved into a text field, so the key-up of anything held right then
   // goes to the field instead of here. Asks the Keyboard to drop what is
   // sounding rather than leave a stranded note.
