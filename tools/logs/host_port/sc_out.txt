@@ -1,0 +1,10 @@
+
+data: C:\Users\rioze\AppData\Local\osynth
+sink: host
+
+-- checking --
+  master.volume: 0.42  OK
+  preset slot 48: hosttest
+  osc2.semi restored: 0.0  FAIL (expected 7.0)
+
+  STORAGE FAULT

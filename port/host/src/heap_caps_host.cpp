@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <new>
+#include <stdlib.h> /* posix_memalign: a POSIX C function, not guaranteed by <cstdlib> */
 
 namespace {
 
@@ -75,8 +76,16 @@ void* aligned_take(size_t bytes) {
 #if defined(_MSC_VER)
     return _aligned_malloc(bytes, kAlign);
 #else
-    /* aligned_alloc requires a size that is a multiple of the alignment. */
-    return std::aligned_alloc(kAlign, (bytes + kAlign - 1) / kAlign * kAlign);
+    /* posix_memalign rather than std::aligned_alloc: Android's Bionic only
+     * gained aligned_alloc at API 28, and the NDK's libc++ using-declaration
+     * for it is `using_if_exists`, so at this app's minSdk 24 the symbol
+     * simply is not there and the file fails to compile. posix_memalign has
+     * been in Bionic since API 21 and needs no size-is-a-multiple-of-alignment
+     * rounding of its own (glibc/Bionic both round internally), so this also
+     * drops the +kAlign-1 arithmetic the aligned_alloc call needed. */
+    void* p = nullptr;
+    if (posix_memalign(&p, kAlign, bytes) != 0) return nullptr;
+    return p;
 #endif
 }
 

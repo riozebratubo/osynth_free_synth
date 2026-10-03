@@ -1,0 +1,13 @@
+
+data: C:\Users\rioze\AppData\Local\osynth
+sink: host
+
+-- writing --
+  osc2.semi = 1.0
+  master.volume = 0.42
+  persist_save_now: ESP_OK
+  presets_request_save(0, 48): ESP_OK
+  presets_state_save_now: ESP_OK
+  kit save requested
+
+  now run:  osynth_host_demo --storage-check

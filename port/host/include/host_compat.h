@@ -72,7 +72,7 @@
  * Declared as a function rather than a macro so it cannot capture an
  * unparenthesised argument, and so the name still resolves if something takes
  * its address. */
-#ifndef __builtin_ctz
+#if !defined(__builtin_ctz) && !defined(__clang__)   /* clang-cl has the builtins */
 #include <intrin.h>
 
 static inline int __builtin_ctz(unsigned int x) {
@@ -89,7 +89,7 @@ static inline int __builtin_ctz(unsigned int x) {
  * That is fine for the callers here (none is in the render path, and every
  * x64 CPU this port targets has SSE4.2), but the fallback is written out
  * anyway rather than assuming: it is four instructions on a cold path. */
-#ifndef __builtin_popcount
+#if !defined(__builtin_popcount) && !defined(__clang__)   /* clang-cl has the builtins */
 #include <intrin.h>
 #include <isa_availability.h>
 

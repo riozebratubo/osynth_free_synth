@@ -1,0 +1,15 @@
+
+data: C:\Users\rioze\AppData\Local\osynth
+sink: host
+engine: subtractive
+
+  note  60  peak 0.013
+  note  64  peak 0.013
+  note  67  peak 0.013
+  note  72  peak 0.013
+  note  67  peak 0.013
+  note  64  peak 0.013
+  chord 60/64/67
+
+  blocks 1460 | underruns 0 | sink starves 0 | sink errors 0
+  dsp load 0.4% (peak 1.0%) | out peak 0.03 | soft clips 0

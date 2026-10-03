@@ -930,7 +930,10 @@ inline QByteArray payloadKitRename(int kit, const QString& name) {
   QByteArray p;
   appendU8(p, 1);
   appendU8(p, quint8(kit));
-  p.append(name.toUtf8().left(23));
+  // utf8Clamped, not toUtf8().left(): see its comment — a byte-boundary cut
+  // splits a code point, and the firmware hands the half sequence back as
+  // U+FFFD on the next listing.
+  p.append(utf8Clamped(name, 23));
   return p;
 }
 inline QByteArray payloadKitPadRename(int kit, int slot, const QString& name) {
@@ -938,7 +941,7 @@ inline QByteArray payloadKitPadRename(int kit, int slot, const QString& name) {
   appendU8(p, 2);
   appendU8(p, kit < 0 ? 0xFF : quint8(kit));
   appendU8(p, quint8(slot));
-  p.append(name.toUtf8().left(11));
+  p.append(utf8Clamped(name, 11));
   return p;
 }
 

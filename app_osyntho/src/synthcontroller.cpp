@@ -1171,6 +1171,21 @@ void SynthController::handleFrame(const Frame& f) {
       handleLoopDumpStatus(f.status);
       return;
     }
+    if (f.requestOp() == OP_GRAPH_EDIT) {
+      // GRAPH_EDIT's status byte carries its own refusal codes — 3 "no
+      // whole-model sub-op", 4 "too expensive", 5 "that cable would make a
+      // loop" — which collide with ST_BAD_ARG, ST_UNSUPPORTED and ST_BUSY.
+      // Routed here, before the generic BUSY/reject paths below, so a refused
+      // edit reaches handleGraphEdit(), which reads the byte's real meaning:
+      // it shows the banner, rolls the canvas back with a model re-read, and
+      // falls back to the node-by-node push when older firmware refuses
+      // sub-op 3. Left to the paths below, a cycle refusal was resent as if
+      // the link were merely busy, every other refusal was dropped with only
+      // a log line, and all of handleGraphEdit's error handling was dead code.
+      forgetRequest(f.seq);
+      handleGraphEdit(f.payload, f.status);
+      return;
+    }
     if (f.requestOp() == OP_SET_PARAM && f.status == ST_BUSY) {
       // The firmware's command queue overflowed and dropped this frame. It is
       // the only feedback a write-without-response ever gets, and ignoring it
@@ -3380,6 +3395,12 @@ void SynthController::setPatternField(const QString& field, double value) {
   } else {
     return;
   }
+  // The cached pattern config moved, and the echo suppression above means no
+  // re-read will announce it — so tell the bindings here, the way
+  // setTrackField() does. Without this, a second view of patternConfig (the
+  // sequencer grid's scale shading, say) stayed on the old value until the
+  // next pattern switch forced a refresh.
+  emit trackConfigChanged();
   send(OP_SEQ_PATTERN,
        payloadSeqSetPattern(m_editPattern, m_patternLength, m_patternScale,
                             m_patternRoot, m_patternSwing, m_patternName),
@@ -3392,6 +3413,7 @@ void SynthController::setPatternName(const QString& name) {
   // caching a name longer than the one actually sent made the field snap back
   // on the next read of the pattern.
   m_patternName = QString::fromUtf8(utf8Clamped(name, 11));
+  emit trackConfigChanged();  // same reason as setPatternField()
   send(OP_SEQ_PATTERN,
        payloadSeqSetPattern(m_editPattern, m_patternLength, m_patternScale,
                             m_patternRoot, m_patternSwing, m_patternName),

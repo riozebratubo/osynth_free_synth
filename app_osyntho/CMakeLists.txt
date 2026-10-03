@@ -20,7 +20,7 @@ option(BLE_DIRECT_CONNECT "Skip BLE scan and connect directly by address on Wind
 # Off by default: the normal osyntho is a controller for the instrument, and
 # that is the build most people want. Configure with -DOSYNTHO_EMBEDDED=ON for
 # the standalone one.
-option(OSYNTHO_EMBEDDED "Embed the synth engine and run standalone" ON)
+option(OSYNTHO_EMBEDDED "Embed the synth engine and run standalone" OFF)
 
 # change the values here
 # NOTE: intentional — these normal-variable set()s shadow the cache options
